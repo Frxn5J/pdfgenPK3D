@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  catalog:
+    build: .
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - catalog_data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-Frxn5J}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
+
+volumes:
+  catalog_data:

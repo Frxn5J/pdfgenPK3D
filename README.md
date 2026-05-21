@@ -1,0 +1,69 @@
+# PIXKEY3D Catalog Generator
+
+Un sistema completo para generar y administrar un catálogo de productos de impresión 3D, incluyendo configuración de precios por volumen y generación amigable para impresión/PDF.
+
+## Requisitos
+
+- [Bun](https://bun.sh) (v1.0+)
+
+## Instalación y Ejecución Local
+
+1. Instalar dependencias:
+   ```bash
+   bun install
+   ```
+
+2. Iniciar el servidor:
+   ```bash
+   bun run index.ts
+   ```
+
+El servidor iniciará en `http://localhost:3000`.
+
+La base de datos SQLite y las imágenes subidas se guardarán automáticamente en la carpeta `data/` que se crea al iniciar.
+
+## Administración
+
+- **URL:** `http://localhost:3000/admin`
+- **Usuario por defecto:** `Frxn5J`
+
+La contraseña se configura con la variable de entorno `ADMIN_PASSWORD`. Por seguridad no se versiona una contraseña real en GitHub.
+
+Para local, copia `.env.example` a `.env` y define tus valores:
+
+```bash
+ADMIN_USERNAME=Frxn5J
+ADMIN_PASSWORD=tu_contraseña
+SESSION_SECRET=un_string_largo_y_aleatorio
+```
+
+## Personalización Visual
+
+Desde `Admin > Configuración` puedes modificar la identidad visual del catálogo sin tocar código:
+
+- Nombre, logo, subtítulo de portada y título de productos.
+- Colores de marca: primario, secundario y acento.
+- Fondos y colores por sección: portada, bienvenida, productos, contacto, tarjetas y tablas.
+- Tipografías para textos y encabezados.
+- Carga de archivos de fuente para textos y encabezados (`.woff`, `.woff2`, `.ttf`, `.otf`).
+- Redondeos, sombras, estilo de tarjetas, densidad del layout y ajuste de imágenes.
+- Formas decorativas: activar/desactivar, tipo, color, opacidad y blur.
+- CSS personalizado avanzado para agregar reglas, fondos, pseudo-elementos, formas y ajustes de impresión.
+
+Todas estas opciones se guardan en SQLite dentro de la tabla `config`.
+
+## Despliegue con Docker / Coolify
+
+El proyecto incluye un `Dockerfile` y un `docker-compose.yml` listos para usar, ideales para plataformas como Coolify.
+
+**Variables de entorno recomendadas para producción:**
+- `NODE_ENV=production`
+- `ADMIN_USERNAME=tu_usuario`
+- `ADMIN_PASSWORD=tu_contraseña_segura` *(obligatoria)*
+- `SESSION_SECRET=un_string_largo_y_aleatorio`
+
+**Persistencia de datos:**
+El contenedor utiliza un volumen montado en `/app/data`. Asegúrate de que tu plataforma de despliegue (Coolify) mantenga este volumen para no perder los datos de SQLite (`catalog.sqlite`) ni las imágenes subidas (`/app/data/uploads`).
+
+## Funciones de PDF
+La vista pública del catálogo (`/`) cuenta con un botón en la esquina superior derecha que permite imprimir el catálogo. El sistema utiliza reglas CSS (`@media print`) para optimizar la vista de impresión, forzando saltos de página y ocultando elementos de interfaz innecesarios. Desde el diálogo de impresión de cualquier navegador moderno, puedes elegir "Guardar como PDF".
