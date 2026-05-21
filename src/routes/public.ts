@@ -235,12 +235,13 @@ publicRoutes.get("/", (c) => {
   const config = getConfig();
   const defaultPriceTiers = getDefaultPriceTiers();
   const products = getProducts();
+  const isEmbeddedPreview = c.req.query("embed") === "1";
 
   const content = `
-    <div class="action-bar no-print">
+    ${isEmbeddedPreview ? "" : `<div class="action-bar no-print">
         <button onclick="window.print()" class="theme-button" type="button">Imprimir / PDF</button>
         <a href="/admin" class="admin-link">Admin</a>
-    </div>
+    </div>`}
 
     <section class="page-section cover-section page-break">
         ${renderShapes(config)}

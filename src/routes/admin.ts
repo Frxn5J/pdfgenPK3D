@@ -151,7 +151,34 @@ adminRoutes.get("/config", (c) => {
   return c.html(AdminLayout("Configuración", `
     <div class="bg-white shadow rounded-lg p-6 mb-6">
         <h2 class="text-xl font-bold mb-4">Configuración General</h2>
+        <p class="text-sm text-gray-500 mb-6">Edita los datos del catálogo y usa la vista previa para probar CSS personalizado antes de guardar.</p>
         <form action="/admin/config" method="post" enctype="multipart/form-data" class="space-y-6">
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start mb-8">
+                <div class="border border-gray-200 rounded-lg bg-gray-50 p-4">
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-900">Vista previa del documento</h3>
+                            <p class="text-xs text-gray-500">Muestra el catálogo guardado. El CSS personalizado se aplica en vivo mientras escribes.</p>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <button type="button" id="preview-desktop" class="px-3 py-2 text-xs font-medium rounded-md bg-white border border-gray-300 hover:bg-gray-100">Desktop</button>
+                            <button type="button" id="preview-mobile" class="px-3 py-2 text-xs font-medium rounded-md bg-white border border-gray-300 hover:bg-gray-100">Móvil</button>
+                            <button type="button" id="preview-refresh" class="px-3 py-2 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">Recargar</button>
+                        </div>
+                    </div>
+                    <div id="preview-frame-shell" class="mx-auto w-full overflow-hidden rounded-lg border border-gray-300 bg-white shadow-inner" style="height: 720px; max-width: 100%;">
+                        <iframe id="catalog-preview" src="/?embed=1" class="h-full w-full bg-white" title="Vista previa del catálogo"></iframe>
+                    </div>
+                </div>
+
+                <div class="border border-gray-200 rounded-lg bg-gray-50 p-4 xl:sticky xl:top-6">
+                    <label for="custom-css-editor" class="block text-sm font-semibold text-gray-900">CSS Personalizado de la Vista Previa</label>
+                    <p class="text-xs text-gray-500 mt-1 mb-3">Este CSS se aplica en vivo al documento de la izquierda y se guarda como parte del tema.</p>
+                    <textarea id="custom-css-editor" name="custom_css" rows="26" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm leading-5" placeholder="/* Escribe aquí tus estilos para el catálogo */">${configValue(config, "custom_css")}</textarea>
+                    <p class="text-xs text-gray-500 mt-3">Ejemplo: <code>.cover-section { background: #fff; }</code> o <code>.theme-card { border-radius: 32px; }</code></p>
+                </div>
+            </div>
+
             <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Nombre de la Empresa</label>
@@ -359,17 +386,49 @@ adminRoutes.get("/config", (c) => {
                 </div>
             </div>
 
-            <div class="mt-6">
-                <label class="block text-sm font-medium text-gray-700">CSS Personalizado (Avanzado)</label>
-                <textarea name="custom_css" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" placeholder="/* Añade tus propias reglas CSS aquí */">${configValue(config, "custom_css")}</textarea>
-                <p class="text-xs text-gray-500 mt-2">Este CSS se inyecta al catálogo público después del tema. Puedes agregar clases, pseudo-elementos, fondos, formas y reglas de impresión.</p>
-            </div>
-
             <div class="pt-4 border-t">
                 <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Guardar Configuración</button>
             </div>
         </form>
     </div>
+    <script>
+      (() => {
+        const editor = document.getElementById('custom-css-editor');
+        const frame = document.getElementById('catalog-preview');
+        const shell = document.getElementById('preview-frame-shell');
+        const refresh = document.getElementById('preview-refresh');
+        const desktop = document.getElementById('preview-desktop');
+        const mobile = document.getElementById('preview-mobile');
+
+        const applyCss = () => {
+          if (!editor || !frame || !frame.contentDocument) return;
+          const doc = frame.contentDocument;
+          let style = doc.getElementById('admin-live-custom-css');
+          if (!style) {
+            style = doc.createElement('style');
+            style.id = 'admin-live-custom-css';
+            doc.head.appendChild(style);
+          }
+          style.textContent = editor.value || '';
+        };
+
+        frame?.addEventListener('load', applyCss);
+        editor?.addEventListener('input', applyCss);
+        refresh?.addEventListener('click', () => {
+          if (frame?.contentWindow) frame.contentWindow.location.reload();
+        });
+        desktop?.addEventListener('click', () => {
+          if (!shell) return;
+          shell.style.maxWidth = '100%';
+          shell.style.height = '720px';
+        });
+        mobile?.addEventListener('click', () => {
+          if (!shell) return;
+          shell.style.maxWidth = '390px';
+          shell.style.height = '720px';
+        });
+      })();
+    </script>
   `));
 });
 

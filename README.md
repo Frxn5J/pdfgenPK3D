@@ -48,7 +48,8 @@ Desde `Admin > Configuración` puedes modificar la identidad visual del catálog
 - Carga de archivos de fuente para textos y encabezados (`.woff`, `.woff2`, `.ttf`, `.otf`).
 - Redondeos, sombras, estilo de tarjetas, densidad del layout y ajuste de imágenes.
 - Formas decorativas: activar/desactivar, tipo, color, opacidad y blur.
-- CSS personalizado avanzado para agregar reglas, fondos, pseudo-elementos, formas y ajustes de impresión.
+- Vista previa del documento dentro del admin, con modo desktop/móvil.
+- CSS personalizado avanzado junto a la vista previa, aplicado en vivo antes de guardar.
 
 Todas estas opciones se guardan en SQLite dentro de la tabla `config`.
 
