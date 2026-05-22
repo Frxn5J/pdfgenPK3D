@@ -36,10 +36,17 @@ export function initDb() {
       name TEXT NOT NULL,
       description TEXT,
       image_url TEXT,
+      makerworld_url TEXT,
       use_default_pricing BOOLEAN DEFAULT 1,
       sort_order INTEGER DEFAULT 0
     )
   `);
+
+  try {
+    db.run(`ALTER TABLE products ADD COLUMN makerworld_url TEXT`);
+  } catch {
+    // Column already exists in databases initialized with the current schema.
+  }
 
   db.run(`
     CREATE TABLE IF NOT EXISTS product_price_tiers (
@@ -92,6 +99,150 @@ export function initDb() {
       FOREIGN KEY (quote_id) REFERENCES quotes(id) ON DELETE CASCADE
     )
   `);
+
+  // Extra tables for printer and filament settings
+  db.run(`
+    CREATE TABLE IF NOT EXISTS printers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      power_cost_per_hour REAL NOT NULL
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS filaments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      color TEXT NOT NULL,
+      price_per_kg REAL NOT NULL
+    )
+  `);
+
+  // Try migrating product table with printing fields
+  try {
+    db.run(`ALTER TABLE products ADD COLUMN filament_grams REAL DEFAULT 0`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE products ADD COLUMN print_time_mins INTEGER DEFAULT 0`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE products ADD COLUMN extra_costs REAL DEFAULT 0`);
+  } catch {}
+
+  // Try migrating quotes table with scheduling fields
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN payment_proof_url TEXT`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN printer_id INTEGER`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN filament_id INTEGER`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN scheduled_start TEXT`);
+  } catch {}
+
+  // Migrate quotes: add final payment proof
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN payment_proof_url_final TEXT`);
+  } catch {}
+
+  // Junction table: multiple filaments per quote with grams used
+  db.run(`
+    CREATE TABLE IF NOT EXISTS quote_filaments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      quote_id INTEGER NOT NULL,
+      filament_id INTEGER NOT NULL,
+      grams_used REAL NOT NULL DEFAULT 0,
+      FOREIGN KEY (quote_id) REFERENCES quotes(id) ON DELETE CASCADE,
+      FOREIGN KEY (filament_id) REFERENCES filaments(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Migrate filaments: add stock_grams
+  try {
+    db.run(`ALTER TABLE filaments ADD COLUMN stock_grams REAL NOT NULL DEFAULT 1000`);
+  } catch {}
+
+  // Migrate printers: add monthly_cost and prints_per_month
+  try {
+    db.run(`ALTER TABLE printers ADD COLUMN monthly_cost REAL NOT NULL DEFAULT 0`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE printers ADD COLUMN prints_per_month INTEGER NOT NULL DEFAULT 1`);
+  } catch {}
+
+  // Seed default printer and filament if empty
+  try {
+    const pCount = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM printers`).get()?.count || 0;
+    if (pCount === 0) {
+      db.run(`INSERT INTO printers (name, power_cost_per_hour) VALUES ('Ender 3 V3', 1.80)`);
+      db.run(`INSERT INTO printers (name, power_cost_per_hour) VALUES ('Bambu Lab P1S', 2.40)`);
+    }
+    const fCount = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM filaments`).get()?.count || 0;
+    if (fCount === 0) {
+      db.run(`INSERT INTO filaments (color, price_per_kg) VALUES ('PLA Negro', 380.00)`);
+      db.run(`INSERT INTO filaments (color, price_per_kg) VALUES ('PLA Rojo', 420.00)`);
+    }
+  } catch {}
+
+  // Finance module tables
+  db.run(`
+    CREATE TABLE IF NOT EXISTS expense_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      icon TEXT DEFAULT '',
+      sort_order INTEGER DEFAULT 0
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category_id INTEGER,
+      description TEXT NOT NULL,
+      amount REAL NOT NULL,
+      date TEXT NOT NULL,
+      payment_method TEXT DEFAULT '',
+      receipt_url TEXT,
+      notes TEXT,
+      recurring INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (category_id) REFERENCES expense_categories(id) ON DELETE SET NULL
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      quote_id INTEGER,
+      amount REAL NOT NULL,
+      payment_method TEXT NOT NULL DEFAULT 'transferencia',
+      reference TEXT,
+      date TEXT NOT NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (quote_id) REFERENCES quotes(id) ON DELETE SET NULL
+    )
+  `);
+
+  // Seed default expense categories if empty
+  try {
+    const ecCount = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM expense_categories`).get()?.count || 0;
+    if (ecCount === 0) {
+      const insertCat = db.prepare(`INSERT INTO expense_categories (name, icon, sort_order) VALUES (?, ?, ?)`);
+      insertCat.run("Material / Filamento", "🧵", 1);
+      insertCat.run("Envíos", "📦", 2);
+      insertCat.run("Electricidad", "⚡", 3);
+      insertCat.run("Equipo / Mantenimiento", "🔧", 4);
+      insertCat.run("Servicios (Internet, Software)", "💻", 5);
+      insertCat.run("Marketing / Publicidad", "📣", 6);
+      insertCat.run("Impuestos / SAT", "🏛️", 7);
+      insertCat.run("Renta / Local", "🏠", 8);
+      insertCat.run("Nómina / Sueldos", "👤", 9);
+      insertCat.run("Otros", "📋", 10);
+    }
+  } catch {}
 
   // Seed default configuration
   const defaultWelcome = `Bienvenido a PIXKEY3D\nFabricamos productos personalizados con tecnología de impresión 3D de alta precisión. Cada pieza se produce bajo pedido con los mejores materiales del mercado. Ofrecemos precios especiales por volumen para revendedores, empresas y mayoristas.\n\n¿Cómo hacer tu pedido?\n1 Elige tus productos Selecciona del catálogo los productos y la cantidad deseada ->\n2 Solicita tu cotización Envíanos tu pedido por WhatsApp o email y te respondemos en minutos ->\n3 Recibe tu pedido Enviamos a domicilio en todo México según el volumen de tu pedido`;
@@ -212,6 +363,10 @@ export interface Product {
   name: string;
   description: string | null;
   image_url: string | null;
+  makerworld_url: string | null;
+  filament_grams: number;
+  print_time_mins: number;
+  extra_costs: number;
   use_default_pricing: boolean;
   sort_order: number;
 }
@@ -275,6 +430,11 @@ export interface Quote {
   shipping_free_threshold: number | null;
   grand_total: number;
   status: string;
+  payment_proof_url: string | null;
+  payment_proof_url_final: string | null;
+  printer_id: number | null;
+  filament_id: number | null;
+  scheduled_start: string | null;
   whatsapp_number: string | null;
   message: string | null;
   created_at: string;
@@ -344,14 +504,345 @@ export function updateQuoteMessage(id: number, message: string) {
   db.run(`UPDATE quotes SET message = ? WHERE id = ?`, [message, id]);
 }
 
+export function updateQuoteStatus(id: number, status: string) {
+  db.run(`UPDATE quotes SET status = ? WHERE id = ?`, [status, id]);
+}
+
 export function getQuotes(limit = 100) {
   return db.query<Quote, [number]>(`
     SELECT * FROM quotes ORDER BY id DESC LIMIT ?
   `).all(limit);
 }
 
+export function getQuote(id: number) {
+  return db.query<Quote, [number]>(`
+    SELECT * FROM quotes WHERE id = ?
+  `).get(id);
+}
+
 export function getQuoteItems(quoteId: number) {
   return db.query<QuoteItem, [number]>(`
     SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id ASC
   `).all(quoteId);
+}
+
+export type QuoteItemWithProduct = QuoteItem & {
+  product_image_url: string | null;
+  product_makerworld_url: string | null;
+  product_description: string | null;
+  product_filament_grams: number | null;
+  product_print_time_mins: number | null;
+  product_extra_costs: number | null;
+};
+
+export function getQuoteItemsWithProducts(quoteId: number) {
+  return db.query<QuoteItemWithProduct, [number]>(`
+    SELECT
+      qi.*,
+      p.image_url AS product_image_url,
+      p.makerworld_url AS product_makerworld_url,
+      p.description AS product_description,
+      p.filament_grams AS product_filament_grams,
+      p.print_time_mins AS product_print_time_mins,
+      p.extra_costs AS product_extra_costs
+    FROM quote_items qi
+    LEFT JOIN products p ON p.id = qi.product_id
+    WHERE qi.quote_id = ?
+    ORDER BY qi.id ASC
+  `).all(quoteId);
+}
+
+export function updateQuotePaymentProof(id: number, paymentProofUrl: string) {
+  db.run(`UPDATE quotes SET payment_proof_url = ?, status = 'produccion' WHERE id = ?`, [paymentProofUrl, id]);
+}
+
+export function updateQuoteScheduler(id: number, printerId: number | null, scheduledStart: string | null) {
+  db.run(`
+    UPDATE quotes
+    SET printer_id = ?, scheduled_start = ?
+    WHERE id = ?
+  `, [printerId, scheduledStart, id]);
+}
+
+// Printer settings helpers
+export interface Printer {
+  id: number;
+  name: string;
+  power_cost_per_hour: number;
+  monthly_cost: number;
+  prints_per_month: number;
+}
+
+export function getPrinters() {
+  return db.query<Printer, []>(`SELECT * FROM printers ORDER BY id ASC`).all();
+}
+
+export function createPrinter(name: string, powerCostPerHour: number, monthlyCost: number, printsPerMonth: number) {
+  db.run(`INSERT INTO printers (name, power_cost_per_hour, monthly_cost, prints_per_month) VALUES (?, ?, ?, ?)`, [name, powerCostPerHour, monthlyCost, printsPerMonth]);
+}
+
+export function deletePrinter(id: number) {
+  db.run(`DELETE FROM printers WHERE id = ?`, [id]);
+}
+
+// Filament settings helpers
+export interface Filament {
+  id: number;
+  color: string;
+  price_per_kg: number;
+  stock_grams: number;
+}
+
+export function getFilaments() {
+  return db.query<Filament, []>(`SELECT * FROM filaments ORDER BY id ASC`).all();
+}
+
+export function createFilament(color: string, pricePerKg: number, stockGrams: number) {
+  db.run(`INSERT INTO filaments (color, price_per_kg, stock_grams) VALUES (?, ?, ?)`, [color, pricePerKg, stockGrams]);
+}
+
+export function deleteFilament(id: number) {
+  db.run(`DELETE FROM filaments WHERE id = ?`, [id]);
+}
+
+export function subtractFilamentStock(filamentId: number, grams: number) {
+  db.run(`UPDATE filaments SET stock_grams = MAX(0, stock_grams - ?) WHERE id = ?`, [grams, filamentId]);
+}
+
+// Quote filaments (multi-filament per quote)
+export interface QuoteFilament {
+  id: number;
+  quote_id: number;
+  filament_id: number;
+  grams_used: number;
+}
+
+export type QuoteFilamentWithDetails = QuoteFilament & {
+  color: string;
+  price_per_kg: number;
+};
+
+export function getQuoteFilaments(quoteId: number): QuoteFilamentWithDetails[] {
+  return db.query<QuoteFilamentWithDetails, [number]>(`
+    SELECT qf.*, f.color, f.price_per_kg
+    FROM quote_filaments qf
+    JOIN filaments f ON f.id = qf.filament_id
+    WHERE qf.quote_id = ?
+    ORDER BY qf.id ASC
+  `).all(quoteId);
+}
+
+export function replaceQuoteFilaments(quoteId: number, entries: { filament_id: number; grams_used: number }[]) {
+  const insert = db.prepare(`INSERT INTO quote_filaments (quote_id, filament_id, grams_used) VALUES (?, ?, ?)`);
+  const transaction = db.transaction((id: number, rows: { filament_id: number; grams_used: number }[]) => {
+    db.run(`DELETE FROM quote_filaments WHERE quote_id = ?`, [id]);
+    for (const row of rows) {
+      if (row.filament_id && row.grams_used > 0) {
+        insert.run(id, row.filament_id, row.grams_used);
+      }
+    }
+  });
+  transaction(quoteId, entries);
+}
+
+// ── Finance module ──────────────────────────────────────────────────────────
+
+export interface ExpenseCategory {
+  id: number;
+  name: string;
+  icon: string;
+  sort_order: number;
+}
+
+export interface Expense {
+  id: number;
+  category_id: number | null;
+  description: string;
+  amount: number;
+  date: string;
+  payment_method: string;
+  receipt_url: string | null;
+  notes: string | null;
+  recurring: number;
+  created_at: string;
+}
+
+export type ExpenseWithCategory = Expense & { category_name: string | null; category_icon: string | null };
+
+export interface Payment {
+  id: number;
+  quote_id: number | null;
+  amount: number;
+  payment_method: string;
+  reference: string | null;
+  date: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export type PaymentWithQuote = Payment & { customer_name: string | null; quote_grand_total: number | null };
+
+// Expense categories
+export function getExpenseCategories(): ExpenseCategory[] {
+  return db.query<ExpenseCategory, []>(`SELECT * FROM expense_categories ORDER BY sort_order ASC, id ASC`).all();
+}
+
+export function createExpenseCategory(name: string, icon: string) {
+  const maxOrder = db.query<{ m: number }, []>(`SELECT COALESCE(MAX(sort_order), 0) as m FROM expense_categories`).get()?.m || 0;
+  db.run(`INSERT INTO expense_categories (name, icon, sort_order) VALUES (?, ?, ?)`, [name, icon, maxOrder + 1]);
+}
+
+export function deleteExpenseCategory(id: number) {
+  db.run(`DELETE FROM expense_categories WHERE id = ?`, [id]);
+}
+
+// Expenses
+export function getExpenses(filters?: { from?: string; to?: string; categoryId?: number; limit?: number }): ExpenseWithCategory[] {
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filters?.from) { conditions.push("e.date >= ?"); params.push(filters.from); }
+  if (filters?.to) { conditions.push("e.date <= ?"); params.push(filters.to); }
+  if (filters?.categoryId) { conditions.push("e.category_id = ?"); params.push(filters.categoryId); }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = filters?.limit || 500;
+  params.push(limit);
+
+  return db.query<ExpenseWithCategory, (string | number)[]>(`
+    SELECT e.*, ec.name AS category_name, ec.icon AS category_icon
+    FROM expenses e
+    LEFT JOIN expense_categories ec ON ec.id = e.category_id
+    ${where}
+    ORDER BY e.date DESC, e.id DESC
+    LIMIT ?
+  `).all(...params);
+}
+
+export function createExpense(input: { category_id: number | null; description: string; amount: number; date: string; payment_method: string; receipt_url?: string; notes?: string; recurring?: number }) {
+  db.run(`INSERT INTO expenses (category_id, description, amount, date, payment_method, receipt_url, notes, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [input.category_id, input.description, input.amount, input.date, input.payment_method, input.receipt_url || null, input.notes || null, input.recurring || 0]);
+}
+
+export function deleteExpense(id: number) {
+  db.run(`DELETE FROM expenses WHERE id = ?`, [id]);
+}
+
+// Payments (income against quotes)
+export function getPayments(filters?: { from?: string; to?: string; limit?: number }): PaymentWithQuote[] {
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filters?.from) { conditions.push("p.date >= ?"); params.push(filters.from); }
+  if (filters?.to) { conditions.push("p.date <= ?"); params.push(filters.to); }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = filters?.limit || 500;
+  params.push(limit);
+
+  return db.query<PaymentWithQuote, (string | number)[]>(`
+    SELECT p.*, q.customer_name, q.grand_total AS quote_grand_total
+    FROM payments p
+    LEFT JOIN quotes q ON q.id = p.quote_id
+    ${where}
+    ORDER BY p.date DESC, p.id DESC
+    LIMIT ?
+  `).all(...params);
+}
+
+export function createPayment(input: { quote_id: number | null; amount: number; payment_method: string; reference?: string; date: string; notes?: string }) {
+  db.run(`INSERT INTO payments (quote_id, amount, payment_method, reference, date, notes) VALUES (?, ?, ?, ?, ?, ?)`,
+    [input.quote_id, input.amount, input.payment_method, input.reference || null, input.date, input.notes || null]);
+}
+
+export function deletePayment(id: number) {
+  db.run(`DELETE FROM payments WHERE id = ?`, [id]);
+}
+
+// Financial summaries
+export interface FinancialSummary {
+  totalRevenue: number;
+  totalExpenses: number;
+  totalProductionCost: number;
+  netProfit: number;
+  quoteCount: number;
+  paidQuoteCount: number;
+  pendingRevenue: number;
+  expensesByCategory: { category_name: string; category_icon: string; total: number }[];
+  monthlyRevenue: { month: string; total: number }[];
+  monthlyExpenses: { month: string; total: number }[];
+}
+
+export function getFinancialSummary(from?: string, to?: string): FinancialSummary {
+  const dateFilter = (col: string) => {
+    const parts: string[] = [];
+    if (from) parts.push(`${col} >= '${from}'`);
+    if (to) parts.push(`${col} <= '${to}'`);
+    return parts.length ? `AND ${parts.join(" AND ")}` : "";
+  };
+
+  // Revenue from payments
+  const totalRevenue = db.query<{ total: number }, []>(`SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE 1=1 ${dateFilter("date")}`).get()?.total || 0;
+
+  // Total expenses
+  const totalExpenses = db.query<{ total: number }, []>(`SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE 1=1 ${dateFilter("date")}`).get()?.total || 0;
+
+  // Production costs from quote_filaments + printer costs for finished/production quotes
+  const productionCost = db.query<{ total: number }, []>(`
+    SELECT COALESCE(SUM(
+      (qf.grams_used / 1000.0 * f.price_per_kg)
+    ), 0) as total
+    FROM quote_filaments qf
+    JOIN filaments f ON f.id = qf.filament_id
+    JOIN quotes q ON q.id = qf.quote_id
+    WHERE q.status IN ('produccion', 'finalizado') ${dateFilter("q.created_at")}
+  `).get()?.total || 0;
+
+  // Quote counts
+  const quoteCount = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM quotes WHERE status != 'spam' ${dateFilter("created_at")}`).get()?.count || 0;
+  const paidQuoteCount = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM quotes WHERE status IN ('despachado', 'produccion', 'finalizado') ${dateFilter("created_at")}`).get()?.count || 0;
+
+  // Pending revenue (quotes accepted but no payment yet)
+  const pendingRevenue = db.query<{ total: number }, []>(`SELECT COALESCE(SUM(grand_total), 0) as total FROM quotes WHERE status IN ('no_despachado', 'despachado') ${dateFilter("created_at")}`).get()?.total || 0;
+
+  // Expenses by category
+  const expensesByCategory = db.query<{ category_name: string; category_icon: string; total: number }, []>(`
+    SELECT COALESCE(ec.name, 'Sin categoría') AS category_name, COALESCE(ec.icon, '📋') AS category_icon, SUM(e.amount) AS total
+    FROM expenses e
+    LEFT JOIN expense_categories ec ON ec.id = e.category_id
+    WHERE 1=1 ${dateFilter("e.date")}
+    GROUP BY e.category_id
+    ORDER BY total DESC
+  `).all();
+
+  // Monthly revenue (last 12 months)
+  const monthlyRevenue = db.query<{ month: string; total: number }, []>(`
+    SELECT strftime('%Y-%m', date) AS month, SUM(amount) AS total
+    FROM payments
+    GROUP BY month
+    ORDER BY month DESC
+    LIMIT 12
+  `).all().reverse();
+
+  // Monthly expenses (last 12 months)
+  const monthlyExpenses = db.query<{ month: string; total: number }, []>(`
+    SELECT strftime('%Y-%m', date) AS month, SUM(amount) AS total
+    FROM expenses
+    GROUP BY month
+    ORDER BY month DESC
+    LIMIT 12
+  `).all().reverse();
+
+  return {
+    totalRevenue,
+    totalExpenses,
+    totalProductionCost: productionCost,
+    netProfit: totalRevenue - totalExpenses - productionCost,
+    quoteCount,
+    paidQuoteCount,
+    pendingRevenue,
+    expensesByCategory,
+    monthlyRevenue,
+    monthlyExpenses,
+  };
 }

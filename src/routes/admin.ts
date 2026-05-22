@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 
@@ -717,7 +717,49 @@ const descriptionAiScript = `
   </script>
 `;
 
-const AdminLayout = (title: string, content: string) => `
+const adminCssValue = (value: unknown, fallback: string) => {
+  const s = String(value ?? fallback).replace(/[;\r\n]/g, " ").replace(/<\/style/gi, "").trim();
+  return s || fallback;
+};
+const adminCssUrl = (value: unknown) => String(value ?? "").replace(/[)"'\\\r\n<>]/g, "").trim();
+const adminFontFace = (family: string, url: unknown) => {
+  const u = adminCssUrl(url);
+  return u ? `@font-face { font-family: "${family}"; src: url("${u}"); font-display: swap; }` : "";
+};
+const adminFontStack = (family: string, url: unknown, fallback: string) => adminCssUrl(url) ? `"${family}", ${fallback}` : fallback;
+
+const buildAdminThemeCss = (config: Record<string, string>) => {
+  const bodyFallback = adminCssValue(config.font_body, defaultFontFamily);
+  const headingFallback = adminCssValue(config.font_heading, defaultFontFamily);
+  return `
+    ${adminFontFace("Uploaded Body Font", config.font_body_file)}
+    ${adminFontFace("Uploaded Heading Font", config.font_heading_file)}
+    :root {
+      --brand-primary: ${adminCssValue(config.color_primary, "#ef4444")};
+      --brand-secondary: ${adminCssValue(config.color_secondary, "#1f2937")};
+      --brand-accent: ${adminCssValue(config.color_accent, "#f87171")};
+      --heading-text: ${adminCssValue(config.color_heading_text, "#111827")};
+      --body-text: ${adminCssValue(config.color_body_text, "#374151")};
+      --muted-text: ${adminCssValue(config.color_muted_text, "#6b7280")};
+      --font-body: ${adminFontStack("Uploaded Body Font", config.font_body_file, bodyFallback)};
+      --font-heading: ${adminFontStack("Uploaded Heading Font", config.font_heading_file, headingFallback)};
+      --radius: ${adminCssValue(config.border_radius, "0.75rem")};
+    }
+    body { font-family: var(--font-body) !important; color: var(--body-text); }
+    h1, h2, h3, h4, h5, h6 { font-family: var(--font-heading) !important; }
+    .admin-nav { background: var(--brand-primary) !important; color: var(--brand-secondary) !important; }
+    .admin-nav a, .admin-nav button, .nav-dropdown-btn, .nav-direct-link { color: var(--brand-secondary) !important; }
+    .admin-nav a:hover, .admin-nav button:hover,
+    .nav-dropdown-btn:hover, .nav-dropdown.open .nav-dropdown-btn { background: var(--brand-accent) !important; }
+    .admin-nav .nav-direct-link:hover { background: var(--brand-accent) !important; }
+    .btn-primary, a.btn-primary { background: var(--brand-primary) !important; }
+    .btn-primary:hover, a.btn-primary:hover { filter: brightness(0.9); }
+  `;
+};
+
+const AdminLayout = (title: string, content: string) => {
+  const config = getConfig();
+  return `
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -725,21 +767,99 @@ const AdminLayout = (title: string, content: string) => `
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${title} - Admin</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            blue: {
+              600: '${adminCssValue(config.color_primary, "#2563eb")}',
+              700: '${adminCssValue(config.color_primary, "#2563eb")}e6',
+              800: '${adminCssValue(config.color_secondary, "#1f2937")}',
+            }
+          }
+        }
+      }
+    }
+    </script>
+    <style>${buildAdminThemeCss(config)}</style>
 </head>
-<body class="bg-gray-100 font-sans min-h-screen">
-    <nav class="bg-blue-800 text-white shadow-md">
+<body class="bg-gray-100 min-h-screen">
+    <style>
+      .nav-dropdown { position: relative; }
+      .nav-dropdown-btn { display: flex; align-items: center; gap: 4px; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; background: none; border: none; color: inherit; }
+      .nav-dropdown-btn:hover, .nav-dropdown.open .nav-dropdown-btn { background: rgba(255,255,255,.15); }
+      .nav-dropdown-btn svg { width: 14px; height: 14px; transition: transform .15s; }
+      .nav-dropdown.open .nav-dropdown-btn svg { transform: rotate(180deg); }
+      .nav-dropdown-menu { display: none; position: absolute; top: 100%; left: 0; min-width: 200px; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 6px 0; z-index: 50; margin-top: 4px; }
+      .nav-dropdown.open .nav-dropdown-menu { display: block; }
+      .nav-dropdown-menu a { display: block; padding: 8px 16px; font-size: 13px; font-weight: 500; color: var(--brand-primary) !important; text-decoration: none; transition: background .1s; }
+      .nav-dropdown-menu a:hover { background: var(--brand-accent) !important; color: var(--brand-secondary) !important; }
+      .nav-dropdown-menu .menu-divider { height: 1px; background: #e2e8f0; margin: 4px 0; }
+      .nav-direct-link { padding: 8px 12px; border-radius: 6px; font-size: 14px; font-weight: 500; text-decoration: none; color: inherit; }
+      .nav-direct-link:hover { background: rgba(255,255,255,.15); }
+      .nav-direct-link.catalog-link { color: #bfdbfe; }
+      .nav-direct-link.catalog-link:hover { color: #fff; background: rgba(255,255,255,.15); }
+      @media (max-width: 768px) {
+        .nav-items { display: none !important; }
+        .nav-mobile-toggle { display: flex !important; }
+        .nav-items.mobile-open { display: flex !important; position: absolute; top: 64px; left: 0; right: 0; flex-direction: column; background: var(--brand-primary); padding: 8px 16px 16px; gap: 2px; z-index: 50; box-shadow: 0 4px 12px rgba(0,0,0,.2); }
+        .nav-items.mobile-open .nav-dropdown-menu { position: static; box-shadow: none; background: rgba(255,255,255,.1); margin: 2px 0 4px 12px; border-radius: 6px; }
+        .nav-items.mobile-open .nav-dropdown-menu a { color: var(--brand-secondary) !important; }
+        .nav-items.mobile-open .nav-dropdown-menu a:hover { background: var(--brand-accent) !important; }
+        .nav-items.mobile-open .nav-dropdown-menu .menu-divider { background: rgba(0,0,0,.1); }
+      }
+    </style>
+    <nav class="admin-nav text-white shadow-md" style="position:relative">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex items-center justify-between h-16">
-                <div class="flex items-center">
+                <div class="flex items-center gap-2">
                     <a href="/admin" class="font-bold text-xl tracking-tight">PIXKEY3D Admin</a>
-                    <div class="ml-10 flex items-baseline space-x-4">
-                        <a href="/admin/config" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Configuración</a>
-                        <a href="/admin/products" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Productos</a>
-                        <a href="/admin/quotes" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Cotizaciones</a>
-                        <a href="/admin/production" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Producción</a>
-                        <a href="/admin/production-settings" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Ajustes Prod</a>
-                        <a href="/admin/makerworld" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">MakerWorld</a>
-                        <a href="/" target="_blank" class="px-3 py-2 rounded-md text-sm font-medium text-blue-200 hover:text-white hover:bg-blue-700">Ver Catálogo ↗</a>
+                    <button class="nav-mobile-toggle" style="display:none;align-items:center;justify-content:center;width:36px;height:36px;border:none;background:rgba(255,255,255,.15);border-radius:6px;color:#fff;cursor:pointer" aria-label="Menú">
+                      <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h14M3 10h14M3 14h14"/></svg>
+                    </button>
+                </div>
+                <div class="nav-items flex items-center gap-1">
+                    <div class="nav-dropdown">
+                        <button class="nav-dropdown-btn" type="button">Catálogo
+                          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+                        </button>
+                        <div class="nav-dropdown-menu">
+                            <a href="/admin/products">Productos</a>
+                            <a href="/admin/makerworld">Importar MakerWorld</a>
+                            <div class="menu-divider"></div>
+                            <a href="/" target="_blank">Ver Catálogo ↗</a>
+                        </div>
+                    </div>
+                    <a href="/admin/quotes" class="nav-direct-link">Cotizaciones</a>
+                    <div class="nav-dropdown">
+                        <button class="nav-dropdown-btn" type="button">Finanzas
+                          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+                        </button>
+                        <div class="nav-dropdown-menu">
+                            <a href="/admin/finanzas">Dashboard</a>
+                            <a href="/admin/finanzas/ingresos">Ingresos / Pagos</a>
+                            <a href="/admin/finanzas/gastos">Gastos</a>
+                            <a href="/admin/finanzas/reportes">Reportes</a>
+                        </div>
+                    </div>
+                    <div class="nav-dropdown">
+                        <button class="nav-dropdown-btn" type="button">Producción
+                          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+                        </button>
+                        <div class="nav-dropdown-menu">
+                            <a href="/admin/production">Panel de Producción</a>
+                            <a href="/admin/production-settings">Impresoras y Filamentos</a>
+                        </div>
+                    </div>
+                    <div class="nav-dropdown">
+                        <button class="nav-dropdown-btn" type="button">Configuración
+                          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+                        </button>
+                        <div class="nav-dropdown-menu">
+                            <a href="/admin/config">Marca y Catálogo</a>
+                            <a href="/admin/production-settings">Impresoras y Filamentos</a>
+                        </div>
                     </div>
                 </div>
                 <div>
@@ -750,6 +870,23 @@ const AdminLayout = (title: string, content: string) => `
             </div>
         </div>
     </nav>
+    <script>
+    (function(){
+      document.querySelectorAll('.nav-dropdown-btn').forEach(function(btn){
+        btn.addEventListener('click', function(e){
+          e.stopPropagation();
+          var dd = btn.closest('.nav-dropdown');
+          var wasOpen = dd.classList.contains('open');
+          document.querySelectorAll('.nav-dropdown.open').forEach(function(d){ d.classList.remove('open'); });
+          if (!wasOpen) dd.classList.add('open');
+        });
+      });
+      document.addEventListener('click', function(){ document.querySelectorAll('.nav-dropdown.open').forEach(function(d){ d.classList.remove('open'); }); });
+      var toggle = document.querySelector('.nav-mobile-toggle');
+      var items = document.querySelector('.nav-items');
+      if (toggle && items) toggle.addEventListener('click', function(){ items.classList.toggle('mobile-open'); });
+    })();
+    </script>
     <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         ${content}
     </main>
@@ -757,8 +894,11 @@ ${descriptionAiScript}
 </body>
 </html>
 `;
+};
 
 adminRoutes.get("/login", (c) => {
+  const loginConfig = getConfig();
+  const loginLogo = loginConfig.company_logo || "";
   return c.html(`
     <!DOCTYPE html>
     <html lang="es">
@@ -767,10 +907,12 @@ adminRoutes.get("/login", (c) => {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Login - Admin</title>
         <script src="https://cdn.tailwindcss.com"></script>
+        <style>${buildAdminThemeCss(loginConfig)}</style>
     </head>
     <body class="bg-gray-100 flex items-center justify-center min-h-screen">
         <div class="bg-white p-8 rounded-lg shadow-md w-full max-w-md">
-            <h1 class="text-2xl font-bold mb-6 text-center text-gray-800">Administración</h1>
+            ${loginLogo ? `<div class="flex justify-center mb-4"><img src="${escapeHtml(loginLogo)}" alt="Logo" class="h-16 w-auto object-contain"></div>` : ""}
+            <h1 class="text-2xl font-bold mb-6 text-center">${escapeHtml(loginConfig.company_name || "Administración")}</h1>
             <form action="/admin/login" method="post" class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Usuario</label>
@@ -2043,12 +2185,15 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
         <title>Cotización ${escapeHtml(quoteFolio(quote))}</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
+          ${adminFontFace("Uploaded Body Font", config.font_body_file)}
+          ${adminFontFace("Uploaded Heading Font", config.font_heading_file)}
           @media print {
             .no-print { display: none !important; }
             body { background: white; color: black; }
             .print-border { border: 1px solid #000 !important; }
           }
-          body { font-family: system-ui, -apple-system, sans-serif; }
+          body { font-family: ${adminFontStack("Uploaded Body Font", config.font_body_file, adminCssValue(config.font_body, "system-ui, -apple-system, sans-serif"))}; }
+          h1, h2, h3, h4 { font-family: ${adminFontStack("Uploaded Heading Font", config.font_heading_file, adminCssValue(config.font_heading, "system-ui, -apple-system, sans-serif"))}; }
         </style>
     </head>
     <body class="bg-gray-100 min-h-screen p-4 sm:p-8">
@@ -2541,13 +2686,36 @@ adminRoutes.get("/production", (c) => {
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
             Esperando Comprobante de Pago
           </div>
-          <form action="/admin/production/${quote.id}/proof" method="post" enctype="multipart/form-data" class="flex flex-col sm:flex-row gap-2.5 items-end sm:items-center">
-            <div class="flex-1 w-full">
-              <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Subir Imagen del Comprobante *</label>
-              <input type="file" name="payment_proof" accept="image/*" required class="block w-full text-xs text-gray-500 bg-white border border-gray-300 rounded p-1">
+          <form action="/admin/production/${quote.id}/proof" method="post" enctype="multipart/form-data" class="space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div class="sm:col-span-2">
+                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Comprobante de Anticipo *</label>
+                <input type="file" name="payment_proof" accept="image/*" required class="block w-full text-xs text-gray-500 bg-white border border-gray-300 rounded p-1">
+              </div>
+              <div>
+                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Monto del Anticipo *</label>
+                <input type="number" name="payment_amount" step="0.01" min="0.01" required placeholder="$0.00" value="${quote.grand_total > 0 ? (quote.grand_total / 2).toFixed(2) : ""}" class="block w-full text-xs bg-white border border-gray-300 rounded p-1.5">
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Método de pago</label>
+                <select name="payment_method" class="block w-full text-xs bg-white border border-gray-300 rounded p-1.5">
+                  <option value="transferencia">Transferencia</option>
+                  <option value="efectivo">Efectivo</option>
+                  <option value="tarjeta">Tarjeta</option>
+                  <option value="paypal">PayPal</option>
+                  <option value="mercadopago">MercadoPago</option>
+                  <option value="otro">Otro</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Referencia (opcional)</label>
+                <input type="text" name="payment_reference" placeholder="No. operación..." class="block w-full text-xs bg-white border border-gray-300 rounded p-1.5">
+              </div>
             </div>
             <button type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold text-xs px-4 py-2.5 rounded shadow-sm whitespace-nowrap w-full sm:w-auto transition-colors">
-              Iniciar Producción
+              Registrar Anticipo e Iniciar Producción
             </button>
           </form>
         </div>
@@ -2739,14 +2907,46 @@ adminRoutes.get("/production", (c) => {
           <div class="space-y-1.5">${itemsListHtml}</div>
           ${contentCard}
           ${quote.status === "finalizado" ? `
-            <div class="pt-3 border-t flex justify-end">
+            <div class="pt-3 border-t space-y-2">
               <span class="text-xs text-green-700 font-bold bg-green-50 border border-green-200 px-3 py-1 rounded-full">&#10003; Finalizada</span>
+              ${quote.payment_proof_url_final ? `<div class="mt-2"><a href="${escapeHtml(quote.payment_proof_url_final)}" target="_blank" class="text-xs text-blue-600 hover:underline">Ver comprobante de liquidación</a></div>` : ""}
             </div>
           ` : `
-            <div class="pt-3 border-t flex justify-end">
-              <form action="/admin/production/${quote.id}/finish" method="post" onsubmit="return confirm('&#191;Marcar como finalizada?')">
-                <button type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold text-xs px-4 py-2 rounded shadow-sm transition-colors">
-                  Marcar Finalizada
+            <div class="pt-3 border-t space-y-3">
+              <div class="text-xs text-purple-800 font-bold uppercase tracking-wider flex items-center gap-1">
+                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                Liquidación y Finalización
+              </div>
+              <form action="/admin/production/${quote.id}/finish" method="post" enctype="multipart/form-data" class="space-y-2.5">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div class="sm:col-span-2">
+                    <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Comprobante de Liquidación *</label>
+                    <input type="file" name="final_proof" accept="image/*" required class="block w-full text-xs text-gray-500 bg-white border border-gray-300 rounded p-1">
+                  </div>
+                  <div>
+                    <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Monto Liquidación *</label>
+                    <input type="number" name="final_amount" step="0.01" min="0" required placeholder="$0.00" class="block w-full text-xs bg-white border border-gray-300 rounded p-1.5">
+                  </div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Método de pago</label>
+                    <select name="final_method" class="block w-full text-xs bg-white border border-gray-300 rounded p-1.5">
+                      <option value="transferencia">Transferencia</option>
+                      <option value="efectivo">Efectivo</option>
+                      <option value="tarjeta">Tarjeta</option>
+                      <option value="paypal">PayPal</option>
+                      <option value="mercadopago">MercadoPago</option>
+                      <option value="otro">Otro</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Referencia (opcional)</label>
+                    <input type="text" name="final_reference" placeholder="No. operación..." class="block w-full text-xs bg-white border border-gray-300 rounded p-1.5">
+                  </div>
+                </div>
+                <button type="submit" class="bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs px-4 py-2.5 rounded shadow-sm whitespace-nowrap w-full sm:w-auto transition-colors">
+                  Registrar Liquidación y Finalizar
                 </button>
               </form>
             </div>
@@ -2806,6 +3006,19 @@ adminRoutes.post("/production/:id/proof", async (c) => {
   if (file) {
     const fileUrl = await saveUpload(file, "payments", "proof");
     updateQuotePaymentProof(id, fileUrl);
+
+    // Register anticipo payment
+    const amount = parseFloat(String(body.payment_amount || "0"));
+    if (amount > 0) {
+      createPayment({
+        quote_id: id,
+        amount,
+        payment_method: String(body.payment_method || "transferencia"),
+        reference: String(body.payment_reference || ""),
+        date: new Date().toISOString().slice(0, 10),
+        notes: "Anticipo",
+      });
+    }
   }
   return c.redirect("/admin/production?tab=produccion");
 });
@@ -2845,10 +3058,616 @@ adminRoutes.post("/production/:id/schedule", async (c) => {
   return c.redirect("/admin/production?tab=produccion");
 });
 
-adminRoutes.post("/production/:id/finish", (c) => {
+adminRoutes.post("/production/:id/finish", async (c) => {
   const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+
+  // Save final payment proof
+  const file = formFile(body.final_proof);
+  if (file) {
+    const fileUrl = await saveUpload(file, "payments", "liquidacion");
+    db.run(`UPDATE quotes SET payment_proof_url_final = ? WHERE id = ?`, [fileUrl, id]);
+  }
+
+  // Register liquidation payment
+  const amount = parseFloat(String(body.final_amount || "0"));
+  if (amount > 0) {
+    createPayment({
+      quote_id: id,
+      amount,
+      payment_method: String(body.final_method || "transferencia"),
+      reference: String(body.final_reference || ""),
+      date: new Date().toISOString().slice(0, 10),
+      notes: "Liquidación",
+    });
+  }
+
   updateQuoteStatus(id, "finalizado");
   return c.redirect("/admin/production?tab=finalizadas");
+});
+
+// ── Finance Module Routes ────────────────────────────────────────────────────
+
+const financeNav = (active: string) => `
+  <div class="flex flex-wrap gap-2 mb-6">
+    <a href="/admin/finanzas" class="px-4 py-2 text-sm font-bold rounded-md transition-all ${active === "dashboard" ? "bg-blue-600 text-white shadow-sm" : "text-gray-600 hover:bg-gray-200"}">Dashboard</a>
+    <a href="/admin/finanzas/ingresos" class="px-4 py-2 text-sm font-bold rounded-md transition-all ${active === "ingresos" ? "bg-green-600 text-white shadow-sm" : "text-gray-600 hover:bg-gray-200"}">Ingresos</a>
+    <a href="/admin/finanzas/gastos" class="px-4 py-2 text-sm font-bold rounded-md transition-all ${active === "gastos" ? "bg-red-500 text-white shadow-sm" : "text-gray-600 hover:bg-gray-200"}">Gastos</a>
+    <a href="/admin/finanzas/reportes" class="px-4 py-2 text-sm font-bold rounded-md transition-all ${active === "reportes" ? "bg-purple-600 text-white shadow-sm" : "text-gray-600 hover:bg-gray-200"}">Reportes</a>
+  </div>
+`;
+
+const kpiCard = (label: string, value: string, color: string, sub = "") => `
+  <div class="bg-white rounded-lg shadow p-5 border-l-4 border-${color}">
+    <p class="text-xs font-bold text-gray-500 uppercase tracking-wider">${label}</p>
+    <p class="text-2xl font-black mt-1" style="color: var(--heading-text)">${value}</p>
+    ${sub ? `<p class="text-xs text-gray-500 mt-1">${sub}</p>` : ""}
+  </div>
+`;
+
+// Dashboard
+adminRoutes.get("/finanzas", (c) => {
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "";
+  const summary = getFinancialSummary(from, to);
+
+  const maxBar = Math.max(...summary.monthlyRevenue.map(r => r.total), ...summary.monthlyExpenses.map(r => r.total), 1);
+
+  const monthNames: Record<string, string> = { "01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr", "05": "May", "06": "Jun", "07": "Jul", "08": "Ago", "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic" };
+  const formatMonth = (m: string) => { const parts = m.split("-"); return `${monthNames[parts[1] || ""] || parts[1] || ""} ${(parts[0] || "").slice(2)}`; };
+
+  // Merge months for chart
+  const allMonths = new Set([...summary.monthlyRevenue.map(r => r.month), ...summary.monthlyExpenses.map(r => r.month)]);
+  const sortedMonths = [...allMonths].sort();
+  const revenueMap = new Map(summary.monthlyRevenue.map(r => [r.month, r.total]));
+  const expenseMap = new Map(summary.monthlyExpenses.map(r => [r.month, r.total]));
+
+  const chartBars = sortedMonths.map(month => {
+    const rev = revenueMap.get(month) || 0;
+    const exp = expenseMap.get(month) || 0;
+    const revH = Math.round((rev / maxBar) * 120);
+    const expH = Math.round((exp / maxBar) * 120);
+    return `
+      <div class="flex flex-col items-center gap-1" style="min-width:48px">
+        <div class="flex items-end gap-1" style="height:130px">
+          <div class="w-4 rounded-t" style="height:${revH}px;background:var(--brand-primary,#22c55e)" title="Ingresos: ${money(rev)}"></div>
+          <div class="w-4 rounded-t bg-red-400" style="height:${expH}px" title="Gastos: ${money(exp)}"></div>
+        </div>
+        <span class="text-[10px] text-gray-500 font-medium">${formatMonth(month)}</span>
+      </div>
+    `;
+  }).join("");
+
+  const expensePie = summary.expensesByCategory.map(cat => {
+    const pct = summary.totalExpenses > 0 ? Math.round((cat.total / summary.totalExpenses) * 100) : 0;
+    return `
+      <div class="flex items-center justify-between py-1.5 border-b border-gray-100 last:border-0">
+        <span class="text-sm">${cat.category_icon} ${escapeHtml(cat.category_name)}</span>
+        <div class="flex items-center gap-2">
+          <div class="w-20 bg-gray-200 rounded-full h-2"><div class="h-2 rounded-full bg-red-400" style="width:${pct}%"></div></div>
+          <span class="text-sm font-bold w-24 text-right">${money(cat.total)}</span>
+          <span class="text-xs text-gray-500 w-10 text-right">${pct}%</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return c.html(AdminLayout("Finanzas", `
+    <h1 class="text-2xl font-black mb-2">Finanzas</h1>
+    ${financeNav("dashboard")}
+
+    <form class="flex flex-wrap items-end gap-3 mb-6 bg-white p-4 rounded-lg shadow-sm">
+      <div>
+        <label class="block text-xs font-bold text-gray-500 mb-1">Desde</label>
+        <input type="date" name="from" value="${escapeHtml(from)}" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+      </div>
+      <div>
+        <label class="block text-xs font-bold text-gray-500 mb-1">Hasta</label>
+        <input type="date" name="to" value="${escapeHtml(to)}" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+      </div>
+      <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-bold">Filtrar</button>
+      <a href="/admin/finanzas" class="text-sm text-gray-500 hover:text-gray-800 py-2">Limpiar</a>
+    </form>
+
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      ${kpiCard("Ingresos Totales", money(summary.totalRevenue), "green-500", `${summary.paidQuoteCount} pagos recibidos`)}
+      ${kpiCard("Gastos Totales", money(summary.totalExpenses), "red-500", `${summary.expensesByCategory.length} categorías`)}
+      ${kpiCard("Costo Producción", money(summary.totalProductionCost), "yellow-500", "Filamento + energía")}
+      ${kpiCard("Utilidad Neta", money(summary.netProfit), summary.netProfit >= 0 ? "green-600" : "red-600", `Margen: ${summary.totalRevenue > 0 ? Math.round((summary.netProfit / summary.totalRevenue) * 100) : 0}%`)}
+    </div>
+
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      ${kpiCard("Cotizaciones", String(summary.quoteCount), "blue-500", `${summary.paidQuoteCount} pagadas`)}
+      ${kpiCard("Ingresos Pendientes", money(summary.pendingRevenue), "yellow-500", "Por cobrar")}
+      ${kpiCard("Ticket Promedio", money(summary.paidQuoteCount > 0 ? summary.totalRevenue / summary.paidQuoteCount : 0), "indigo-500", "Por pago")}
+      ${kpiCard("Gasto Promedio Mensual", money(summary.monthlyExpenses.length > 0 ? summary.totalExpenses / summary.monthlyExpenses.length : 0), "orange-500", `${summary.monthlyExpenses.length} meses`)}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      <div class="bg-white rounded-lg shadow p-5">
+        <h3 class="font-bold text-sm text-gray-700 mb-4">Ingresos vs Gastos por Mes</h3>
+        <div class="flex items-center gap-4 mb-3 text-xs">
+          <span class="flex items-center gap-1"><span class="w-3 h-3 rounded" style="background:var(--brand-primary,#22c55e)"></span> Ingresos</span>
+          <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-red-400"></span> Gastos</span>
+        </div>
+        ${sortedMonths.length > 0 ? `<div class="flex items-end gap-2 overflow-x-auto pb-2">${chartBars}</div>` : `<p class="text-sm text-gray-500">Sin datos aún. Registra ingresos y gastos para ver la gráfica.</p>`}
+      </div>
+      <div class="bg-white rounded-lg shadow p-5">
+        <h3 class="font-bold text-sm text-gray-700 mb-4">Gastos por Categoría</h3>
+        ${expensePie || `<p class="text-sm text-gray-500">Sin gastos registrados.</p>`}
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="bg-white rounded-lg shadow p-5">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-bold text-sm text-gray-700">Últimos Ingresos</h3>
+          <a href="/admin/finanzas/ingresos" class="text-xs text-blue-600 hover:underline font-medium">Ver todos →</a>
+        </div>
+        ${(() => {
+          const recent = getPayments({ limit: 5 });
+          if (recent.length === 0) return `<p class="text-sm text-gray-500">Sin pagos registrados.</p>`;
+          return recent.map(p => `
+            <div class="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+              <div>
+                <p class="text-sm font-medium">${p.quote_id ? `#${p.quote_id} - ${escapeHtml(p.customer_name || "")}` : escapeHtml(p.notes || "Pago manual")}</p>
+                <p class="text-xs text-gray-500">${p.date} · ${escapeHtml(p.payment_method)}</p>
+              </div>
+              <span class="text-sm font-bold text-green-600">+${money(p.amount)}</span>
+            </div>
+          `).join("");
+        })()}
+      </div>
+      <div class="bg-white rounded-lg shadow p-5">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-bold text-sm text-gray-700">Últimos Gastos</h3>
+          <a href="/admin/finanzas/gastos" class="text-xs text-blue-600 hover:underline font-medium">Ver todos →</a>
+        </div>
+        ${(() => {
+          const recent = getExpenses({ limit: 5 });
+          if (recent.length === 0) return `<p class="text-sm text-gray-500">Sin gastos registrados.</p>`;
+          return recent.map(e => `
+            <div class="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+              <div>
+                <p class="text-sm font-medium">${e.category_icon || "📋"} ${escapeHtml(e.description)}</p>
+                <p class="text-xs text-gray-500">${e.date} · ${escapeHtml(e.category_name || "Sin categoría")}</p>
+              </div>
+              <span class="text-sm font-bold text-red-500">-${money(e.amount)}</span>
+            </div>
+          `).join("");
+        })()}
+      </div>
+    </div>
+  `));
+});
+
+// Ingresos (Payments)
+adminRoutes.get("/finanzas/ingresos", (c) => {
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "";
+  const payments = getPayments({ from: from || undefined, to: to || undefined });
+  const totalIncome = payments.reduce((s, p) => s + p.amount, 0);
+  const anticipos = payments.filter(p => (p.notes || "").includes("Anticipo"));
+  const liquidaciones = payments.filter(p => (p.notes || "").includes("Liquidación"));
+
+  return c.html(AdminLayout("Ingresos", `
+    <h1 class="text-2xl font-black mb-2">Ingresos / Pagos</h1>
+    ${financeNav("ingresos")}
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div class="lg:col-span-2">
+        <form class="flex flex-wrap items-end gap-3 mb-4 bg-white p-4 rounded-lg shadow-sm">
+          <div>
+            <label class="block text-xs font-bold text-gray-500 mb-1">Desde</label>
+            <input type="date" name="from" value="${escapeHtml(from)}" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-500 mb-1">Hasta</label>
+            <input type="date" name="to" value="${escapeHtml(to)}" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+          </div>
+          <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-bold">Filtrar</button>
+        </form>
+
+        <div class="bg-white rounded-lg shadow-sm mb-4 p-4 flex items-center justify-between">
+          <span class="text-sm font-bold text-gray-600">Total ingresos: <span class="text-green-600 text-lg">${money(totalIncome)}</span></span>
+          <span class="text-sm text-gray-500">${payments.length} registros</span>
+        </div>
+
+        <div class="bg-white rounded-lg shadow overflow-hidden">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="bg-gray-50 border-b text-xs text-gray-500 uppercase">
+                <th class="px-4 py-3 text-left">Fecha</th>
+                <th class="px-4 py-3 text-left">Concepto</th>
+                <th class="px-4 py-3 text-left">Cotización</th>
+                <th class="px-4 py-3 text-left">Método</th>
+                <th class="px-4 py-3 text-left">Referencia</th>
+                <th class="px-4 py-3 text-right">Monto</th>
+                <th class="px-4 py-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${payments.length === 0 ? `<tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">Sin pagos registrados. Los pagos se crean desde el Panel de Producción.</td></tr>` : payments.map(p => {
+                const isAnticipo = (p.notes || "").includes("Anticipo");
+                const isLiquidacion = (p.notes || "").includes("Liquidación");
+                const badge = isAnticipo ? `<span class="inline-block px-2 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-800">Anticipo</span>`
+                  : isLiquidacion ? `<span class="inline-block px-2 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-800">Liquidación</span>`
+                  : `<span class="inline-block px-2 py-0.5 rounded text-xs font-bold bg-gray-100 text-gray-600">${escapeHtml(p.notes || "Pago")}</span>`;
+                return `
+                <tr class="border-b border-gray-100 hover:bg-gray-50">
+                  <td class="px-4 py-3 font-mono text-xs">${p.date}</td>
+                  <td class="px-4 py-3">${badge}</td>
+                  <td class="px-4 py-3">${p.quote_id ? `<a href="/admin/quotes/${p.quote_id}" class="text-blue-600 hover:underline font-medium">#${p.quote_id}</a> ${escapeHtml(p.customer_name || "")}` : `—`}</td>
+                  <td class="px-4 py-3"><span class="inline-block px-2 py-0.5 rounded text-xs font-bold bg-gray-100">${escapeHtml(p.payment_method)}</span></td>
+                  <td class="px-4 py-3 text-xs text-gray-600">${escapeHtml(p.reference || "—")}</td>
+                  <td class="px-4 py-3 text-right font-bold text-green-600">${money(p.amount)}</td>
+                  <td class="px-4 py-3 text-right">
+                    <form action="/admin/finanzas/ingresos/${p.id}/delete" method="post" onsubmit="return confirm('¿Eliminar este pago?')">
+                      <button type="submit" class="text-red-500 hover:text-red-700 text-xs font-bold">Eliminar</button>
+                    </form>
+                  </td>
+                </tr>
+              `}).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="space-y-4">
+        <div class="bg-white rounded-lg shadow p-5">
+          <h3 class="font-bold text-sm text-gray-700 mb-3">Resumen</h3>
+          <div class="space-y-2">
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Total cobrado</span><span class="font-bold text-green-600">${money(totalIncome)}</span></div>
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Anticipos</span><span class="font-medium">${money(anticipos.reduce((s, p) => s + p.amount, 0))} (${anticipos.length})</span></div>
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Liquidaciones</span><span class="font-medium">${money(liquidaciones.reduce((s, p) => s + p.amount, 0))} (${liquidaciones.length})</span></div>
+          </div>
+        </div>
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <p class="text-xs text-blue-800 font-medium">Los pagos se registran automáticamente desde el <a href="/admin/production" class="underline font-bold">Panel de Producción</a>:</p>
+          <ul class="text-xs text-blue-700 mt-2 space-y-1 list-disc list-inside">
+            <li><strong>Anticipo</strong> — al subir comprobante e iniciar producción</li>
+            <li><strong>Liquidación</strong> — al subir comprobante y finalizar pedido</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  `));
+});
+
+adminRoutes.post("/finanzas/ingresos/:id/delete", (c) => {
+  deletePayment(parseInt(c.req.param("id"), 10));
+  return c.redirect("/admin/finanzas/ingresos");
+});
+
+// Gastos (Expenses)
+adminRoutes.get("/finanzas/gastos", (c) => {
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "";
+  const catFilter = parseInt(c.req.query("category") || "0", 10) || undefined;
+  const expenses = getExpenses({ from: from || undefined, to: to || undefined, categoryId: catFilter });
+  const categories = getExpenseCategories();
+  const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
+
+  return c.html(AdminLayout("Gastos", `
+    <h1 class="text-2xl font-black mb-2">Gastos</h1>
+    ${financeNav("gastos")}
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div class="lg:col-span-2">
+        <form class="flex flex-wrap items-end gap-3 mb-4 bg-white p-4 rounded-lg shadow-sm">
+          <div>
+            <label class="block text-xs font-bold text-gray-500 mb-1">Desde</label>
+            <input type="date" name="from" value="${escapeHtml(from)}" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-500 mb-1">Hasta</label>
+            <input type="date" name="to" value="${escapeHtml(to)}" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-500 mb-1">Categoría</label>
+            <select name="category" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+              <option value="">Todas</option>
+              ${categories.map(cat => `<option value="${cat.id}" ${catFilter === cat.id ? "selected" : ""}>${cat.icon} ${escapeHtml(cat.name)}</option>`).join("")}
+            </select>
+          </div>
+          <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-bold">Filtrar</button>
+        </form>
+
+        <div class="bg-white rounded-lg shadow-sm mb-4 p-4 flex items-center justify-between">
+          <span class="text-sm font-bold text-gray-600">Total gastos: <span class="text-red-500 text-lg">${money(totalExpenses)}</span></span>
+          <span class="text-sm text-gray-500">${expenses.length} registros</span>
+        </div>
+
+        <div class="bg-white rounded-lg shadow overflow-hidden">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="bg-gray-50 border-b text-xs text-gray-500 uppercase">
+                <th class="px-4 py-3 text-left">Fecha</th>
+                <th class="px-4 py-3 text-left">Categoría</th>
+                <th class="px-4 py-3 text-left">Descripción</th>
+                <th class="px-4 py-3 text-left">Método</th>
+                <th class="px-4 py-3 text-right">Monto</th>
+                <th class="px-4 py-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${expenses.length === 0 ? `<tr><td colspan="6" class="px-4 py-8 text-center text-gray-500">Sin gastos registrados</td></tr>` : expenses.map(e => `
+                <tr class="border-b border-gray-100 hover:bg-gray-50">
+                  <td class="px-4 py-3 font-mono text-xs">${e.date}</td>
+                  <td class="px-4 py-3 text-xs"><span class="inline-block px-2 py-0.5 rounded bg-gray-100 font-medium">${e.category_icon || "📋"} ${escapeHtml(e.category_name || "Sin cat.")}</span></td>
+                  <td class="px-4 py-3">${escapeHtml(e.description)}${e.notes ? `<span class="text-xs text-gray-400 ml-1">(${escapeHtml(e.notes)})</span>` : ""}${e.recurring ? ` <span class="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-bold">Recurrente</span>` : ""}</td>
+                  <td class="px-4 py-3 text-xs">${escapeHtml(e.payment_method || "—")}</td>
+                  <td class="px-4 py-3 text-right font-bold text-red-500">${money(e.amount)}</td>
+                  <td class="px-4 py-3 text-right">
+                    <form action="/admin/finanzas/gastos/${e.id}/delete" method="post" onsubmit="return confirm('¿Eliminar este gasto?')">
+                      <button type="submit" class="text-red-500 hover:text-red-700 text-xs font-bold">Eliminar</button>
+                    </form>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="space-y-5">
+        <div class="bg-white rounded-lg shadow p-5 sticky top-4">
+          <h3 class="font-bold text-sm text-gray-700 mb-4">Registrar Gasto</h3>
+          <form action="/admin/finanzas/gastos" method="post" class="space-y-3">
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-1">Categoría</label>
+              <select name="category_id" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                ${categories.map(cat => `<option value="${cat.id}">${cat.icon} ${escapeHtml(cat.name)}</option>`).join("")}
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-1">Descripción *</label>
+              <input type="text" name="description" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Ej: Rollo PLA Negro 1kg">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-1">Monto *</label>
+              <input type="number" name="amount" step="0.01" min="0.01" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="0.00">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-1">Fecha *</label>
+              <input type="date" name="date" required value="${new Date().toISOString().slice(0, 10)}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-1">Método de pago</label>
+              <select name="payment_method" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                <option value="transferencia">Transferencia</option>
+                <option value="efectivo">Efectivo</option>
+                <option value="tarjeta">Tarjeta</option>
+                <option value="otro">Otro</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-1">Notas</label>
+              <input type="text" name="notes" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" placeholder="Opcional">
+            </div>
+            <div class="flex items-center gap-2">
+              <input type="checkbox" name="recurring" id="recurring_check" value="1" class="rounded">
+              <label for="recurring_check" class="text-xs text-gray-600">Gasto recurrente (mensual)</label>
+            </div>
+            <button type="submit" class="w-full bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md text-sm font-bold">Registrar Gasto</button>
+          </form>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-5">
+          <h3 class="font-bold text-sm text-gray-700 mb-3">Categorías</h3>
+          <div class="space-y-1 mb-3">
+            ${categories.map(cat => `
+              <div class="flex items-center justify-between py-1">
+                <span class="text-sm">${cat.icon} ${escapeHtml(cat.name)}</span>
+                <form action="/admin/finanzas/categorias/${cat.id}/delete" method="post" onsubmit="return confirm('¿Eliminar categoría?')">
+                  <button type="submit" class="text-red-400 hover:text-red-600 text-xs">✕</button>
+                </form>
+              </div>
+            `).join("")}
+          </div>
+          <form action="/admin/finanzas/categorias" method="post" class="flex gap-2">
+            <input type="text" name="name" required placeholder="Nueva categoría" class="flex-1 px-2 py-1.5 border border-gray-300 rounded text-xs">
+            <input type="text" name="icon" placeholder="Emoji" class="w-12 px-2 py-1.5 border border-gray-300 rounded text-xs text-center">
+            <button type="submit" class="bg-gray-200 hover:bg-gray-300 px-3 py-1.5 rounded text-xs font-bold">+</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  `));
+});
+
+adminRoutes.post("/finanzas/gastos", async (c) => {
+  const body = await c.req.parseBody();
+  const amount = parseFloat(String(body.amount || "0"));
+  if (amount <= 0 || !String(body.description || "").trim()) return c.redirect("/admin/finanzas/gastos");
+  createExpense({
+    category_id: parseInt(String(body.category_id || "0"), 10) || null,
+    description: String(body.description || "").trim(),
+    amount,
+    date: String(body.date || new Date().toISOString().slice(0, 10)),
+    payment_method: String(body.payment_method || ""),
+    notes: String(body.notes || ""),
+    recurring: body.recurring === "1" ? 1 : 0,
+  });
+  return c.redirect("/admin/finanzas/gastos");
+});
+
+adminRoutes.post("/finanzas/gastos/:id/delete", (c) => {
+  deleteExpense(parseInt(c.req.param("id"), 10));
+  return c.redirect("/admin/finanzas/gastos");
+});
+
+adminRoutes.post("/finanzas/categorias", async (c) => {
+  const body = await c.req.parseBody();
+  const name = String(body.name || "").trim();
+  if (!name) return c.redirect("/admin/finanzas/gastos");
+  createExpenseCategory(name, String(body.icon || "📋").trim());
+  return c.redirect("/admin/finanzas/gastos");
+});
+
+adminRoutes.post("/finanzas/categorias/:id/delete", (c) => {
+  deleteExpenseCategory(parseInt(c.req.param("id"), 10));
+  return c.redirect("/admin/finanzas/gastos");
+});
+
+// Reportes
+adminRoutes.get("/finanzas/reportes", (c) => {
+  const year = c.req.query("year") || String(new Date().getFullYear());
+  const yearNum = parseInt(year, 10);
+
+  // Monthly P&L for the selected year
+  const months = Array.from({ length: 12 }, (_, i) => {
+    const month = String(i + 1).padStart(2, "0");
+    const from = `${year}-${month}-01`;
+    const lastDay = new Date(yearNum, i + 1, 0).getDate();
+    const to = `${year}-${month}-${String(lastDay).padStart(2, "0")}`;
+    const summary = getFinancialSummary(from, to);
+    return { month: `${year}-${month}`, label: new Date(yearNum, i).toLocaleString("es-MX", { month: "long" }), ...summary };
+  });
+
+  const yearTotalRevenue = months.reduce((s, m) => s + m.totalRevenue, 0);
+  const yearTotalExpenses = months.reduce((s, m) => s + m.totalExpenses, 0);
+  const yearTotalProdCost = months.reduce((s, m) => s + m.totalProductionCost, 0);
+  const yearNetProfit = yearTotalRevenue - yearTotalExpenses - yearTotalProdCost;
+
+  // Top products by revenue
+  const topProducts = db.query<{ product_name: string; total_qty: number; total_revenue: number }, [string, string]>(`
+    SELECT qi.product_name, SUM(qi.quantity) as total_qty, SUM(qi.subtotal) as total_revenue
+    FROM quote_items qi
+    JOIN quotes q ON q.id = qi.quote_id
+    WHERE q.status IN ('despachado','produccion','finalizado')
+      AND q.created_at >= ? AND q.created_at <= ?
+    GROUP BY qi.product_name
+    ORDER BY total_revenue DESC
+    LIMIT 10
+  `).all(`${year}-01-01`, `${year}-12-31`);
+
+  // Top customers by revenue
+  const topCustomers = db.query<{ customer_name: string; quote_count: number; total_revenue: number }, [string, string]>(`
+    SELECT customer_name, COUNT(*) as quote_count, SUM(grand_total) as total_revenue
+    FROM quotes
+    WHERE status IN ('despachado','produccion','finalizado')
+      AND created_at >= ? AND created_at <= ?
+    GROUP BY customer_name
+    ORDER BY total_revenue DESC
+    LIMIT 10
+  `).all(`${year}-01-01`, `${year}-12-31`);
+
+  return c.html(AdminLayout("Reportes Financieros", `
+    <h1 class="text-2xl font-black mb-2">Reportes Financieros</h1>
+    ${financeNav("reportes")}
+
+    <form class="flex items-end gap-3 mb-6 bg-white p-4 rounded-lg shadow-sm">
+      <div>
+        <label class="block text-xs font-bold text-gray-500 mb-1">Año</label>
+        <select name="year" class="px-3 py-2 border border-gray-300 rounded-md text-sm font-bold">
+          ${[yearNum - 2, yearNum - 1, yearNum, yearNum + 1].map(y => `<option value="${y}" ${y === yearNum ? "selected" : ""}>${y}</option>`).join("")}
+        </select>
+      </div>
+      <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-bold">Ver</button>
+    </form>
+
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      ${kpiCard(`Ingresos ${year}`, money(yearTotalRevenue), "green-500")}
+      ${kpiCard(`Gastos ${year}`, money(yearTotalExpenses), "red-500")}
+      ${kpiCard(`Costo Producción ${year}`, money(yearTotalProdCost), "yellow-500")}
+      ${kpiCard(`Utilidad ${year}`, money(yearNetProfit), yearNetProfit >= 0 ? "green-600" : "red-600", `Margen: ${yearTotalRevenue > 0 ? Math.round((yearNetProfit / yearTotalRevenue) * 100) : 0}%`)}
+    </div>
+
+    <div class="bg-white rounded-lg shadow overflow-hidden mb-8">
+      <h3 class="font-bold text-sm text-gray-700 p-4 border-b">Estado de Resultados Mensual — ${year}</h3>
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-xs">
+          <thead>
+            <tr class="bg-gray-50 border-b text-gray-500 uppercase font-bold">
+              <th class="px-3 py-2 text-left">Mes</th>
+              <th class="px-3 py-2 text-right">Ingresos</th>
+              <th class="px-3 py-2 text-right">Gastos</th>
+              <th class="px-3 py-2 text-right">Costo Prod.</th>
+              <th class="px-3 py-2 text-right">Utilidad</th>
+              <th class="px-3 py-2 text-right">Margen</th>
+              <th class="px-3 py-2 text-right">Cotizaciones</th>
+              <th class="px-3 py-2 text-right">Pagadas</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${months.map(m => {
+              const net = m.totalRevenue - m.totalExpenses - m.totalProductionCost;
+              const margin = m.totalRevenue > 0 ? Math.round((net / m.totalRevenue) * 100) : 0;
+              const hasData = m.totalRevenue > 0 || m.totalExpenses > 0;
+              return `
+                <tr class="border-b border-gray-100 ${hasData ? "" : "opacity-40"}">
+                  <td class="px-3 py-2 font-medium capitalize">${m.label}</td>
+                  <td class="px-3 py-2 text-right font-mono text-green-600">${money(m.totalRevenue)}</td>
+                  <td class="px-3 py-2 text-right font-mono text-red-500">${money(m.totalExpenses)}</td>
+                  <td class="px-3 py-2 text-right font-mono text-yellow-600">${money(m.totalProductionCost)}</td>
+                  <td class="px-3 py-2 text-right font-mono font-bold ${net >= 0 ? "text-green-700" : "text-red-600"}">${money(net)}</td>
+                  <td class="px-3 py-2 text-right"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${margin >= 0 ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}">${margin}%</span></td>
+                  <td class="px-3 py-2 text-right">${m.quoteCount}</td>
+                  <td class="px-3 py-2 text-right font-bold">${m.paidQuoteCount}</td>
+                </tr>
+              `;
+            }).join("")}
+            <tr class="bg-gray-50 font-bold border-t-2 border-gray-300">
+              <td class="px-3 py-2">TOTAL</td>
+              <td class="px-3 py-2 text-right font-mono text-green-600">${money(yearTotalRevenue)}</td>
+              <td class="px-3 py-2 text-right font-mono text-red-500">${money(yearTotalExpenses)}</td>
+              <td class="px-3 py-2 text-right font-mono text-yellow-600">${money(yearTotalProdCost)}</td>
+              <td class="px-3 py-2 text-right font-mono ${yearNetProfit >= 0 ? "text-green-700" : "text-red-600"}">${money(yearNetProfit)}</td>
+              <td class="px-3 py-2 text-right"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${yearNetProfit >= 0 ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}">${yearTotalRevenue > 0 ? Math.round((yearNetProfit / yearTotalRevenue) * 100) : 0}%</span></td>
+              <td class="px-3 py-2 text-right">${months.reduce((s, m) => s + m.quoteCount, 0)}</td>
+              <td class="px-3 py-2 text-right">${months.reduce((s, m) => s + m.paidQuoteCount, 0)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="bg-white rounded-lg shadow overflow-hidden">
+        <h3 class="font-bold text-sm text-gray-700 p-4 border-b">Top Productos por Ingreso — ${year}</h3>
+        <table class="min-w-full text-sm">
+          <thead>
+            <tr class="bg-gray-50 border-b text-xs text-gray-500 uppercase">
+              <th class="px-4 py-2 text-left">Producto</th>
+              <th class="px-4 py-2 text-right">Piezas</th>
+              <th class="px-4 py-2 text-right">Ingresos</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${topProducts.length === 0 ? `<tr><td colspan="3" class="px-4 py-6 text-center text-gray-500">Sin datos</td></tr>` : topProducts.map((p, i) => `
+              <tr class="border-b border-gray-100">
+                <td class="px-4 py-2"><span class="font-mono text-xs text-gray-400 mr-2">${i + 1}.</span>${escapeHtml(p.product_name)}</td>
+                <td class="px-4 py-2 text-right font-mono">${p.total_qty.toLocaleString()}</td>
+                <td class="px-4 py-2 text-right font-bold text-green-600">${money(p.total_revenue)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+      <div class="bg-white rounded-lg shadow overflow-hidden">
+        <h3 class="font-bold text-sm text-gray-700 p-4 border-b">Top Clientes por Ingreso — ${year}</h3>
+        <table class="min-w-full text-sm">
+          <thead>
+            <tr class="bg-gray-50 border-b text-xs text-gray-500 uppercase">
+              <th class="px-4 py-2 text-left">Cliente</th>
+              <th class="px-4 py-2 text-right">Cotizaciones</th>
+              <th class="px-4 py-2 text-right">Ingresos</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${topCustomers.length === 0 ? `<tr><td colspan="3" class="px-4 py-6 text-center text-gray-500">Sin datos</td></tr>` : topCustomers.map((c, i) => `
+              <tr class="border-b border-gray-100">
+                <td class="px-4 py-2"><span class="font-mono text-xs text-gray-400 mr-2">${i + 1}.</span>${escapeHtml(c.customer_name)}</td>
+                <td class="px-4 py-2 text-right font-mono">${c.quote_count}</td>
+                <td class="px-4 py-2 text-right font-bold text-green-600">${money(c.total_revenue)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `));
 });
 
 export { adminRoutes };
