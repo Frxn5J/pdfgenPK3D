@@ -167,15 +167,33 @@ const normalizeMakerWorldUrl = (rawUrl: string) => {
   return url.toString();
 };
 
+const fetchViaProxy = async (targetUrl: string): Promise<string> => {
+  const proxies = [
+    (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  ];
+  for (const makeUrl of proxies) {
+    try {
+      const res = await fetch(makeUrl(targetUrl), { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" } });
+      if (res.ok) return await res.text();
+    } catch { /* try next proxy */ }
+  }
+  throw new Error("No se pudo descargar la página de MakerWorld. Todos los proxies fallaron.");
+};
+
 const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<MakerWorldDraft> => {
   const sourceUrl = normalizeMakerWorldUrl(rawUrl);
   let html: string;
   if (clientHtml) {
     html = clientHtml;
   } else {
-    const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "es-ES,es;q=0.9,en;q=0.8" } });
-    if (!response.ok) throw new Error(`MakerWorld respondió con HTTP ${response.status}`);
-    html = await response.text();
+    try {
+      const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "es-ES,es;q=0.9,en;q=0.8" } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      html = await response.text();
+    } catch {
+      html = await fetchViaProxy(sourceUrl);
+    }
   }
   const nextRaw = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
   let design: Record<string, any> | undefined;
