@@ -5,7 +5,7 @@ services:
     build: .
     restart: always
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       - catalog_data:/app/data
     environment:
@@ -19,6 +19,13 @@ services:
       - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
       - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
       - LLM_DESCRIPTION_MAX_WORDS=${LLM_DESCRIPTION_MAX_WORDS:-45}
+      - QWEN_IMAGE_BASE_URL=${QWEN_IMAGE_BASE_URL:-}
+      - QWEN_IMAGE_ROUTE=${QWEN_IMAGE_ROUTE:-/v1/images/edits}
+      - QWEN_IMAGE_ENDPOINT=${QWEN_IMAGE_ENDPOINT:-}
+      - QWEN_IMAGE_API_KEY=${QWEN_IMAGE_API_KEY:-}
+      - QWEN_IMAGE_MODEL=${QWEN_IMAGE_MODEL:-}
+      - QWEN_IMAGE_PROMPT=${QWEN_IMAGE_PROMPT:-}
+      - QWEN_IMAGE_TIMEOUT_MS=${QWEN_IMAGE_TIMEOUT_MS:-120000}
 
 volumes:
   catalog_data:
