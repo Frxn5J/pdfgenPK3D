@@ -1183,6 +1183,7 @@ adminRoutes.post("/makerworld", async (c) => {
     const draft = await scrapeMakerWorld(formString(body.makerworld_url));
     return c.html(renderMakerWorldForm(draft));
   } catch (error) {
+    console.error("[MakerWorld scrape error]", error);
     return c.html(renderMakerWorldForm(undefined, error instanceof Error ? error.message : "No se pudo analizar el link de MakerWorld"), 400);
   }
 });
