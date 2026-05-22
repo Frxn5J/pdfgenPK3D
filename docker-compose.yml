@@ -11,21 +11,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - ADMIN_USERNAME=${ADMIN_USERNAME:-Frxn5J}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
-      - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
-      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
-      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
-      - LLM_DESCRIPTION_MAX_WORDS=${LLM_DESCRIPTION_MAX_WORDS:-45}
-      - QWEN_IMAGE_BASE_URL=${QWEN_IMAGE_BASE_URL:-}
-      - QWEN_IMAGE_ROUTE=${QWEN_IMAGE_ROUTE:-/v1/images/edits}
-      - QWEN_IMAGE_ENDPOINT=${QWEN_IMAGE_ENDPOINT:-}
-      - QWEN_IMAGE_API_KEY=${QWEN_IMAGE_API_KEY:-}
-      - QWEN_IMAGE_MODEL=${QWEN_IMAGE_MODEL:-}
-      - QWEN_IMAGE_PROMPT=${QWEN_IMAGE_PROMPT:-}
-      - QWEN_IMAGE_TIMEOUT_MS=${QWEN_IMAGE_TIMEOUT_MS:-120000}
+      
 
 volumes:
   catalog_data:
