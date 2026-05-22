@@ -167,11 +167,16 @@ const normalizeMakerWorldUrl = (rawUrl: string) => {
   return url.toString();
 };
 
-const scrapeMakerWorld = async (rawUrl: string): Promise<MakerWorldDraft> => {
+const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<MakerWorldDraft> => {
   const sourceUrl = normalizeMakerWorldUrl(rawUrl);
-  const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "es-ES,es;q=0.9,en;q=0.8" } });
-  if (!response.ok) throw new Error(`MakerWorld respondió con HTTP ${response.status}`);
-  const html = await response.text();
+  let html: string;
+  if (clientHtml) {
+    html = clientHtml;
+  } else {
+    const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "es-ES,es;q=0.9,en;q=0.8" } });
+    if (!response.ok) throw new Error(`MakerWorld respondió con HTTP ${response.status}`);
+    html = await response.text();
+  }
   const nextRaw = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
   let design: Record<string, any> | undefined;
   if (nextRaw) {
@@ -1086,10 +1091,25 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
         <p class="text-sm text-gray-500 mt-1">Pega un link de MakerWorld. El sistema intenta traer nombre, descripción en español e imágenes; TODO queda editable antes de mandar al catálogo.</p>
       </div>
       ${error ? `<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md">${escapeHtml(error)}</div>` : ""}
-      <form action="/admin/makerworld" method="post" class="flex flex-col sm:flex-row gap-3">
-        <input type="url" name="makerworld_url" required value="${escapeHtml(draft?.sourceUrl || "")}" placeholder="https://makerworld.com/es/models/..." class="flex-1 px-3 py-2 border border-gray-300 rounded-md">
-        <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Analizar link</button>
+      <form id="mw-form" action="/admin/makerworld" method="post" class="flex flex-col sm:flex-row gap-3">
+        <input type="url" name="makerworld_url" id="mw-url" required value="${escapeHtml(draft?.sourceUrl || "")}" placeholder="https://makerworld.com/es/models/..." class="flex-1 px-3 py-2 border border-gray-300 rounded-md">
+        <input type="hidden" name="client_html" id="mw-html">
+        <button type="submit" id="mw-btn" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Analizar link</button>
       </form>
+      <script>
+      document.getElementById('mw-form').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const btn = document.getElementById('mw-btn');
+        const url = document.getElementById('mw-url').value;
+        btn.disabled = true; btn.textContent = 'Descargando página...';
+        try {
+          const res = await fetch(url);
+          if (res.ok) document.getElementById('mw-html').value = await res.text();
+        } catch(err) { console.warn('Client fetch failed, server will try', err); }
+        btn.textContent = 'Analizando...';
+        this.submit();
+      });
+      </script>
       ${draft ? `
       <form action="/admin/makerworld/save" method="post" enctype="multipart/form-data" class="space-y-6 border-t pt-6">
         <input type="hidden" name="source_url" value="${escapeHtml(draft.sourceUrl)}">
@@ -1180,7 +1200,8 @@ adminRoutes.get("/makerworld", (c) => c.html(renderMakerWorldForm()));
 adminRoutes.post("/makerworld", async (c) => {
   const body = await c.req.parseBody() as Record<string, unknown>;
   try {
-    const draft = await scrapeMakerWorld(formString(body.makerworld_url));
+    const clientHtml = formString(body.client_html) || undefined;
+    const draft = await scrapeMakerWorld(formString(body.makerworld_url), clientHtml);
     return c.html(renderMakerWorldForm(draft));
   } catch (error) {
     console.error("[MakerWorld scrape error]", error);
