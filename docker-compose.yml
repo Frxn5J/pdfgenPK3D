@@ -14,6 +14,11 @@ services:
       - ADMIN_USERNAME=${ADMIN_USERNAME:-Frxn5J}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      - LLM_DESCRIPTION_MAX_WORDS=${LLM_DESCRIPTION_MAX_WORDS:-45}
 
 volumes:
   catalog_data:

@@ -35,7 +35,24 @@ Para local, copia `.env.example` a `.env` y define tus valores:
 ADMIN_USERNAME=Frxn5J
 ADMIN_PASSWORD=tu_contraseña
 SESSION_SECRET=un_string_largo_y_aleatorio
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=tu_api_key
+LLM_MODEL=gpt-4o-mini
+LLM_TEMPERATURE=0.7
+LLM_DESCRIPTION_MAX_WORDS=45
 ```
+
+## IA para Descripciones de Catálogo
+
+En los formularios de producto y en el importador de MakerWorld hay un botón **Adaptar a catálogo con IA**. Este toma la descripción actual y la transforma en un texto comercial en español, más descriptivo y orientado a venta, antes de guardar el producto.
+
+La integración usa una API compatible con OpenAI Chat Completions y se configura por entorno:
+
+- `LLM_BASE_URL`: URL base compatible con OpenAI, por defecto `https://api.openai.com/v1`.
+- `LLM_API_KEY`: API key del proveedor.
+- `LLM_MODEL`: modelo a usar, por defecto `gpt-4o-mini`.
+- `LLM_TEMPERATURE`: creatividad del texto, por defecto `0.7`.
+- `LLM_DESCRIPTION_MAX_WORDS`: límite máximo de palabras para que la descripción quepa en la tarjeta de producto, por defecto `45`.
 
 ## Personalización Visual
 

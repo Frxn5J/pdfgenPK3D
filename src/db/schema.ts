@@ -152,6 +152,17 @@ export function getDefaultPriceTiers() {
   return db.query<PriceTier, []>(`SELECT * FROM default_price_tiers ORDER BY min_volume ASC`).all();
 }
 
+export function replaceDefaultPriceTiers(tiers: Omit<PriceTier, "id">[]) {
+  const insertTier = db.prepare(`INSERT INTO default_price_tiers (min_volume, max_volume, price, delivery_time) VALUES (?, ?, ?, ?)`);
+  const transaction = db.transaction((rows: Omit<PriceTier, "id">[]) => {
+    db.run(`DELETE FROM default_price_tiers`);
+    for (const tier of rows) {
+      insertTier.run(tier.min_volume, tier.max_volume, tier.price, tier.delivery_time);
+    }
+  });
+  transaction(tiers);
+}
+
 export interface Product {
   id: number;
   name: string;
@@ -171,4 +182,15 @@ export function getProduct(id: number) {
 
 export function getProductPriceTiers(productId: number) {
   return db.query<PriceTier, [number]>(`SELECT * FROM product_price_tiers WHERE product_id = ? ORDER BY min_volume ASC`).all(productId);
+}
+
+export function replaceProductPriceTiers(productId: number, tiers: Omit<PriceTier, "id">[]) {
+  const insertTier = db.prepare(`INSERT INTO product_price_tiers (product_id, min_volume, max_volume, price, delivery_time) VALUES (?, ?, ?, ?, ?)`);
+  const transaction = db.transaction((id: number, rows: Omit<PriceTier, "id">[]) => {
+    db.run(`DELETE FROM product_price_tiers WHERE product_id = ?`, [id]);
+    for (const tier of rows) {
+      insertTier.run(id, tier.min_volume, tier.max_volume, tier.price, tier.delivery_time);
+    }
+  });
+  transaction(productId, tiers);
 }

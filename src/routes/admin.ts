@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, type PriceTier } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 
@@ -41,6 +41,365 @@ const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (
 const configValue = (config: Record<string, string>, key: string, fallback = "") => escapeHtml(config[key] || fallback);
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
 
+type MakerWorldDraft = {
+  sourceUrl: string;
+  name: string;
+  description: string;
+  images: string[];
+};
+
+type ChatCompletionResponse = {
+  choices?: Array<{ message?: { content?: string }, delta?: { content?: string } }>;
+  error?: { message?: string };
+};
+
+const stripTags = (value: string) => value
+  .replace(/<script[\s\S]*?<\/script>/gi, " ")
+  .replace(/<style[\s\S]*?<\/style>/gi, " ")
+  .replace(/<[^>]+>/g, " ");
+
+const decodeEntities = (value: string) => value
+  .replace(/&nbsp;/g, " ")
+  .replace(/&amp;/g, "&")
+  .replace(/&lt;/g, "<")
+  .replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"')
+  .replace(/&#39;/g, "'")
+  .replace(/&#x27;/g, "'");
+
+const cleanText = (value: unknown) => decodeEntities(stripTags(String(value ?? ""))).replace(/\s+/g, " ").trim();
+
+const metaContent = (html: string, key: string) => {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const patterns = [
+    new RegExp(`<meta[^>]+(?:property|name)=["']${escapedKey}["'][^>]+content=["']([^"']*)["'][^>]*>`, "i"),
+    new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${escapedKey}["'][^>]*>`, "i"),
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern)?.[1];
+    if (match) return decodeEntities(match).trim();
+  }
+  return "";
+};
+
+const tagText = (html: string, tag: string) => cleanText(html.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\/${tag}>`, "i"))?.[1] || "");
+
+const uniqueImages = (values: unknown[]) => {
+  const seen = new Set<string>();
+  const images: string[] = [];
+  const add = (value: unknown) => {
+    const url = String(value ?? "").trim();
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) return;
+    seen.add(url);
+    images.push(url);
+  };
+  values.forEach(add);
+  return images.slice(0, 12);
+};
+
+const collectImageCandidates = (value: unknown, output: unknown[] = []) => {
+  if (!value || output.length > 80) return output;
+  if (typeof value === "string") {
+    if (/^https?:\/\//i.test(value) && /\.(png|jpe?g|webp)(\?|$)/i.test(value)) output.push(value);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectImageCandidates(item, output);
+    return output;
+  }
+  if (typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) collectImageCandidates(item, output);
+  }
+  return output;
+};
+
+const normalizeMakerWorldUrl = (rawUrl: string) => {
+  const url = new URL(rawUrl);
+  if (!url.hostname.endsWith("makerworld.com")) throw new Error("El link debe ser de makerworld.com");
+  if (!url.pathname.startsWith("/es/") && /^\/(en|zh|de|fr|it|ja|sv|pt|ko)\//.test(url.pathname)) {
+    url.pathname = url.pathname.replace(/^\/[a-z]{2}\//, "/es/");
+  }
+  return url.toString();
+};
+
+const scrapeMakerWorld = async (rawUrl: string): Promise<MakerWorldDraft> => {
+  const sourceUrl = normalizeMakerWorldUrl(rawUrl);
+  const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Catalog Importer" } });
+  if (!response.ok) throw new Error(`MakerWorld respondió con HTTP ${response.status}`);
+  const html = await response.text();
+  const nextRaw = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
+  let design: Record<string, any> | undefined;
+  if (nextRaw) {
+    try {
+      const nextData = JSON.parse(decodeEntities(nextRaw));
+      design = nextData?.props?.pageProps?.design;
+    } catch {
+      design = undefined;
+    }
+  }
+  const title = cleanText(design?.title || metaContent(html, "og:title") || tagText(html, "title")).replace(/ - Free 3D Print Model - MakerWorld$/i, "");
+  const description = cleanText(design?.summary || metaContent(html, "description") || metaContent(html, "og:description"));
+  const images = uniqueImages([
+    design?.coverUrl,
+    ...(collectImageCandidates(design) || []),
+    metaContent(html, "og:image"),
+    ...Array.from(html.matchAll(/https:\/\/makerworld\.bblmw\.com[^"'<>\s]+\.(?:png|jpe?g|webp)(?:\?[^"'<>\s]*)?/gi)).map((match) => match[0]),
+  ]);
+  return { sourceUrl, name: title || "Producto MakerWorld", description, images };
+};
+
+const llmConfig = () => ({
+  baseUrl: (process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
+  apiKey: process.env.LLM_API_KEY || "",
+  model: process.env.LLM_MODEL || "gpt-4o-mini",
+  temperature: Number.parseFloat(process.env.LLM_TEMPERATURE || "0.7"),
+  maxWords: Number.parseInt(process.env.LLM_DESCRIPTION_MAX_WORDS || "45", 10),
+});
+
+const trimToWordLimit = (value: string, maxWords: number) => {
+  const words = value.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  if (!Number.isFinite(maxWords) || maxWords < 10 || words.length <= maxWords) return value.trim();
+  return `${words.slice(0, maxWords).join(" ").replace(/[,.!?;:]+$/, "")}...`;
+};
+
+const parseLlmContent = (rawPayload: string) => {
+  if (rawPayload.trimStart().startsWith("data:")) {
+    return rawPayload
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .filter((line) => line && line !== "[DONE]")
+      .map((line) => {
+        try {
+          const payload = JSON.parse(line) as ChatCompletionResponse;
+          return payload.choices?.map((choice) => choice.delta?.content || choice.message?.content || "").join("") || "";
+        } catch {
+          return "";
+        }
+      })
+      .join("")
+      .trim();
+  }
+
+  try {
+    const payload = JSON.parse(rawPayload) as ChatCompletionResponse;
+    return payload.choices?.map((choice) => choice.message?.content || choice.delta?.content || "").join("").trim() || "";
+  } catch {
+    return "";
+  }
+};
+
+const parseLlmError = (rawPayload: string) => {
+  try {
+    const payload = JSON.parse(rawPayload) as ChatCompletionResponse;
+    return payload.error?.message || "";
+  } catch {
+    return "";
+  }
+};
+
+const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "") => {
+  const config = llmConfig();
+  if (!config.apiKey) throw new Error("LLM_API_KEY no está configurada en el entorno.");
+  if (!description.trim()) throw new Error("Primero necesitas una descripción base para adaptarla.");
+  const hasImage = /^https?:\/\//i.test(imageUrl) || imageUrl.startsWith("data:image/");
+
+  console.log("[LLM description/adapt] request", {
+    baseUrl: config.baseUrl,
+    model: config.model,
+    temperature: Number.isFinite(config.temperature) ? config.temperature : 0.7,
+    hasApiKey: Boolean(config.apiKey),
+    maxWords: config.maxWords,
+    hasImage,
+    imageSource: imageUrl.startsWith("data:image/") ? "uploaded-file" : hasImage ? "url" : "none",
+    nameLength: name.length,
+    descriptionLength: description.length,
+  });
+
+  const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}\n\nReescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Máximo ${config.maxWords} palabras. Usa un solo párrafo corto, comercial y descriptivo. Invita a comprar sin sonar exagerado. Mantente fiel a la información original. ${hasImage ? "Usa la imagen solo para complementar detalles visuales evidentes, como forma, estilo o apariencia; no inventes medidas, materiales ni funciones que no se puedan confirmar." : ""} Devuelve solo el texto final.`;
+
+  const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      temperature: Number.isFinite(config.temperature) ? config.temperature : 0.7,
+      messages: [
+        {
+          role: "system",
+          content: "Eres un copywriter experto en catálogos de productos de impresión 3D. Escribes en español claro, comercial y profesional. Tu trabajo es convertir descripciones técnicas o informales en microdescripciones de catálogo atractivas y orientadas a venta. No inventes materiales, medidas, licencias, compatibilidades ni usos no presentes en el texto original. No uses markdown.",
+        },
+        {
+          role: "user",
+          content: hasImage ? [
+            { type: "text", text: userText },
+            { type: "image_url", image_url: { url: imageUrl } },
+          ] : userText,
+        },
+      ],
+    }),
+  });
+
+  const rawPayload = await response.text();
+  console.log("[LLM description/adapt] response", {
+    status: response.status,
+    ok: response.ok,
+    body: rawPayload,
+  });
+
+  if (!response.ok) throw new Error(parseLlmError(rawPayload) || `El LLM respondió con HTTP ${response.status}`);
+  const content = parseLlmContent(rawPayload);
+  if (!content) throw new Error("El LLM no devolvió una descripción válida.");
+  return trimToWordLimit(content, config.maxWords);
+};
+
+const bodyValues = (body: Record<string, unknown>, key: string) => {
+  const value = body[key];
+  return Array.isArray(value) ? value : value === undefined ? [] : [value];
+};
+
+const parsePriceTiers = (body: Record<string, unknown>): Omit<PriceTier, "id">[] => {
+  const mins = bodyValues(body, "tier_min");
+  const maxes = bodyValues(body, "tier_max");
+  const prices = bodyValues(body, "tier_price");
+  const deliveries = bodyValues(body, "tier_delivery");
+  return mins.map((min, index) => {
+    const minVolume = Number.parseInt(formString(min), 10);
+    const maxRaw = formString(maxes[index]);
+    const maxVolume = maxRaw ? Number.parseInt(maxRaw, 10) : null;
+    const price = Number.parseFloat(formString(prices[index]));
+    const deliveryTime = formString(deliveries[index]);
+    if (!Number.isFinite(minVolume) || !Number.isFinite(price)) return null;
+    return { min_volume: minVolume, max_volume: Number.isFinite(maxVolume) ? maxVolume : null, price, delivery_time: deliveryTime };
+  }).filter((tier): tier is Omit<PriceTier, "id"> => Boolean(tier)).sort((a, b) => a.min_volume - b.min_volume);
+};
+
+const renderPriceTierRows = (tiers: Omit<PriceTier, "id">[]) => tiers.map((tier) => `
+  <tr>
+    <td><input type="number" name="tier_min" min="1" required value="${tier.min_volume}" class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td>
+    <td><input type="number" name="tier_max" min="1" value="${tier.max_volume ?? ""}" placeholder="Sin límite" class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td>
+    <td><input type="number" name="tier_price" min="0" step="0.01" required value="${tier.price}" class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td>
+    <td><input type="text" name="tier_delivery" value="${escapeHtml(tier.delivery_time)}" class="w-full px-2 py-1 border border-gray-300 rounded-md"></td>
+    <td><button type="button" class="remove-tier text-red-600 hover:text-red-800">Quitar</button></td>
+  </tr>
+`).join("");
+
+const renderPricingEditor = (tiers: Omit<PriceTier, "id">[]) => `
+  <div class="border border-gray-200 rounded-lg overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200" id="price-tiers-table">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Mínimo</th>
+          <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Máximo</th>
+          <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Precio</th>
+          <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Entrega</th>
+          <th class="px-3 py-2"></th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">${renderPriceTierRows(tiers)}</tbody>
+    </table>
+  </div>
+  <button type="button" id="add-tier" class="mt-3 bg-gray-200 text-gray-800 px-3 py-2 rounded-md hover:bg-gray-300 text-sm">+ Agregar rango</button>
+  <script>
+    (() => {
+      const table = document.querySelector('#price-tiers-table tbody');
+      const add = document.getElementById('add-tier');
+      add?.addEventListener('click', () => {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td><input type="number" name="tier_min" min="1" required class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td><td><input type="number" name="tier_max" min="1" placeholder="Sin límite" class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td><td><input type="number" name="tier_price" min="0" step="0.01" required class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td><td><input type="text" name="tier_delivery" class="w-full px-2 py-1 border border-gray-300 rounded-md"></td><td><button type="button" class="remove-tier text-red-600 hover:text-red-800">Quitar</button></td>';
+        table?.appendChild(row);
+      });
+      table?.addEventListener('click', (event) => {
+        if (event.target instanceof HTMLElement && event.target.classList.contains('remove-tier')) {
+          event.target.closest('tr')?.remove();
+        }
+      });
+    })();
+  </script>
+`;
+
+const renderDescriptionField = (value = "", rows = 3) => `
+  <div>
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+      <label class="block text-sm font-medium text-gray-700">Descripción</label>
+      <button type="button" data-ai-description class="self-start sm:self-auto bg-purple-600 text-white px-3 py-2 rounded-md hover:bg-purple-700 text-sm font-medium">
+        Adaptar a catálogo con IA
+      </button>
+    </div>
+    <textarea name="description" rows="${rows}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${escapeHtml(value)}</textarea>
+    <label class="mt-2 flex items-center gap-2 text-xs text-gray-600">
+      <input type="checkbox" data-ai-include-image class="rounded border-gray-300">
+      Agregar imagen a la petición para complementar la descripción
+    </label>
+    <p data-ai-description-status class="text-xs text-gray-500 mt-1">Convierte la descripción en una microdescripción comercial pensada para caber en la tarjeta del catálogo.</p>
+  </div>
+`;
+
+const descriptionAiScript = `
+  <script>
+    (() => {
+      const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.addEventListener('load', () => resolve(String(reader.result || '')));
+        reader.addEventListener('error', () => reject(new Error('No se pudo leer la imagen seleccionada.')));
+        reader.readAsDataURL(file);
+      });
+
+      const selectedImageUrl = async (form) => {
+        const includeImage = form?.querySelector('[data-ai-include-image]');
+        if (!(includeImage instanceof HTMLInputElement) || !includeImage.checked) return '';
+        const fileInput = form.querySelector('input[name="image_file"]');
+        if (fileInput instanceof HTMLInputElement && fileInput.files?.[0]) {
+          return await fileToDataUrl(fileInput.files[0]);
+        }
+        const selectedMakerWorldImage = form.querySelector('input[name="selected_image"]:checked');
+        if (selectedMakerWorldImage instanceof HTMLInputElement && selectedMakerWorldImage.value.trim()) return selectedMakerWorldImage.value.trim();
+        const imageUrl = form.querySelector('input[name="image_url"]');
+        if (imageUrl instanceof HTMLInputElement && imageUrl.value.trim()) return imageUrl.value.trim();
+        return '';
+      };
+
+      document.addEventListener('click', async (event) => {
+        const button = event.target instanceof HTMLElement ? event.target.closest('[data-ai-description]') : null;
+        if (!(button instanceof HTMLButtonElement)) return;
+        const form = button.closest('form');
+        const description = form?.querySelector('textarea[name="description"]');
+        const name = form?.querySelector('input[name="name"]');
+        const status = form?.querySelector('[data-ai-description-status]');
+        if (!(description instanceof HTMLTextAreaElement)) return;
+        const previousText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Adaptando...';
+        if (status) status.textContent = 'Generando texto de catálogo con IA...';
+        try {
+          const response = await fetch('/admin/description/adapt', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              name: name instanceof HTMLInputElement ? name.value : '',
+              description: description.value,
+              imageUrl: await selectedImageUrl(form),
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || 'No se pudo adaptar la descripción.');
+          description.value = payload.description || description.value;
+          if (status) status.textContent = 'Descripción adaptada. Revisa el texto antes de guardar.';
+        } catch (error) {
+          if (status) status.textContent = error instanceof Error ? error.message : 'No se pudo adaptar la descripción.';
+        } finally {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+      });
+    })();
+  </script>
+`;
+
 const AdminLayout = (title: string, content: string) => `
 <!DOCTYPE html>
 <html lang="es">
@@ -59,6 +418,7 @@ const AdminLayout = (title: string, content: string) => `
                     <div class="ml-10 flex items-baseline space-x-4">
                         <a href="/admin/config" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Configuración</a>
                         <a href="/admin/products" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Productos</a>
+                        <a href="/admin/makerworld" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">MakerWorld</a>
                         <a href="/" target="_blank" class="px-3 py-2 rounded-md text-sm font-medium text-blue-200 hover:text-white hover:bg-blue-700">Ver Catálogo ↗</a>
                     </div>
                 </div>
@@ -73,6 +433,7 @@ const AdminLayout = (title: string, content: string) => `
     <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         ${content}
     </main>
+${descriptionAiScript}
 </body>
 </html>
 `;
@@ -144,6 +505,100 @@ adminRoutes.get("/", (c) => {
   return c.redirect("/admin/products");
 });
 
+adminRoutes.post("/description/adapt", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const description = await adaptDescriptionForCatalog(formString(body.name), formString(body.description), formString(body.imageUrl));
+    return c.json({ description });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo adaptar la descripción." }, 400);
+  }
+});
+
+const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
+  const defaultTiers = getDefaultPriceTiers();
+  return AdminLayout("Importar MakerWorld", `
+    <div class="bg-white shadow rounded-lg p-6 space-y-6">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">Importar desde MakerWorld</h2>
+        <p class="text-sm text-gray-500 mt-1">Pega un link de MakerWorld. El sistema intenta traer nombre, descripción en español e imágenes; TODO queda editable antes de mandar al catálogo.</p>
+      </div>
+      ${error ? `<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md">${escapeHtml(error)}</div>` : ""}
+      <form action="/admin/makerworld" method="post" class="flex flex-col sm:flex-row gap-3">
+        <input type="url" name="makerworld_url" required value="${escapeHtml(draft?.sourceUrl || "")}" placeholder="https://makerworld.com/es/models/..." class="flex-1 px-3 py-2 border border-gray-300 rounded-md">
+        <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Analizar link</button>
+      </form>
+      ${draft ? `
+      <form action="/admin/makerworld/save" method="post" enctype="multipart/form-data" class="space-y-6 border-t pt-6">
+        <input type="hidden" name="source_url" value="${escapeHtml(draft.sourceUrl)}">
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Nombre del llavero / producto *</label>
+          <input type="text" name="name" required value="${escapeHtml(draft.name)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+        </div>
+        ${renderDescriptionField(draft.description, 5)}
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Elige imagen de MakerWorld</label>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            ${draft.images.map((image, index) => `
+              <label class="border rounded-lg p-2 cursor-pointer hover:border-blue-500">
+                <input type="radio" name="selected_image" value="${escapeHtml(image)}" ${index === 0 ? "checked" : ""} class="mb-2">
+                <img src="${escapeHtml(image)}" class="h-36 w-full object-contain bg-gray-50 rounded" loading="lazy">
+              </label>
+            `).join("")}
+            ${draft.images.length === 0 ? '<p class="text-sm text-gray-500">No se encontraron imágenes. Sube una manualmente abajo.</p>' : ""}
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">O pega/sube otra imagen</label>
+          <input type="text" name="image_url" placeholder="URL de imagen alternativa..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
+          <input type="file" name="image_file" accept="image/*" class="block w-full text-sm text-gray-500">
+          <p class="text-xs text-gray-500 mt-1">Prioridad: archivo subido, URL alternativa, imagen seleccionada.</p>
+        </div>
+        <div>
+          <label class="flex items-start gap-3 text-sm">
+            <input type="checkbox" name="use_default_pricing" value="1" checked class="mt-1 h-4 w-4 text-blue-600 border-gray-300 rounded">
+            <span><strong>Usar tabla global de precios</strong><br><span class="text-gray-500">Desmarca para guardar precios custom para este producto.</span></span>
+          </label>
+        </div>
+        <div>
+          <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
+          ${renderPricingEditor(defaultTiers)}
+        </div>
+        <div class="flex justify-end gap-3 pt-4 border-t">
+          <a href="/admin/products" class="bg-gray-200 text-gray-800 px-4 py-2 rounded-md hover:bg-gray-300">Cancelar</a>
+          <button type="submit" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700">Agregar al catálogo</button>
+        </div>
+      </form>` : ""}
+    </div>
+  `);
+};
+
+adminRoutes.get("/makerworld", (c) => c.html(renderMakerWorldForm()));
+
+adminRoutes.post("/makerworld", async (c) => {
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  try {
+    const draft = await scrapeMakerWorld(formString(body.makerworld_url));
+    return c.html(renderMakerWorldForm(draft));
+  } catch (error) {
+    return c.html(renderMakerWorldForm(undefined, error instanceof Error ? error.message : "No se pudo analizar el link de MakerWorld"), 400);
+  }
+});
+
+adminRoutes.post("/makerworld/save", async (c) => {
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  let imageUrl = formString(body.image_url) || formString(body.selected_image);
+  const file = formFile(body.image_file);
+  if (file) imageUrl = await saveUpload(file, "products", "prod");
+  const useDefaultPricing = body.use_default_pricing === "1" ? 1 : 0;
+  const result = db.query(`
+    INSERT INTO products (name, description, image_url, use_default_pricing, sort_order)
+    VALUES (?, ?, ?, ?, 0) RETURNING id
+  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, useDefaultPricing) as {id: number};
+  if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
+  return c.redirect(`/admin/products/${result.id}/edit`);
+});
+
 adminRoutes.get("/config", (c) => {
   const config = getConfig();
   const tiers = getDefaultPriceTiers();
@@ -207,6 +662,12 @@ adminRoutes.get("/config", (c) => {
             <div>
                 <label class="block text-sm font-medium text-gray-700">Texto de Contacto / Pie de página</label>
                 <textarea name="contact_text" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "contact_text")}</textarea>
+            </div>
+
+            <div>
+                <h3 class="text-lg font-semibold mb-3">Tabla Global de Precios por Volumen</h3>
+                <p class="text-sm text-gray-500 mb-3">Estos rangos se usan en productos que tengan marcada la opción de precios globales.</p>
+                ${renderPricingEditor(tiers)}
             </div>
 
             <hr class="my-6">
@@ -433,7 +894,7 @@ adminRoutes.get("/config", (c) => {
 });
 
 adminRoutes.post("/config", async (c) => {
-  const body = await c.req.parseBody();
+  const body = await c.req.parseBody() as Record<string, unknown>;
   const currentConfig = getConfig();
 
   let logoUrl = formString(body.company_logo_url);
@@ -503,6 +964,8 @@ adminRoutes.post("/config", async (c) => {
     custom_css: body.custom_css as string,
   });
 
+  replaceDefaultPriceTiers(parsePriceTiers(body));
+
   return c.redirect("/admin/config");
 });
 
@@ -560,6 +1023,7 @@ adminRoutes.get("/products", (c) => {
 });
 
 adminRoutes.get("/products/new", (c) => {
+  const defaultTiers = getDefaultPriceTiers();
   return c.html(AdminLayout("Nuevo Producto", `
     <div class="bg-white shadow rounded-lg p-6">
         <h2 class="text-xl font-bold mb-6">Agregar Nuevo Producto</h2>
@@ -569,10 +1033,7 @@ adminRoutes.get("/products/new", (c) => {
                 <input type="text" name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
 
-            <div>
-                <label class="block text-sm font-medium text-gray-700">Descripción</label>
-                <textarea name="description" rows="3" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md"></textarea>
-            </div>
+            ${renderDescriptionField("", 3)}
 
             <div>
                 <label class="block text-sm font-medium text-gray-700">Imagen (URL o subir archivo)</label>
@@ -592,6 +1053,12 @@ adminRoutes.get("/products/new", (c) => {
                 </div>
             </div>
 
+            <div>
+                <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
+                <p class="text-sm text-gray-500 mb-3">Si desmarcas precios globales, estos rangos se guardan solo para este producto.</p>
+                ${renderPricingEditor(defaultTiers)}
+            </div>
+
             <div class="flex justify-end gap-3 pt-4 border-t">
                 <a href="/admin/products" class="bg-gray-200 text-gray-800 px-4 py-2 rounded-md hover:bg-gray-300">Cancelar</a>
                 <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Guardar Producto</button>
@@ -602,7 +1069,7 @@ adminRoutes.get("/products/new", (c) => {
 });
 
 adminRoutes.post("/products/new", async (c) => {
-  const body = await c.req.parseBody();
+  const body = await c.req.parseBody() as Record<string, unknown>;
 
   let imageUrl = formString(body.image_url);
 
@@ -623,6 +1090,8 @@ adminRoutes.post("/products/new", async (c) => {
     VALUES (?, ?, ?, ?, 0) RETURNING id
   `).get(formString(body.name), formString(body.description) || null, imageUrl || null, useDefaultPricing) as {id: number};
 
+  if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
+
   return c.redirect(useDefaultPricing ? "/admin/products" : `/admin/products/${result.id}/edit`);
 });
 
@@ -637,8 +1106,9 @@ adminRoutes.get("/products/:id/edit", (c) => {
   const id = parseInt(c.req.param("id"));
   const product = getProduct(id);
   if (!product) return c.notFound();
+  const productTiers = getProductPriceTiers(id);
+  const tiers = productTiers.length ? productTiers : getDefaultPriceTiers();
 
-  // Basic implementation to avoid complexity. Just update basic info.
   return c.html(AdminLayout("Editar Producto", `
     <div class="bg-white shadow rounded-lg p-6">
         <h2 class="text-xl font-bold mb-6">Editar Producto: ${escapeHtml(product.name)}</h2>
@@ -648,10 +1118,7 @@ adminRoutes.get("/products/:id/edit", (c) => {
                 <input type="text" name="name" value="${escapeHtml(product.name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
 
-            <div>
-                <label class="block text-sm font-medium text-gray-700">Descripción</label>
-                <textarea name="description" rows="3" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${escapeHtml(product.description || '')}</textarea>
-            </div>
+            ${renderDescriptionField(product.description || '', 3)}
 
             <div>
                 <label class="block text-sm font-medium text-gray-700">Imagen actual</label>
@@ -672,6 +1139,12 @@ adminRoutes.get("/products/:id/edit", (c) => {
                 </div>
             </div>
 
+            <div>
+                <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
+                <p class="text-sm text-gray-500 mb-3">Desmarca precios globales para que el catálogo use estos rangos en este producto.</p>
+                ${renderPricingEditor(tiers)}
+            </div>
+
             <div class="flex justify-end gap-3 pt-4 border-t">
                 <a href="/admin/products" class="bg-gray-200 text-gray-800 px-4 py-2 rounded-md hover:bg-gray-300">Cancelar</a>
                 <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Guardar Cambios</button>
@@ -683,7 +1156,7 @@ adminRoutes.get("/products/:id/edit", (c) => {
 
 adminRoutes.post("/products/:id/edit", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.parseBody();
+  const body = await c.req.parseBody() as Record<string, unknown>;
 
   let imageUrl = formString(body.image_url);
 
@@ -702,6 +1175,8 @@ adminRoutes.post("/products/:id/edit", async (c) => {
   db.run(`
     UPDATE products SET name = ?, description = ?, image_url = ?, use_default_pricing = ? WHERE id = ?
   `, [formString(body.name), formString(body.description) || null, imageUrl || null, useDefaultPricing, id]);
+
+  replaceProductPriceTiers(id, useDefaultPricing ? [] : parsePriceTiers(body));
 
   return c.redirect("/admin/products");
 });
