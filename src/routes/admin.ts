@@ -945,7 +945,7 @@ adminRoutes.post("/login", async (c) => {
     setCookie(c, "admin_session", "authenticated", {
       path: "/",
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: false,
       sameSite: "Lax",
       maxAge: 60 * 60 * 24 // 1 day
     });
