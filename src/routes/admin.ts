@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, type PriceTier } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuoteItems, type PriceTier, type QuoteItem } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 
@@ -17,8 +17,16 @@ export const requireAuth = async (c: any, next: any) => {
 
 const adminRoutes = new Hono();
 
-const formString = (value: unknown) => typeof value === "string" ? value : "";
-const formFile = (value: unknown) => value instanceof File && value.size > 0 ? value : null;
+const formString = (value: unknown) => {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return formString(value[0]);
+  return "";
+};
+const formFile = (value: unknown): File | null => {
+  if (value instanceof File && value.size > 0) return value;
+  if (Array.isArray(value)) return value.map(formFile).find(Boolean) || null;
+  return null;
+};
 const safeFilename = (name: string) => name.replace(/[^a-zA-Z0-9.-]/g, "_");
 const isFontFile = (file: File) => /\.(woff2?|ttf|otf)$/i.test(file.name);
 const saveUpload = async (file: File, folder: string, prefix: string) => {
@@ -40,6 +48,11 @@ const htmlEntities: Record<string, string> = {
 const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => htmlEntities[char] || char);
 const configValue = (config: Record<string, string>, key: string, fallback = "") => escapeHtml(config[key] || fallback);
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
+const money = (value: number) => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(value || 0);
+const volumeText = (min: number | null, max: number | null) => {
+  if (!min) return "Sin rango";
+  return max ? `${min} a ${max} piezas` : `${min} o más piezas`;
+};
 
 type MakerWorldDraft = {
   sourceUrl: string;
@@ -51,6 +64,11 @@ type MakerWorldDraft = {
 type ChatCompletionResponse = {
   choices?: Array<{ message?: { content?: string }, delta?: { content?: string } }>;
   error?: { message?: string };
+};
+
+type ImageEnhanceResult = {
+  imageUrl: string;
+  prompt: string;
 };
 
 const stripTags = (value: string) => value
@@ -257,6 +275,184 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
   return trimToWordLimit(content, config.maxWords);
 };
 
+const imageEnhanceConfig = () => ({
+  baseUrl: (process.env.QWEN_IMAGE_BASE_URL || process.env.IMAGE_ENHANCE_BASE_URL || "").trim(),
+  endpoint: (process.env.QWEN_IMAGE_ENDPOINT || process.env.IMAGE_ENHANCE_ENDPOINT || "").trim(),
+  route: (process.env.QWEN_IMAGE_ROUTE || process.env.IMAGE_ENHANCE_ROUTE || "").trim(),
+  apiKey: process.env.QWEN_IMAGE_API_KEY || process.env.IMAGE_ENHANCE_API_KEY || "",
+  model: (process.env.QWEN_IMAGE_MODEL || process.env.IMAGE_ENHANCE_MODEL || "").trim(),
+  prompt: (process.env.QWEN_IMAGE_PROMPT || "").trim() || "Transforma esta imagen en una fotografía profesional para catálogo ecommerce: producto centrado y completo, fondo blanco puro, iluminación de estudio suave, sombras naturales discretas, alta nitidez, colores fieles al producto, sin texto, sin marcas de agua, sin manos, sin props y sin elementos extra. Conserva la forma y detalles reales del objeto. Resultado limpio, realista y listo para catálogo.",
+  timeoutMs: Number.parseInt(process.env.QWEN_IMAGE_TIMEOUT_MS || "120000", 10),
+});
+
+const joinUrl = (base: string, path: string) => `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
+
+const resolveImageEnhanceEndpoint = (config: ReturnType<typeof imageEnhanceConfig>) => {
+  if (config.baseUrl) return joinUrl(config.baseUrl, config.route || "/v1/images/edits");
+  if (!config.endpoint) return "";
+  if (config.route) return joinUrl(config.endpoint, config.route);
+  if (/\/v1\/?$/i.test(config.endpoint)) return joinUrl(config.endpoint, "/images/edits");
+  return config.endpoint;
+};
+
+const imageExtensionFromMime = (mime: string) => {
+  if (/jpe?g/i.test(mime)) return "jpg";
+  if (/webp/i.test(mime)) return "webp";
+  if (/gif/i.test(mime)) return "gif";
+  return "png";
+};
+
+const saveImageBuffer = (buffer: ArrayBuffer | Uint8Array, mime = "image/png", prefix = "enhanced") => {
+  const uploadDir = join(process.cwd(), "data", "uploads", "products");
+  fs.mkdirSync(uploadDir, { recursive: true });
+  const filename = `${prefix}-${Date.now()}.${imageExtensionFromMime(mime)}`;
+  const uploadPath = join(uploadDir, filename);
+  const bytes = buffer instanceof ArrayBuffer ? Buffer.from(new Uint8Array(buffer)) : Buffer.from(buffer);
+  fs.writeFileSync(uploadPath, bytes);
+  return `/uploads/products/${filename}`;
+};
+
+const dataImageToBuffer = (value: string) => {
+  const match = value.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+  if (!match) return null;
+  return { mime: match[1] || "image/png", buffer: Buffer.from(match[2] || "", "base64") };
+};
+
+const looksLikeBase64Image = (value: string) => value.length > 200 && /^[a-z0-9+/=\s]+$/i.test(value);
+
+const persistImageReference = async (value: string) => {
+  const candidate = value.trim();
+  const dataImage = dataImageToBuffer(candidate);
+  if (dataImage) return saveImageBuffer(dataImage.buffer, dataImage.mime, "enhanced");
+
+  if (/^https?:\/\//i.test(candidate)) {
+    try {
+      const response = await fetch(candidate, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
+      const mime = response.headers.get("content-type") || "";
+      if (response.ok && mime.startsWith("image/")) {
+        return saveImageBuffer(await response.arrayBuffer(), mime, "enhanced");
+      }
+    } catch {
+      // If the generated URL cannot be downloaded, keep the provider URL.
+    }
+    return candidate;
+  }
+
+  if (looksLikeBase64Image(candidate)) {
+    return saveImageBuffer(Buffer.from(candidate.replace(/\s+/g, ""), "base64"), "image/png", "enhanced");
+  }
+
+  throw new Error("El endpoint de mejora no devolvió una imagen válida.");
+};
+
+const extractImageCandidate = (payload: unknown): string => {
+  const preferredKeys = new Set(["imageurl", "image_url", "outputurl", "output_url", "url", "image", "result", "b64_json", "base64"]);
+
+  const walk = (value: unknown, key = ""): string => {
+    if (typeof value === "string") {
+      const text = value.trim();
+      const normalizedKey = key.toLowerCase();
+      if (/^data:image\//i.test(text) || /^https?:\/\//i.test(text)) return text;
+      if ((normalizedKey.includes("image") || normalizedKey.includes("base64") || normalizedKey.includes("b64")) && looksLikeBase64Image(text)) return text;
+      return "";
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = walk(item, key);
+        if (found) return found;
+      }
+      return "";
+    }
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      for (const [entryKey, entryValue] of entries) {
+        if (preferredKeys.has(entryKey.toLowerCase())) {
+          const found = walk(entryValue, entryKey);
+          if (found) return found;
+        }
+      }
+      for (const [entryKey, entryValue] of entries) {
+        const found = walk(entryValue, entryKey);
+        if (found) return found;
+      }
+    }
+    return "";
+  };
+
+  return walk(payload);
+};
+
+const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceResult> => {
+  const config = imageEnhanceConfig();
+  const endpoint = resolveImageEnhanceEndpoint(config);
+  if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
+  if (!imageUrl.trim()) throw new Error("Primero selecciona, pega o sube una imagen para mejorar.");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
+
+  try {
+    console.log("[Qwen image/enhance] request", {
+      endpoint,
+      model: config.model || "provider-default",
+      hasApiKey: Boolean(config.apiKey),
+      imageSource: imageUrl.startsWith("data:image/") ? "uploaded-file" : "url",
+    });
+
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: config.model || undefined,
+        prompt: config.prompt,
+        image: imageUrl,
+        imageUrl,
+        image_url: imageUrl,
+        response_format: "url",
+        source: "pixkey3d-makerworld",
+        intent: "catalog-product-photo-white-background",
+        options: {
+          background: "white",
+          noText: true,
+          style: "studio product photography",
+          preserveProduct: true,
+        },
+      }),
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.startsWith("image/")) {
+      if (!response.ok) throw new Error(`El endpoint de mejora respondió con HTTP ${response.status}`);
+      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "enhanced"), prompt: config.prompt };
+    }
+
+    const rawPayload = await response.text();
+    console.log("[Qwen image/enhance] response", { status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
+    if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `El endpoint de mejora respondió con HTTP ${response.status}`);
+    if (/text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(rawPayload) || /^\s*<html/i.test(rawPayload)) {
+      throw new Error(`El endpoint respondió HTML, no una imagen. Estás llamando una ruta de UI o base URL. Usa QWEN_IMAGE_BASE_URL=https://aiapibun.duckdns.org con QWEN_IMAGE_ROUTE=/v1/images/edits, o QWEN_IMAGE_ENDPOINT=${joinUrl(endpoint, endpoint.endsWith("/v1") ? "/images/edits" : "")}.`);
+    }
+
+    let candidate = "";
+    try {
+      candidate = extractImageCandidate(JSON.parse(rawPayload));
+    } catch {
+      candidate = extractImageCandidate(rawPayload);
+    }
+
+    return { imageUrl: await persistImageReference(candidate), prompt: config.prompt };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error("El endpoint de mejora tardó demasiado en responder.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 const bodyValues = (body: Record<string, unknown>, key: string) => {
   const value = body[key];
   return Array.isArray(value) ? value : value === undefined ? [] : [value];
@@ -289,7 +485,7 @@ const renderPriceTierRows = (tiers: Omit<PriceTier, "id">[]) => tiers.map((tier)
 `).join("");
 
 const renderPricingEditor = (tiers: Omit<PriceTier, "id">[]) => `
-  <div class="border border-gray-200 rounded-lg overflow-hidden">
+  <div class="border border-gray-200 rounded-lg overflow-hidden" data-pricing-editor>
     <table class="min-w-full divide-y divide-gray-200" id="price-tiers-table">
       <thead class="bg-gray-50">
         <tr>
@@ -303,21 +499,41 @@ const renderPricingEditor = (tiers: Omit<PriceTier, "id">[]) => `
       <tbody class="bg-white divide-y divide-gray-200">${renderPriceTierRows(tiers)}</tbody>
     </table>
   </div>
-  <button type="button" id="add-tier" class="mt-3 bg-gray-200 text-gray-800 px-3 py-2 rounded-md hover:bg-gray-300 text-sm">+ Agregar rango</button>
+  <button type="button" id="add-tier" class="mt-3 bg-gray-200 text-gray-800 px-3 py-2 rounded-md hover:bg-gray-300 text-sm" data-pricing-add-tier>+ Agregar rango</button>
   <script>
     (() => {
       const table = document.querySelector('#price-tiers-table tbody');
       const add = document.getElementById('add-tier');
+      const syncPricingEditors = () => {
+        document.querySelectorAll('form').forEach((form) => {
+          const useDefault = form.querySelector('input[name="use_default_pricing"]');
+          const editor = form.querySelector('[data-pricing-editor]');
+          const addButton = form.querySelector('[data-pricing-add-tier]');
+          if (!(useDefault instanceof HTMLInputElement) || !editor) return;
+          const disabled = useDefault.checked;
+          editor.querySelectorAll('input, button').forEach((control) => {
+            if (control instanceof HTMLInputElement || control instanceof HTMLButtonElement) control.disabled = disabled;
+          });
+          if (addButton instanceof HTMLButtonElement) addButton.disabled = disabled;
+          editor.classList.toggle('opacity-50', disabled);
+          editor.classList.toggle('pointer-events-none', disabled);
+        });
+      };
       add?.addEventListener('click', () => {
         const row = document.createElement('tr');
         row.innerHTML = '<td><input type="number" name="tier_min" min="1" required class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td><td><input type="number" name="tier_max" min="1" placeholder="Sin límite" class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td><td><input type="number" name="tier_price" min="0" step="0.01" required class="w-28 px-2 py-1 border border-gray-300 rounded-md"></td><td><input type="text" name="tier_delivery" class="w-full px-2 py-1 border border-gray-300 rounded-md"></td><td><button type="button" class="remove-tier text-red-600 hover:text-red-800">Quitar</button></td>';
         table?.appendChild(row);
+        syncPricingEditors();
       });
       table?.addEventListener('click', (event) => {
         if (event.target instanceof HTMLElement && event.target.classList.contains('remove-tier')) {
           event.target.closest('tr')?.remove();
         }
       });
+      document.addEventListener('change', (event) => {
+        if (event.target instanceof HTMLInputElement && event.target.name === 'use_default_pricing') syncPricingEditors();
+      });
+      syncPricingEditors();
     })();
   </script>
 `;
@@ -356,11 +572,32 @@ const descriptionAiScript = `
         if (fileInput instanceof HTMLInputElement && fileInput.files?.[0]) {
           return await fileToDataUrl(fileInput.files[0]);
         }
-        const selectedMakerWorldImage = form.querySelector('input[name="selected_image"]:checked');
-        if (selectedMakerWorldImage instanceof HTMLInputElement && selectedMakerWorldImage.value.trim()) return selectedMakerWorldImage.value.trim();
         const imageUrl = form.querySelector('input[name="image_url"]');
         if (imageUrl instanceof HTMLInputElement && imageUrl.value.trim()) return imageUrl.value.trim();
+        const selectedMakerWorldImage = form.querySelector('input[name="selected_image"]:checked');
+        if (selectedMakerWorldImage instanceof HTMLInputElement && selectedMakerWorldImage.value.trim()) return selectedMakerWorldImage.value.trim();
         return '';
+      };
+
+      const selectedImageForEnhancement = async (form) => {
+        const fileInput = form?.querySelector('input[name="image_file"]');
+        if (fileInput instanceof HTMLInputElement && fileInput.files?.[0]) {
+          return await fileToDataUrl(fileInput.files[0]);
+        }
+        const selectedMakerWorldImage = form?.querySelector('input[name="selected_image"]:checked');
+        if (selectedMakerWorldImage instanceof HTMLInputElement && selectedMakerWorldImage.value.trim()) return selectedMakerWorldImage.value.trim();
+        const imageUrl = form?.querySelector('input[name="image_url"]');
+        if (imageUrl instanceof HTMLInputElement && imageUrl.value.trim()) return imageUrl.value.trim();
+        return '';
+      };
+
+      const showEnhancedImage = (form, imageUrl) => {
+        const preview = form?.querySelector('[data-enhanced-image-preview]');
+        const img = preview?.querySelector('img');
+        const link = preview?.querySelector('[data-enhanced-image-link]');
+        if (img instanceof HTMLImageElement) img.src = imageUrl;
+        if (link instanceof HTMLAnchorElement) link.href = imageUrl;
+        preview?.classList.remove('hidden');
       };
 
       document.addEventListener('click', async (event) => {
@@ -396,6 +633,41 @@ const descriptionAiScript = `
           button.textContent = previousText;
         }
       });
+
+      document.addEventListener('click', async (event) => {
+        const button = event.target instanceof HTMLElement ? event.target.closest('[data-enhance-image]') : null;
+        if (!(button instanceof HTMLButtonElement)) return;
+        const form = button.closest('form');
+        const status = form?.querySelector('[data-image-enhance-status]');
+        const imageUrlInput = form?.querySelector('input[name="image_url"]');
+        const fileInput = form?.querySelector('input[name="image_file"]');
+        const selectedMakerWorldImage = form?.querySelector('input[name="selected_image"]:checked');
+        const previousText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Mejorando...';
+        if (status) status.textContent = selectedMakerWorldImage instanceof HTMLInputElement
+          ? 'Enviando la imagen marcada de MakerWorld para crear foto de catálogo con fondo blanco...'
+          : 'Enviando imagen para crear foto de catálogo con fondo blanco...';
+        try {
+          const response = await fetch('/admin/image/enhance', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ imageUrl: await selectedImageForEnhancement(form) }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || 'No se pudo mejorar la imagen.');
+          if (imageUrlInput instanceof HTMLInputElement) imageUrlInput.value = payload.imageUrl || '';
+          if (fileInput instanceof HTMLInputElement) fileInput.value = '';
+          if (selectedMakerWorldImage instanceof HTMLInputElement) selectedMakerWorldImage.checked = false;
+          showEnhancedImage(form, payload.imageUrl || '');
+          if (status) status.textContent = 'Imagen mejorada lista y seleccionada como imagen final. Al guardar el producto se usará este resultado.';
+        } catch (error) {
+          if (status) status.textContent = error instanceof Error ? error.message : 'No se pudo mejorar la imagen.';
+        } finally {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+      });
     })();
   </script>
 `;
@@ -418,6 +690,7 @@ const AdminLayout = (title: string, content: string) => `
                     <div class="ml-10 flex items-baseline space-x-4">
                         <a href="/admin/config" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Configuración</a>
                         <a href="/admin/products" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Productos</a>
+                        <a href="/admin/quotes" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Cotizaciones</a>
                         <a href="/admin/makerworld" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">MakerWorld</a>
                         <a href="/" target="_blank" class="px-3 py-2 rounded-md text-sm font-medium text-blue-200 hover:text-white hover:bg-blue-700">Ver Catálogo ↗</a>
                     </div>
@@ -505,6 +778,68 @@ adminRoutes.get("/", (c) => {
   return c.redirect("/admin/products");
 });
 
+adminRoutes.get("/quotes", (c) => {
+  const quotes = getQuotes(100);
+  const rows = quotes.map((quote) => {
+    const items = getQuoteItems(quote.id);
+    const itemsHtml = items.map((item: QuoteItem) => `
+      <li>
+        <span class="font-medium">${escapeHtml(item.product_name)}</span>:
+        ${item.quantity} piezas × ${money(item.unit_price)} = ${money(item.subtotal)}
+        <span class="text-gray-500">(${escapeHtml(volumeText(item.pricing_min_volume, item.pricing_max_volume))}${item.delivery_time ? `, ${escapeHtml(item.delivery_time)}` : ""})</span>
+      </li>
+    `).join("");
+    return `
+      <tr class="align-top">
+        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">#${quote.id}</td>
+        <td class="px-4 py-3 text-sm text-gray-700">
+          <div class="font-medium text-gray-900">${escapeHtml(quote.customer_name)}</div>
+          <div class="text-gray-500">CP ${escapeHtml(quote.postal_code)}</div>
+          <div class="text-gray-500">${escapeHtml(quote.created_at)}</div>
+        </td>
+        <td class="px-4 py-3 text-sm text-gray-700">${quote.total_pieces}</td>
+        <td class="px-4 py-3 text-sm text-gray-700">
+          <div>Subtotal: ${money(quote.subtotal)}</div>
+          <div>Envío ${escapeHtml(quote.shipping_provider)}: ${quote.shipping_cost > 0 ? money(quote.shipping_cost) : "Gratis"}</div>
+          <div class="font-semibold text-gray-900">Total: ${money(quote.grand_total)}</div>
+        </td>
+        <td class="px-4 py-3 text-sm text-gray-700">
+          <details>
+            <summary class="cursor-pointer text-blue-700 font-medium">Ver detalle</summary>
+            <ul class="mt-2 list-disc pl-5 space-y-1">${itemsHtml || '<li class="text-gray-500">Sin productos guardados.</li>'}</ul>
+            ${quote.message ? `<pre class="mt-3 whitespace-pre-wrap rounded bg-gray-50 p-3 text-xs text-gray-600 border">${escapeHtml(quote.message)}</pre>` : ""}
+          </details>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  return c.html(AdminLayout("Cotizaciones", `
+    <div class="bg-white shadow rounded-lg overflow-hidden">
+      <div class="px-6 py-4 border-b border-gray-200">
+        <h2 class="text-xl font-bold text-gray-800">Cotizaciones guardadas</h2>
+        <p class="text-sm text-gray-500 mt-1">Se guardan automáticamente cuando el cliente continúa a WhatsApp desde /catalogo.</p>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Folio</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cliente</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Piezas</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Totales</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Productos</th>
+            </tr>
+          </thead>
+          <tbody class="bg-white divide-y divide-gray-200">
+            ${rows || '<tr><td colspan="5" class="px-6 py-10 text-center text-gray-500">Aún no hay cotizaciones guardadas.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `));
+});
+
 adminRoutes.post("/description/adapt", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
@@ -512,6 +847,16 @@ adminRoutes.post("/description/adapt", async (c) => {
     return c.json({ description });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "No se pudo adaptar la descripción." }, 400);
+  }
+});
+
+adminRoutes.post("/image/enhance", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const result = await enhanceImageForCatalog(formString(body.imageUrl));
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo mejorar la imagen." }, 400);
   }
 });
 
@@ -552,7 +897,26 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
           <label class="block text-sm font-medium text-gray-700">O pega/sube otra imagen</label>
           <input type="text" name="image_url" placeholder="URL de imagen alternativa..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
           <input type="file" name="image_file" accept="image/*" class="block w-full text-sm text-gray-500">
-          <p class="text-xs text-gray-500 mt-1">Prioridad: archivo subido, URL alternativa, imagen seleccionada.</p>
+          <p class="text-xs text-gray-500 mt-1">Al guardar se usa la URL de este campo si existe. El botón de mejora pondrá aquí la imagen final automáticamente.</p>
+        </div>
+        <div class="rounded-lg border border-purple-200 bg-purple-50 p-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 class="text-sm font-semibold text-purple-900">Foto para catálogo</h3>
+              <p data-image-enhance-status class="text-xs text-purple-700 mt-1">Mejora la imagen seleccionada para fondo blanco, estilo estudio y sin texto.</p>
+            </div>
+            <button type="button" data-enhance-image class="self-start sm:self-auto bg-purple-600 text-white px-4 py-2 rounded-md hover:bg-purple-700 text-sm font-medium">
+              Mejorar imagen
+            </button>
+          </div>
+          <div data-enhanced-image-preview class="hidden mt-4">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-2">
+              <p class="text-xs font-medium text-purple-900">Resultado mejorado seleccionado como imagen final</p>
+              <a data-enhanced-image-link href="#" target="_blank" class="text-xs font-medium text-purple-700 underline">Abrir resultado</a>
+            </div>
+            <img src="" alt="Imagen mejorada para catálogo" class="max-h-56 w-full object-contain rounded-md border border-purple-200 bg-white p-2">
+            <p class="text-xs text-purple-700 mt-2">No tienes que seleccionar nada más: esta imagen ya quedó en el campo de URL y se usará al presionar “Agregar al catálogo”.</p>
+          </div>
         </div>
         <div>
           <label class="flex items-start gap-3 text-sm">
@@ -562,6 +926,7 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
         </div>
         <div>
           <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
+          <p class="text-sm text-gray-500 mb-3">Si “Usar tabla global” está marcado, esta tabla se desactiva y no bloquea el guardado. Desmárcalo para editar precios personalizados.</p>
           ${renderPricingEditor(defaultTiers)}
         </div>
         <div class="flex justify-end gap-3 pt-4 border-t">
@@ -586,11 +951,11 @@ adminRoutes.post("/makerworld", async (c) => {
 });
 
 adminRoutes.post("/makerworld/save", async (c) => {
-  const body = await c.req.parseBody() as Record<string, unknown>;
+  const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
   let imageUrl = formString(body.image_url) || formString(body.selected_image);
   const file = formFile(body.image_file);
   if (file) imageUrl = await saveUpload(file, "products", "prod");
-  const useDefaultPricing = body.use_default_pricing === "1" ? 1 : 0;
+  const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
   const result = db.query(`
     INSERT INTO products (name, description, image_url, use_default_pricing, sort_order)
     VALUES (?, ?, ?, ?, 0) RETURNING id
@@ -622,7 +987,7 @@ adminRoutes.get("/config", (c) => {
                         </div>
                     </div>
                     <div id="preview-frame-shell" class="mx-auto w-full overflow-hidden rounded-lg border border-gray-300 bg-white shadow-inner" style="height: 720px; max-width: 100%;">
-                        <iframe id="catalog-preview" src="/?embed=1" class="h-full w-full bg-white" title="Vista previa del catálogo"></iframe>
+                        <iframe id="catalog-preview" src="/imprimir?embed=1" class="h-full w-full bg-white" title="Vista previa del catálogo"></iframe>
                     </div>
                 </div>
 
@@ -648,6 +1013,25 @@ adminRoutes.get("/config", (c) => {
                     <input type="text" name="products_title" value="${configValue(config, "products_title", "Nuestros Productos")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
                 </div>
                 <div>
+                    <label class="block text-sm font-medium text-gray-700">WhatsApp para Cotizaciones</label>
+                    <input type="text" name="quote_whatsapp_number" value="${configValue(config, "quote_whatsapp_number", "4961266304")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 4961266304">
+                    <p class="text-xs text-gray-500 mt-1">Usa solo números. Si son 10 dígitos de México, el sistema agrega 52 para el link de WhatsApp.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Paquetería para Cotización</label>
+                    <input type="text" name="shipping_provider" value="${configValue(config, "shipping_provider", "Estafeta")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: Estafeta">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Costo de Envío Estimado</label>
+                    <input type="number" name="shipping_price" min="0" step="0.01" value="${configValue(config, "shipping_price", "150")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="150">
+                    <p class="text-xs text-gray-500 mt-1">Se suma al total cuando no aplica envío gratis.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Envío Gratis desde Piezas</label>
+                    <input type="number" name="free_shipping_min_pieces" min="0" step="1" value="${configValue(config, "free_shipping_min_pieces", "501")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="501">
+                    <p class="text-xs text-gray-500 mt-1">Con 0 o vacío se desactiva. Con 501, el envío es gratis desde 501 piezas.</p>
+                </div>
+                <div>
                     <label class="block text-sm font-medium text-gray-700">Logo (URL o subir archivo)</label>
                     <input type="text" name="company_logo_url" value="${configValue(config, "company_logo")}" placeholder="URL de imagen..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
                     <input type="file" name="company_logo_file" accept="image/*" class="block w-full text-sm text-gray-500">
@@ -655,13 +1039,15 @@ adminRoutes.get("/config", (c) => {
             </div>
 
             <div>
-                <label class="block text-sm font-medium text-gray-700">Texto de Bienvenida</label>
+                <label class="block text-sm font-medium text-gray-700">Texto de Bienvenida (acepta HTML)</label>
                 <textarea name="welcome_text" rows="8" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "welcome_text")}</textarea>
+                <p class="text-xs text-gray-500 mt-1">Puedes usar etiquetas como &lt;h2&gt;, &lt;p&gt;, &lt;strong&gt;, &lt;ul&gt;, &lt;li&gt;, &lt;a&gt;, &lt;table&gt; e &lt;img&gt;. Si escribes texto plano, se conservan los saltos de línea.</p>
             </div>
 
             <div>
-                <label class="block text-sm font-medium text-gray-700">Texto de Contacto / Pie de página</label>
+                <label class="block text-sm font-medium text-gray-700">Texto de Contacto / Pie de página (acepta HTML)</label>
                 <textarea name="contact_text" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "contact_text")}</textarea>
+                <p class="text-xs text-gray-500 mt-1">Este contenido se inserta como HTML en la última página del catálogo.</p>
             </div>
 
             <div>
@@ -894,7 +1280,7 @@ adminRoutes.get("/config", (c) => {
 });
 
 adminRoutes.post("/config", async (c) => {
-  const body = await c.req.parseBody() as Record<string, unknown>;
+  const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
   const currentConfig = getConfig();
 
   let logoUrl = formString(body.company_logo_url);
@@ -924,44 +1310,48 @@ adminRoutes.post("/config", async (c) => {
   }
 
   updateConfig({
-    company_name: body.company_name as string,
+    company_name: formString(body.company_name),
     company_logo: logoUrl,
-    cover_subtitle: body.cover_subtitle as string,
-    products_title: body.products_title as string,
-    welcome_text: body.welcome_text as string,
-    contact_text: body.contact_text as string,
-    color_primary: body.color_primary as string,
-    color_secondary: body.color_secondary as string,
-    color_accent: body.color_accent as string,
-    bg_cover: body.bg_cover as string,
-    color_cover_text: body.color_cover_text as string,
-    bg_welcome: body.bg_welcome as string,
-    bg_products: body.bg_products as string,
-    bg_contact: body.bg_contact as string,
-    color_contact_text: body.color_contact_text as string,
-    bg_card: body.bg_card as string,
-    color_card_border: body.color_card_border as string,
-    bg_table_header: body.bg_table_header as string,
-    color_table_header_text: body.color_table_header_text as string,
-    color_body_text: body.color_body_text as string,
-    color_heading_text: body.color_heading_text as string,
-    color_muted_text: body.color_muted_text as string,
-    font_body: body.font_body as string,
-    font_heading: body.font_heading as string,
+    cover_subtitle: formString(body.cover_subtitle),
+    products_title: formString(body.products_title),
+    quote_whatsapp_number: formString(body.quote_whatsapp_number),
+    shipping_provider: formString(body.shipping_provider) || "Estafeta",
+    shipping_price: formString(body.shipping_price) || "0",
+    free_shipping_min_pieces: formString(body.free_shipping_min_pieces) || "0",
+    welcome_text: formString(body.welcome_text),
+    contact_text: formString(body.contact_text),
+    color_primary: formString(body.color_primary),
+    color_secondary: formString(body.color_secondary),
+    color_accent: formString(body.color_accent),
+    bg_cover: formString(body.bg_cover),
+    color_cover_text: formString(body.color_cover_text),
+    bg_welcome: formString(body.bg_welcome),
+    bg_products: formString(body.bg_products),
+    bg_contact: formString(body.bg_contact),
+    color_contact_text: formString(body.color_contact_text),
+    bg_card: formString(body.bg_card),
+    color_card_border: formString(body.color_card_border),
+    bg_table_header: formString(body.bg_table_header),
+    color_table_header_text: formString(body.color_table_header_text),
+    color_body_text: formString(body.color_body_text),
+    color_heading_text: formString(body.color_heading_text),
+    color_muted_text: formString(body.color_muted_text),
+    font_body: formString(body.font_body),
+    font_heading: formString(body.font_heading),
     font_body_file: fontBodyFileUrl,
     font_heading_file: fontHeadingFileUrl,
-    border_radius: body.border_radius as string,
-    button_radius: body.button_radius as string,
-    card_shadow: body.card_shadow as string,
-    card_style: body.card_style as string,
-    layout_density: body.layout_density as string,
-    product_image_fit: body.product_image_fit as string,
+    border_radius: formString(body.border_radius),
+    button_radius: formString(body.button_radius),
+    card_shadow: formString(body.card_shadow),
+    card_style: formString(body.card_style),
+    layout_density: formString(body.layout_density),
+    product_image_fit: formString(body.product_image_fit),
     decorative_shapes_enabled: (body.decorative_shapes_enabled ? "1" : "0"),
-    decorative_shape_style: body.decorative_shape_style as string,
-    decorative_shape_color: body.decorative_shape_color as string,
-    decorative_shape_opacity: body.decorative_shape_opacity as string,
-    decorative_shape_blur: body.decorative_shape_blur as string,
-    custom_css: body.custom_css as string,
+    decorative_shape_style: formString(body.decorative_shape_style),
+    decorative_shape_color: formString(body.decorative_shape_color),
+    decorative_shape_opacity: formString(body.decorative_shape_opacity),
+    decorative_shape_blur: formString(body.decorative_shape_blur),
+    custom_css: formString(body.custom_css),
   });
 
   replaceDefaultPriceTiers(parsePriceTiers(body));
@@ -1055,7 +1445,7 @@ adminRoutes.get("/products/new", (c) => {
 
             <div>
                 <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
-                <p class="text-sm text-gray-500 mb-3">Si desmarcas precios globales, estos rangos se guardan solo para este producto.</p>
+                <p class="text-sm text-gray-500 mb-3">Si “Usar tabla global” está marcado, esta tabla se desactiva y no bloquea el guardado. Desmárcalo para editar precios personalizados.</p>
                 ${renderPricingEditor(defaultTiers)}
             </div>
 
@@ -1069,7 +1459,7 @@ adminRoutes.get("/products/new", (c) => {
 });
 
 adminRoutes.post("/products/new", async (c) => {
-  const body = await c.req.parseBody() as Record<string, unknown>;
+  const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
 
   let imageUrl = formString(body.image_url);
 
@@ -1083,7 +1473,7 @@ adminRoutes.post("/products/new", async (c) => {
     imageUrl = `/uploads/${filename}`;
   }
 
-  const useDefaultPricing = body.use_default_pricing === "1" ? 1 : 0;
+  const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
 
   const result = db.query(`
     INSERT INTO products (name, description, image_url, use_default_pricing, sort_order)
@@ -1141,7 +1531,7 @@ adminRoutes.get("/products/:id/edit", (c) => {
 
             <div>
                 <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
-                <p class="text-sm text-gray-500 mb-3">Desmarca precios globales para que el catálogo use estos rangos en este producto.</p>
+                <p class="text-sm text-gray-500 mb-3">Si “Usar tabla global” está marcado, esta tabla se desactiva y no bloquea el guardado. Desmárcalo para editar precios personalizados.</p>
                 ${renderPricingEditor(tiers)}
             </div>
 
@@ -1156,7 +1546,7 @@ adminRoutes.get("/products/:id/edit", (c) => {
 
 adminRoutes.post("/products/:id/edit", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.parseBody() as Record<string, unknown>;
+  const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
 
   let imageUrl = formString(body.image_url);
 
@@ -1170,7 +1560,7 @@ adminRoutes.post("/products/:id/edit", async (c) => {
     imageUrl = `/uploads/${filename}`;
   }
 
-  const useDefaultPricing = body.use_default_pricing === "1" ? 1 : 0;
+  const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
 
   db.run(`
     UPDATE products SET name = ?, description = ?, image_url = ?, use_default_pricing = ? WHERE id = ?

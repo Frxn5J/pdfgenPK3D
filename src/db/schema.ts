@@ -53,6 +53,46 @@ export function initDb() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS quotes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_name TEXT NOT NULL,
+      postal_code TEXT NOT NULL,
+      total_pieces INTEGER NOT NULL,
+      subtotal REAL NOT NULL,
+      shipping_provider TEXT NOT NULL,
+      shipping_cost REAL NOT NULL,
+      shipping_free_threshold INTEGER,
+      grand_total REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'new',
+      whatsapp_number TEXT,
+      message TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN status TEXT NOT NULL DEFAULT 'new'`);
+  } catch {
+    // Column already exists in databases initialized with the current schema.
+  }
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS quote_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      quote_id INTEGER NOT NULL,
+      product_id INTEGER,
+      product_name TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      unit_price REAL NOT NULL,
+      subtotal REAL NOT NULL,
+      pricing_min_volume INTEGER,
+      pricing_max_volume INTEGER,
+      delivery_time TEXT,
+      FOREIGN KEY (quote_id) REFERENCES quotes(id) ON DELETE CASCADE
+    )
+  `);
+
   // Seed default configuration
   const defaultWelcome = `Bienvenido a PIXKEY3D\nFabricamos productos personalizados con tecnología de impresión 3D de alta precisión. Cada pieza se produce bajo pedido con los mejores materiales del mercado. Ofrecemos precios especiales por volumen para revendedores, empresas y mayoristas.\n\n¿Cómo hacer tu pedido?\n1 Elige tus productos Selecciona del catálogo los productos y la cantidad deseada ->\n2 Solicita tu cotización Envíanos tu pedido por WhatsApp o email y te respondemos en minutos ->\n3 Recibe tu pedido Enviamos a domicilio en todo México según el volumen de tu pedido`;
 
@@ -69,6 +109,10 @@ export function initDb() {
   seedConfig("company_logo", ""); // Empty means use text fallback or default image
   seedConfig("cover_subtitle", "Catálogo de Productos");
   seedConfig("products_title", "Nuestros Productos");
+  seedConfig("quote_whatsapp_number", "4961266304");
+  seedConfig("shipping_provider", "Estafeta");
+  seedConfig("shipping_price", "150");
+  seedConfig("free_shipping_min_pieces", "501");
   seedConfig("welcome_text", defaultWelcome);
   seedConfig("contact_text", defaultContact);
 
@@ -193,4 +237,121 @@ export function replaceProductPriceTiers(productId: number, tiers: Omit<PriceTie
     }
   });
   transaction(productId, tiers);
+}
+
+export interface QuoteItemInput {
+  product_id: number | null;
+  product_name: string;
+  quantity: number;
+  unit_price: number;
+  subtotal: number;
+  pricing_min_volume: number | null;
+  pricing_max_volume: number | null;
+  delivery_time: string | null;
+}
+
+export interface QuoteInput {
+  customer_name: string;
+  postal_code: string;
+  total_pieces: number;
+  subtotal: number;
+  shipping_provider: string;
+  shipping_cost: number;
+  shipping_free_threshold: number | null;
+  grand_total: number;
+  whatsapp_number: string;
+  message: string;
+  items: QuoteItemInput[];
+}
+
+export interface Quote {
+  id: number;
+  customer_name: string;
+  postal_code: string;
+  total_pieces: number;
+  subtotal: number;
+  shipping_provider: string;
+  shipping_cost: number;
+  shipping_free_threshold: number | null;
+  grand_total: number;
+  status: string;
+  whatsapp_number: string | null;
+  message: string | null;
+  created_at: string;
+}
+
+export interface QuoteItem {
+  id: number;
+  quote_id: number;
+  product_id: number | null;
+  product_name: string;
+  quantity: number;
+  unit_price: number;
+  subtotal: number;
+  pricing_min_volume: number | null;
+  pricing_max_volume: number | null;
+  delivery_time: string | null;
+}
+
+export function createQuote(input: QuoteInput) {
+  const insertQuote = db.prepare(`
+    INSERT INTO quotes (
+      customer_name, postal_code, total_pieces, subtotal, shipping_provider, shipping_cost,
+      shipping_free_threshold, grand_total, whatsapp_number, message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+  `);
+  const insertItem = db.prepare(`
+    INSERT INTO quote_items (
+      quote_id, product_id, product_name, quantity, unit_price, subtotal,
+      pricing_min_volume, pricing_max_volume, delivery_time
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const transaction = db.transaction((quote: QuoteInput) => {
+    const row = insertQuote.get(
+      quote.customer_name,
+      quote.postal_code,
+      quote.total_pieces,
+      quote.subtotal,
+      quote.shipping_provider,
+      quote.shipping_cost,
+      quote.shipping_free_threshold,
+      quote.grand_total,
+      quote.whatsapp_number,
+      quote.message,
+    ) as { id: number };
+
+    for (const item of quote.items) {
+      insertItem.run(
+        row.id,
+        item.product_id,
+        item.product_name,
+        item.quantity,
+        item.unit_price,
+        item.subtotal,
+        item.pricing_min_volume,
+        item.pricing_max_volume,
+        item.delivery_time,
+      );
+    }
+
+    return row.id;
+  });
+
+  return transaction(input) as number;
+}
+
+export function updateQuoteMessage(id: number, message: string) {
+  db.run(`UPDATE quotes SET message = ? WHERE id = ?`, [message, id]);
+}
+
+export function getQuotes(limit = 100) {
+  return db.query<Quote, [number]>(`
+    SELECT * FROM quotes ORDER BY id DESC LIMIT ?
+  `).all(limit);
+}
+
+export function getQuoteItems(quoteId: number) {
+  return db.query<QuoteItem, [number]>(`
+    SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id ASC
+  `).all(quoteId);
 }

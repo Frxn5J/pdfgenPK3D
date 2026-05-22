@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers } from "../db/schema";
+import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage } from "../db/schema";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -13,6 +13,11 @@ const htmlEntities: Record<string, string> = {
 };
 
 const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => htmlEntities[char] || char);
+
+const safeJson = (value: unknown) => JSON.stringify(value)
+  .replace(/</g, "\\u003c")
+  .replace(/>/g, "\\u003e")
+  .replace(/&/g, "\\u0026");
 
 const cssValue = (value: unknown, fallback: string) => {
   const normalized = String(value ?? fallback).replace(/[;\r\n]/g, " ").replace(/<\/style/gi, "").trim();
@@ -28,7 +33,6 @@ const fontFace = (family: string, url: unknown) => {
 };
 
 const uploadedFontStack = (family: string, url: unknown, fallback: string) => cssUrl(url) ? `"${family}", ${fallback}` : fallback;
-
 const customCss = (value: unknown) => String(value ?? "").replace(/<\/style/gi, "<\\/style");
 
 const choice = (value: unknown, allowed: string[], fallback: string) => {
@@ -47,13 +51,55 @@ const renderParagraphs = (text: string | undefined, className = "theme-copy") =>
   .map((line) => line.trim() ? `<p class="${className}">${escapeHtml(line)}</p>` : `<div class="copy-spacer"></div>`)
   .join("");
 
+const hasHtmlTags = (value: string) => /<[a-z][\s\S]*>/i.test(value);
+
+const renderAdminHtml = (text: string | undefined, className = "theme-copy") => {
+  const value = String(text ?? "");
+  if (!hasHtmlTags(value)) return renderParagraphs(value, className);
+  return `<div class="rich-content ${className}">${value}</div>`;
+};
+
 const formatVolume = (min: number, max: number | null) => max ? `${min} a ${max} piezas` : `${min} o más piezas`;
+const currency = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" });
+const normalizeWhatsappNumber = (value: string) => {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length === 10) return `52${digits}`;
+  return digits || "524961266304";
+};
+
+const numberConfig = (value: unknown, fallback: number) => {
+  const parsed = Number.parseFloat(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const integerConfig = (value: unknown, fallback: number) => {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const getShippingSettings = (config: Record<string, string>) => {
+  const freeMinPieces = integerConfig(config.free_shipping_min_pieces, 501);
+  return {
+    provider: String(config.shipping_provider || "Estafeta").trim() || "Estafeta",
+    price: Math.max(0, numberConfig(config.shipping_price, 150)),
+    freeMinPieces: freeMinPieces > 0 ? freeMinPieces : null,
+  };
+};
+
+const shippingForPieces = (config: Record<string, string>, totalPieces: number) => {
+  const settings = getShippingSettings(config);
+  const cost = settings.freeMinPieces && totalPieces >= settings.freeMinPieces ? 0 : settings.price;
+  return { ...settings, cost };
+};
+
+const tierForQuantity = <T extends { min_volume: number; max_volume: number | null }>(tiers: T[], totalPieces: number) => {
+  const sorted = [...tiers].sort((a, b) => a.min_volume - b.min_volume);
+  if (sorted.length === 0) return null;
+  return sorted.find((tier) => totalPieces >= tier.min_volume && (!tier.max_volume || totalPieces <= tier.max_volume)) || sorted[0];
+};
 
 const buildThemeCss = (config: Record<string, string>) => {
-  const cardStyle = choice(config.card_style, ["flat", "bordered", "minimal"], "flat");
-  const density = choice(config.layout_density, ["compact", "comfortable", "spacious"], "comfortable");
   const imageFit = choice(config.product_image_fit, ["cover", "contain"], "cover");
-  const shapeStyle = choice(config.decorative_shape_style, ["organic", "circles", "diagonal", "dots"], "organic");
   const bodyFontFallback = cssValue(config.font_body, defaultFontFamily);
   const headingFontFallback = cssValue(config.font_heading, defaultFontFamily);
 
@@ -111,7 +157,7 @@ const buildThemeCss = (config: Record<string, string>) => {
     .page-break-inside-avoid { break-inside: avoid; page-break-inside: avoid; }
 
     .action-bar { position: fixed; top: 1rem; right: 1rem; z-index: 20; display: flex; gap: .65rem; align-items: center; }
-    .theme-button, .admin-link {
+    .theme-button, .admin-link, .cart-button, .quote-button {
       border: 0;
       border-radius: var(--button-radius);
       background: var(--brand-primary);
@@ -124,7 +170,8 @@ const buildThemeCss = (config: Record<string, string>) => {
       transition: transform .2s ease, box-shadow .2s ease, filter .2s ease;
     }
     .admin-link { background: color-mix(in srgb, var(--brand-secondary) 86%, white); font-size: .9rem; }
-    .theme-button:hover, .admin-link:hover { transform: translateY(-1px); filter: brightness(.98); box-shadow: 0 14px 30px rgba(15, 23, 42, .2); }
+    .theme-button:hover, .admin-link:hover, .cart-button:hover, .quote-button:hover { transform: translateY(-1px); filter: brightness(.98); box-shadow: 0 14px 30px rgba(15, 23, 42, .2); }
+    .quote-button:disabled { cursor: not-allowed; opacity: .55; transform: none; }
 
     .cover-section { min-height: 100vh; display: grid; place-items: center; background: var(--cover-bg); color: var(--cover-text); text-align: center; }
     .cover-section h1 { color: var(--cover-text); font-size: clamp(3rem, 10vw, 7.5rem); margin: 1.5rem 0 .75rem; letter-spacing: -.07em; }
@@ -135,6 +182,15 @@ const buildThemeCss = (config: Record<string, string>) => {
     .welcome-section { background: var(--welcome-bg); }
     .welcome-section .page-shell { width: min(920px, 100%); }
     .theme-copy { margin: 0 0 1rem; font-size: clamp(1rem, 2vw, 1.12rem); color: var(--body-text); }
+    .rich-content { color: var(--body-text); font-size: clamp(1rem, 2vw, 1.12rem); }
+    .rich-content > :first-child { margin-top: 0; }
+    .rich-content > :last-child { margin-bottom: 0; }
+    .rich-content p, .rich-content ul, .rich-content ol, .rich-content table, .rich-content blockquote { margin: 0 0 1rem; }
+    .rich-content ul, .rich-content ol { padding-left: 1.5rem; }
+    .rich-content a { color: var(--brand-primary); text-decoration: underline; }
+    .rich-content strong, .rich-content b { color: inherit; font-weight: 800; }
+    .rich-content table { min-width: 0; }
+    .rich-content img { max-width: 100%; height: auto; border-radius: var(--radius); }
     .copy-spacer { height: .7rem; }
     .section-title { margin: 0 0 2rem; text-align: center; font-size: clamp(2rem, 6vw, 3.5rem); letter-spacing: -.04em; }
     .subsection-title { margin: 3rem 0 1.25rem; font-size: clamp(1.45rem, 4vw, 2rem); }
@@ -162,6 +218,34 @@ const buildThemeCss = (config: Record<string, string>) => {
     .product-table th, .product-table td { padding: .75rem; }
     .empty-products { text-align: center; color: var(--muted-text); grid-column: 1 / -1; padding: 3rem 0; }
 
+    .cart-control { display: grid; grid-template-columns: 110px 1fr; gap: .75rem; margin-top: 1.25rem; align-items: center; }
+    .cart-quantity { width: 100%; border: 1px solid var(--card-border); border-radius: var(--button-radius); padding: .75rem .85rem; font: inherit; color: var(--body-text); background: white; }
+    .quote-cart { background: color-mix(in srgb, var(--products-bg) 88%, white); border-top: 1px solid var(--card-border); padding: 2rem var(--section-x); }
+    .cart-panel { width: min(1120px, 100%); margin: 0 auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); box-shadow: var(--card-shadow); padding: 1.25rem; }
+    .cart-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+    .cart-header h2 { margin: 0; font-size: clamp(1.45rem, 4vw, 2.2rem); }
+    .cart-lines { display: grid; gap: .75rem; }
+    .cart-line { display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: center; padding: .85rem; border: 1px solid var(--card-border); border-radius: var(--radius); }
+    .cart-line-title { margin: 0 0 .25rem; font-weight: 800; color: var(--heading-text); }
+    .cart-line-meta { margin: 0; color: var(--muted-text); font-size: .9rem; }
+    .cart-line-actions { display: flex; align-items: center; gap: .5rem; }
+    .cart-line-actions input { width: 86px; border: 1px solid var(--card-border); border-radius: var(--button-radius); padding: .55rem; }
+    .remove-cart-item { border: 0; background: transparent; color: var(--brand-primary); cursor: pointer; font-weight: 800; }
+    .cart-empty { color: var(--muted-text); padding: 1rem; border: 1px dashed var(--card-border); border-radius: var(--radius); text-align: center; }
+    .cart-totals { display: grid; gap: .35rem; margin: 1rem 0; color: var(--body-text); }
+    .cart-total-row { display: flex; justify-content: space-between; gap: 1rem; }
+    .cart-total-row strong { color: var(--heading-text); }
+    .quote-actions { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; justify-content: flex-end; }
+    .quote-note { color: var(--muted-text); font-size: .9rem; margin: 0; }
+    .customer-modal { position: fixed; inset: 0; z-index: 50; display: none; align-items: center; justify-content: center; padding: 1rem; background: rgba(15, 23, 42, .58); }
+    .customer-modal.open { display: flex; }
+    .modal-card { width: min(440px, 100%); background: white; border-radius: var(--radius); padding: 1.25rem; box-shadow: 0 25px 70px rgba(15, 23, 42, .28); }
+    .modal-card h2 { margin: 0 0 .5rem; }
+    .modal-card label { display: block; font-weight: 800; color: var(--heading-text); margin-top: 1rem; }
+    .modal-card input { width: 100%; border: 1px solid var(--card-border); border-radius: var(--button-radius); padding: .8rem; margin-top: .35rem; font: inherit; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: .75rem; margin-top: 1.25rem; }
+    .secondary-button { border: 1px solid var(--card-border); border-radius: var(--button-radius); background: white; color: var(--body-text); padding: .75rem 1rem; cursor: pointer; font-weight: 800; }
+
     .contact-section { background: var(--contact-bg); color: var(--contact-text); text-align: center; }
     .contact-section h1, .contact-section h2, .contact-section h3, .contact-section h4, .contact-section p { color: var(--contact-text); }
     .contact-section .page-shell { width: min(860px, 100%); }
@@ -183,6 +267,7 @@ const buildThemeCss = (config: Record<string, string>) => {
 
     @media (max-width: 900px) {
       .products-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cart-line { grid-template-columns: 1fr; }
     }
     @media (max-width: 640px) {
       body.catalog-body { --section-x: 1rem; }
@@ -191,9 +276,12 @@ const buildThemeCss = (config: Record<string, string>) => {
       .products-grid { grid-template-columns: 1fr; }
       .product-image, .product-image-fallback { height: 220px; }
       table { min-width: 440px; }
+      .cart-control { grid-template-columns: 1fr; }
+      .quote-actions { justify-content: stretch; }
+      .quote-button, .secondary-button { width: 100%; }
     }
     @media print {
-      .no-print { display: none !important; }
+      .no-print, .quote-cart, .customer-modal { display: none !important; }
       body.catalog-body { background: white; color: #111827; }
       .page-section { min-height: 100vh; box-shadow: none !important; }
       .theme-card, .pricing-table-wrap, .product-table-wrap { box-shadow: none !important; }
@@ -210,7 +298,7 @@ const renderShapes = (config: Record<string, string>) => {
   return `<div class="theme-shapes shape-${style}" aria-hidden="true"><span class="shape-one"></span><span class="shape-two"></span><span class="shape-three"></span></div>`;
 };
 
-export const Layout = (title: string, content: string, config: Record<string, string>) => {
+const Layout = (title: string, content: string, config: Record<string, string>) => {
   const cardStyle = choice(config.card_style, ["flat", "bordered", "minimal"], "flat");
   const density = choice(config.layout_density, ["compact", "comfortable", "spacious"], "comfortable");
   const imageFit = choice(config.product_image_fit, ["cover", "contain"], "cover");
@@ -231,115 +319,594 @@ export const Layout = (title: string, content: string, config: Record<string, st
 `;
 };
 
-publicRoutes.get("/", (c) => {
+const getCatalogData = () => {
   const config = getConfig();
   const defaultPriceTiers = getDefaultPriceTiers();
   const products = getProducts();
-  const isEmbeddedPreview = c.req.query("embed") === "1";
+  const productsWithTiers = products.map((product) => ({
+    product,
+    priceTiers: product.use_default_pricing ? defaultPriceTiers : getProductPriceTiers(product.id),
+  }));
+  return { config, defaultPriceTiers, productsWithTiers };
+};
 
+type QuoteLine = {
+  productId: number;
+  productName: string;
+  quantity: number;
+  unitPrice: number;
+  subtotal: number;
+  tier: { min_volume: number; max_volume: number | null; delivery_time: string } | null;
+};
+
+const buildQuoteMessage = (input: {
+  quoteId?: number;
+  customerName: string;
+  postalCode: string;
+  totalPieces: number;
+  lines: QuoteLine[];
+  subtotal: number;
+  shippingProvider: string;
+  shippingCost: number;
+  grandTotal: number;
+}) => {
+  const hasMissingPrice = input.lines.some((line) => !line.tier);
+  const lines = input.lines.map((line, index) => {
+    const unit = line.tier ? currency.format(line.unitPrice) : "A cotizar";
+    const subtotal = line.tier ? currency.format(line.subtotal) : "A cotizar";
+    const delivery = line.tier?.delivery_time ? ` · Entrega: ${line.tier.delivery_time}` : "";
+    return `${index + 1}. ${line.productName} - ${line.quantity} piezas - ${unit} c/u - ${subtotal}${delivery}`;
+  }).join("\n");
+
+  return `Hola PIXKEY3D, quiero cotizar este pedido:\n\n${input.quoteId ? `Folio: #${input.quoteId}\n` : ""}Nombre: ${input.customerName}\nCódigo postal: ${input.postalCode}\n\nProductos:\n${lines}\n\nTotal de piezas: ${input.totalPieces}\nSubtotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.subtotal)}\nEnvío estimado (${input.shippingProvider}): ${input.shippingCost > 0 ? currency.format(input.shippingCost) : "Gratis"}\nTotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.grandTotal)}\n\nQuedo pendiente de la cotización final con envío.`;
+};
+
+const renderCoverSection = (config: Record<string, string>) => `
+  <section class="page-section cover-section page-break">
+      ${renderShapes(config)}
+      <div class="page-shell">
+          ${config.company_logo
+            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image">`
+            : `<div class="logo-fallback">Logo</div>`
+          }
+          <h1>${escapeHtml(config.company_name || "PIXKEY3D")}</h1>
+          <p class="cover-subtitle">${escapeHtml(config.cover_subtitle || "Catálogo de Productos")}</p>
+      </div>
+  </section>
+`;
+
+const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers: ReturnType<typeof getDefaultPriceTiers>) => `
+  <section class="page-section welcome-section page-break">
+      ${renderShapes(config)}
+      <div class="page-shell">
+          ${renderAdminHtml(config.welcome_text)}
+          <h2 class="subsection-title">Precios y tiempos de entrega por volumen</h2>
+          <div class="pricing-table-wrap">
+              <table>
+                  <thead>
+                      <tr>
+                          <th>Volumen de Piezas</th>
+                          <th>Precio por Unidad</th>
+                          <th>Tiempo de Entrega</th>
+                      </tr>
+                  </thead>
+                  <tbody>
+                      ${defaultPriceTiers.map((tier) => `
+                      <tr>
+                          <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
+                          <td class="price-text">$${tier.price.toFixed(2)} MXN</td>
+                          <td>${escapeHtml(tier.delivery_time)}</td>
+                      </tr>
+                      `).join("")}
+                  </tbody>
+              </table>
+          </div>
+          <p class="pricing-note">* Los precios aplican por pieza según el volumen total del pedido. El tiempo de entrega inicia una vez confirmado y pagado el pedido. Para 501+ piezas contáctanos para acordar fecha y condiciones.</p>
+      </div>
+  </section>
+`;
+
+const renderProductCard = (
+  product: ReturnType<typeof getProducts>[number],
+  priceTiers: ReturnType<typeof getDefaultPriceTiers>,
+  interactive = false,
+) => `
+  <article class="theme-card page-break-inside-avoid">
+      ${product.image_url
+        ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" class="product-image">`
+        : `<div class="product-image-fallback">Sin imagen</div>`
+      }
+      <div class="product-content">
+          <h3 class="product-title">${escapeHtml(product.name)}</h3>
+          <p class="product-description">${escapeHtml(product.description || "")}</p>
+          <h4>Tabla de Precios</h4>
+          <div class="product-table-wrap">
+              <table class="product-table">
+                  <thead>
+                      <tr>
+                          <th>Volumen</th>
+                          <th>Precio unitario</th>
+                      </tr>
+                  </thead>
+                  <tbody>
+                      ${priceTiers.map((tier) => `
+                      <tr>
+                          <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
+                          <td class="price-text">$${tier.price.toFixed(2)}</td>
+                      </tr>
+                      `).join("")}
+                  </tbody>
+              </table>
+          </div>
+          ${interactive ? `
+          <div class="cart-control">
+              <input class="cart-quantity" data-quantity-for="${product.id}" type="number" min="1" step="1" value="25" aria-label="Cantidad para ${escapeHtml(product.name)}">
+              <button type="button" class="cart-button" data-add-to-cart="${product.id}">Agregar al carrito</button>
+          </div>
+          ` : ""}
+      </div>
+  </article>
+`;
+
+const renderProductsSection = (
+  config: Record<string, string>,
+  productsWithTiers: ReturnType<typeof getCatalogData>["productsWithTiers"],
+  interactive = false,
+) => `
+  <section class="page-section products-section">
+      ${renderShapes(config)}
+      <div class="page-shell">
+          <h2 class="section-title">${escapeHtml(config.products_title || "Nuestros Productos")}</h2>
+          <div class="products-grid">
+              ${productsWithTiers.map(({ product, priceTiers }) => renderProductCard(product, priceTiers, interactive)).join("")}
+              ${productsWithTiers.length === 0 ? '<p class="empty-products">No hay productos en el catálogo aún.</p>' : ''}
+          </div>
+      </div>
+  </section>
+`;
+
+const renderContactSection = (config: Record<string, string>) => `
+  <section class="page-section contact-section page-break">
+      ${renderShapes(config)}
+      <div class="page-shell">
+          ${renderAdminHtml(config.contact_text, "theme-copy contact-copy")}
+      </div>
+  </section>
+`;
+
+const renderPrintableCatalog = (showActions: boolean) => {
+  const { config, defaultPriceTiers, productsWithTiers } = getCatalogData();
   const content = `
-    ${isEmbeddedPreview ? "" : `<div class="action-bar no-print">
+    ${showActions ? `<div class="action-bar no-print">
         <button onclick="window.print()" class="theme-button" type="button">Imprimir / PDF</button>
         <a href="/admin" class="admin-link">Admin</a>
-    </div>`}
-
-    <section class="page-section cover-section page-break">
-        ${renderShapes(config)}
-        <div class="page-shell">
-            ${config.company_logo
-                ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image">`
-                : `<div class="logo-fallback">Logo</div>`
-            }
-            <h1>${escapeHtml(config.company_name || "PIXKEY3D")}</h1>
-            <p class="cover-subtitle">${escapeHtml(config.cover_subtitle || "Catálogo de Productos")}</p>
-        </div>
-    </section>
-
-    <section class="page-section welcome-section page-break">
-        ${renderShapes(config)}
-        <div class="page-shell">
-            ${renderParagraphs(config.welcome_text)}
-
-            <h2 class="subsection-title">Precios y tiempos de entrega por volumen</h2>
-            <div class="pricing-table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Volumen de Piezas</th>
-                            <th>Precio por Unidad</th>
-                            <th>Tiempo de Entrega</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${defaultPriceTiers.map((tier) => `
-                        <tr>
-                            <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
-                            <td class="price-text">$${tier.price.toFixed(2)} MXN</td>
-                            <td>${escapeHtml(tier.delivery_time)}</td>
-                        </tr>
-                        `).join("")}
-                    </tbody>
-                </table>
-            </div>
-            <p class="pricing-note">* Los precios aplican por pieza según el volumen total del pedido. El tiempo de entrega inicia una vez confirmado y pagado el pedido. Para 501+ piezas contáctanos para acordar fecha y condiciones.</p>
-        </div>
-    </section>
-
-    <section class="page-section products-section">
-        ${renderShapes(config)}
-        <div class="page-shell">
-            <h2 class="section-title">${escapeHtml(config.products_title || "Nuestros Productos")}</h2>
-            <div class="products-grid">
-                ${products.map((product) => {
-                    const priceTiers = product.use_default_pricing ? defaultPriceTiers : getProductPriceTiers(product.id);
-                    return `
-                    <article class="theme-card page-break-inside-avoid">
-                        ${product.image_url
-                            ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" class="product-image">`
-                            : `<div class="product-image-fallback">Sin imagen</div>`
-                        }
-                        <div class="product-content">
-                            <h3 class="product-title">${escapeHtml(product.name)}</h3>
-                            <p class="product-description">${escapeHtml(product.description || "")}</p>
-
-                            <h4>Tabla de Precios</h4>
-                            <div class="product-table-wrap">
-                                <table class="product-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Volumen</th>
-                                            <th>Precio unitario</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        ${priceTiers.map((tier) => `
-                                        <tr>
-                                            <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
-                                            <td class="price-text">$${tier.price.toFixed(2)}</td>
-                                        </tr>
-                                        `).join("")}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </article>
-                    `;
-                }).join("")}
-
-                ${products.length === 0 ? '<p class="empty-products">No hay productos en el catálogo aún.</p>' : ''}
-            </div>
-        </div>
-    </section>
-
-    <section class="page-section contact-section page-break">
-        ${renderShapes(config)}
-        <div class="page-shell">
-            ${renderParagraphs(config.contact_text, "theme-copy contact-copy")}
-        </div>
-    </section>
+    </div>` : ""}
+    ${renderCoverSection(config)}
+    ${renderWelcomeSection(config, defaultPriceTiers)}
+    ${renderProductsSection(config, productsWithTiers)}
+    ${renderContactSection(config)}
   `;
+  return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo imprimible`, content, config);
+};
 
-  return c.html(Layout(`${config.company_name || "PIXKEY3D"} - Catálogo`, content, config));
+const renderShopScript = (products: Array<{
+  id: number;
+  name: string;
+  priceTiers: Array<{ min_volume: number; max_volume: number | null; price: number; delivery_time: string }>;
+}>, whatsappNumber: string, shippingSettings: ReturnType<typeof getShippingSettings>) => `
+<script>
+(() => {
+  const products = ${safeJson(products)};
+  const whatsappNumber = ${safeJson(whatsappNumber)};
+  const shippingSettings = ${safeJson(shippingSettings)};
+  const productMap = new Map(products.map((product) => [String(product.id), product]));
+  const cart = new Map();
+  let customer = null;
+
+  const currency = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' });
+  const escapeClientHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char] || char));
+  const cartLines = document.getElementById('cart-lines');
+  const cartEmpty = document.getElementById('cart-empty');
+  const totalPiecesEl = document.getElementById('cart-total-pieces');
+  const subtotalAmountEl = document.getElementById('cart-subtotal-amount');
+  const shippingLabelEl = document.getElementById('cart-shipping-label');
+  const shippingAmountEl = document.getElementById('cart-shipping-amount');
+  const totalAmountEl = document.getElementById('cart-total-amount');
+  const quoteStatus = document.getElementById('quote-status');
+  const quoteButton = document.getElementById('quote-button');
+  const clearButton = document.getElementById('clear-cart');
+  const modal = document.getElementById('customer-modal');
+  const customerForm = document.getElementById('customer-form');
+  const cancelCustomer = document.getElementById('cancel-customer');
+
+  const tierForQuantity = (tiers, totalPieces) => {
+    const sorted = [...(tiers || [])].sort((a, b) => a.min_volume - b.min_volume);
+    if (sorted.length === 0) return null;
+    return sorted.find((tier) => totalPieces >= tier.min_volume && (!tier.max_volume || totalPieces <= tier.max_volume)) || sorted[0];
+  };
+
+  const shippingCostForPieces = (totalPieces) => {
+    const threshold = Number(shippingSettings.freeMinPieces || 0);
+    const price = Math.max(0, Number(shippingSettings.price || 0));
+    return threshold > 0 && totalPieces >= threshold ? 0 : price;
+  };
+
+  const cartTotalPieces = () => Array.from(cart.values()).reduce((total, item) => total + item.quantity, 0);
+  const cartDetails = () => {
+    const totalPieces = cartTotalPieces();
+    const lines = Array.from(cart.values()).map((item) => {
+      const tier = tierForQuantity(item.product.priceTiers, totalPieces);
+      const unitPrice = tier ? Number(tier.price) : 0;
+      return { ...item, tier, unitPrice, subtotal: unitPrice * item.quantity };
+    });
+    const subtotal = lines.reduce((sum, line) => sum + line.subtotal, 0);
+    const shippingCost = lines.length ? shippingCostForPieces(totalPieces) : 0;
+    const hasMissingPrice = lines.some((line) => !line.tier);
+    return { totalPieces, lines, subtotal, shippingCost, grandTotal: subtotal + shippingCost, hasMissingPrice };
+  };
+
+  const renderCart = () => {
+    const details = cartDetails();
+    if (cartEmpty) cartEmpty.style.display = details.lines.length ? 'none' : 'block';
+    if (quoteButton instanceof HTMLButtonElement) quoteButton.disabled = details.lines.length === 0;
+    if (quoteStatus) quoteStatus.textContent = 'Antes de abrir WhatsApp te pediremos nombre y código postal.';
+    if (totalPiecesEl) totalPiecesEl.textContent = String(details.totalPieces);
+    if (subtotalAmountEl) subtotalAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal);
+    if (shippingLabelEl) shippingLabelEl.textContent = 'Envío estimado (' + (shippingSettings.provider || 'Estafeta') + ')';
+    if (shippingAmountEl) shippingAmountEl.textContent = details.lines.length ? (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') : '$0.00';
+    if (totalAmountEl) totalAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.grandTotal);
+    if (!cartLines) return;
+    cartLines.innerHTML = details.lines.map((line) => {
+      const tierText = line.tier ? (line.tier.min_volume + (line.tier.max_volume ? ' a ' + line.tier.max_volume : ' o más') + ' piezas') : 'Sin tabla';
+      const subtotal = line.unitPrice ? currency.format(line.subtotal) : 'A cotizar';
+      const unit = line.unitPrice ? currency.format(line.unitPrice) : 'A cotizar';
+      return '<div class="cart-line">'
+        + '<div><p class="cart-line-title">' + escapeClientHtml(line.product.name) + '</p>'
+        + '<p class="cart-line-meta">' + line.quantity + ' piezas · ' + unit + ' c/u · rango ' + tierText + ' · subtotal ' + subtotal + '</p></div>'
+        + '<div class="cart-line-actions"><input type="number" min="1" step="1" value="' + line.quantity + '" data-cart-qty="' + line.product.id + '">'
+        + '<button type="button" class="remove-cart-item" data-remove-cart="' + line.product.id + '">Quitar</button></div>'
+        + '</div>';
+    }).join('');
+  };
+
+  const quoteMessage = () => {
+    const details = cartDetails();
+    const lines = details.lines.map((line, index) => {
+      const unit = line.unitPrice ? currency.format(line.unitPrice) : 'A cotizar';
+      const subtotal = line.unitPrice ? currency.format(line.subtotal) : 'A cotizar';
+      const delivery = line.tier?.delivery_time ? ' · Entrega: ' + line.tier.delivery_time : '';
+      return (index + 1) + '. ' + line.product.name + ' - ' + line.quantity + ' piezas - ' + unit + ' c/u - ' + subtotal + delivery;
+    }).join('\\n');
+    return 'Hola PIXKEY3D, quiero cotizar este pedido:\\n\\n'
+      + 'Nombre: ' + customer.name + '\\n'
+      + 'Código postal: ' + customer.postalCode + '\\n\\n'
+      + 'Productos:\\n' + lines + '\\n\\n'
+      + 'Total de piezas: ' + details.totalPieces + '\\n'
+      + 'Subtotal estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal)) + '\\n'
+      + 'Envío estimado (' + (shippingSettings.provider || 'Estafeta') + '): ' + (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') + '\\n'
+      + 'Total estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.grandTotal)) + '\\n\\n'
+      + 'Quedo pendiente de la cotización final con envío.';
+  };
+
+  const saveQuote = async () => {
+    const details = cartDetails();
+    const response = await fetch('/api/quotes', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        customerName: customer.name,
+        postalCode: customer.postalCode,
+        items: details.lines.map((line) => ({ productId: line.product.id, quantity: line.quantity })),
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || 'No se pudo guardar la cotización.');
+    return payload;
+  };
+
+  const openWhatsapp = (message, targetWindow) => {
+    const url = 'https://wa.me/' + whatsappNumber + '?text=' + encodeURIComponent(message);
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.location.href = url;
+      return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const openQuote = async () => {
+    if (cart.size === 0 || !customer) return;
+    const fallbackMessage = quoteMessage();
+    const whatsappWindow = window.open('', '_blank');
+    if (whatsappWindow) whatsappWindow.document.write('<p>Preparando WhatsApp...</p>');
+    const previousText = quoteButton instanceof HTMLButtonElement ? quoteButton.textContent : '';
+    if (quoteButton instanceof HTMLButtonElement) {
+      quoteButton.disabled = true;
+      quoteButton.textContent = 'Guardando...';
+    }
+    if (quoteStatus) quoteStatus.textContent = 'Guardando cotización antes de abrir WhatsApp...';
+    try {
+      const payload = await saveQuote();
+      if (quoteStatus) quoteStatus.textContent = payload.id ? 'Cotización guardada con folio #' + payload.id + '.' : 'Cotización guardada.';
+      openWhatsapp(payload.message || fallbackMessage, whatsappWindow);
+    } catch (error) {
+      console.error('[quote] save failed', error);
+      if (quoteStatus) quoteStatus.textContent = 'No se pudo guardar la cotización, pero se abrirá WhatsApp con el detalle.';
+      openWhatsapp(fallbackMessage, whatsappWindow);
+    } finally {
+      if (quoteButton instanceof HTMLButtonElement) {
+        quoteButton.disabled = cart.size === 0;
+        quoteButton.textContent = previousText || 'Cotizar por WhatsApp';
+      }
+    }
+  };
+
+  document.addEventListener('click', (event) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const addButton = target?.closest('[data-add-to-cart]');
+    if (addButton instanceof HTMLElement) {
+      const id = String(addButton.dataset.addToCart || '');
+      const product = productMap.get(id);
+      const input = document.querySelector('[data-quantity-for="' + id + '"]');
+      const quantity = Math.max(1, Number.parseInt(input instanceof HTMLInputElement ? input.value : '1', 10) || 1);
+      if (!product) return;
+      const existing = cart.get(id);
+      cart.set(id, { product, quantity: (existing?.quantity || 0) + quantity });
+      renderCart();
+      document.getElementById('cotizacion')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+
+    const removeButton = target?.closest('[data-remove-cart]');
+    if (removeButton instanceof HTMLElement) {
+      cart.delete(String(removeButton.dataset.removeCart || ''));
+      renderCart();
+      return;
+    }
+
+    if (target?.id === 'clear-cart') {
+      cart.clear();
+      customer = null;
+      renderCart();
+      return;
+    }
+
+    if (target?.id === 'quote-button') {
+      if (cart.size === 0) return;
+      if (!customer) {
+        modal?.classList.add('open');
+        setTimeout(() => document.getElementById('customer-name')?.focus(), 0);
+        return;
+      }
+      void openQuote();
+      return;
+    }
+
+    if (target?.id === 'cancel-customer') {
+      modal?.classList.remove('open');
+    }
+  });
+
+  document.addEventListener('input', (event) => {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (!input?.dataset.cartQty) return;
+    const id = String(input.dataset.cartQty);
+    const item = cart.get(id);
+    if (!item) return;
+    item.quantity = Math.max(1, Number.parseInt(input.value, 10) || 1);
+    cart.set(id, item);
+    renderCart();
+  });
+
+  customerForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const nameInput = document.getElementById('customer-name');
+    const postalInput = document.getElementById('customer-postal-code');
+    const name = nameInput instanceof HTMLInputElement ? nameInput.value.trim() : '';
+    const postalCode = postalInput instanceof HTMLInputElement ? postalInput.value.trim() : '';
+    if (!name || !postalCode) return;
+    customer = { name, postalCode };
+    modal?.classList.remove('open');
+    void openQuote();
+  });
+
+  renderCart();
+})();
+</script>
+`;
+
+const renderCartSection = (config: Record<string, string>, productsWithTiers: ReturnType<typeof getCatalogData>["productsWithTiers"]) => {
+  const products = productsWithTiers.map(({ product, priceTiers }) => ({
+    id: product.id,
+    name: product.name,
+    priceTiers: priceTiers.map((tier) => ({
+      min_volume: tier.min_volume,
+      max_volume: tier.max_volume,
+      price: tier.price,
+      delivery_time: tier.delivery_time,
+    })),
+  }));
+  const whatsappNumber = normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304");
+  const shippingSettings = getShippingSettings(config);
+  const shippingNote = shippingSettings.freeMinPieces
+    ? `Envío estimado por ${shippingSettings.provider}: $${shippingSettings.price.toFixed(2)} MXN. Gratis desde ${shippingSettings.freeMinPieces} piezas.`
+    : `Envío estimado por ${shippingSettings.provider}: $${shippingSettings.price.toFixed(2)} MXN.`;
+
+  return `
+    <section class="quote-cart" id="cotizacion">
+      <div class="cart-panel">
+        <div class="cart-header">
+          <div>
+            <h2>Carrito de cotización</h2>
+            <p class="quote-note">Agrega productos y cantidades. Los precios se recalculan con el volumen total de piezas. ${escapeHtml(shippingNote)}</p>
+          </div>
+          <button type="button" class="secondary-button" id="clear-cart">Vaciar</button>
+        </div>
+        <div id="cart-empty" class="cart-empty">Tu carrito está vacío. Agrega productos para cotizar.</div>
+        <div id="cart-lines" class="cart-lines"></div>
+        <div class="cart-totals">
+          <div class="cart-total-row"><span>Total de piezas</span><strong id="cart-total-pieces">0</strong></div>
+          <div class="cart-total-row"><span>Subtotal estimado</span><strong id="cart-subtotal-amount">$0.00</strong></div>
+          <div class="cart-total-row"><span id="cart-shipping-label">Envío estimado (${escapeHtml(shippingSettings.provider)})</span><strong id="cart-shipping-amount">$0.00</strong></div>
+          <div class="cart-total-row"><span>Total estimado con envío</span><strong id="cart-total-amount">$0.00</strong></div>
+        </div>
+        <div class="quote-actions">
+          <p class="quote-note" id="quote-status" aria-live="polite">Antes de abrir WhatsApp te pediremos nombre y código postal.</p>
+          <button type="button" class="quote-button" id="quote-button" disabled>Cotizar por WhatsApp</button>
+        </div>
+      </div>
+    </section>
+    <div class="customer-modal" id="customer-modal" aria-hidden="true">
+      <form class="modal-card" id="customer-form">
+        <h2>Datos para cotizar</h2>
+        <p class="quote-note">Necesitamos estos datos antes de enviar tu solicitud por WhatsApp.</p>
+        <label for="customer-name">Nombre</label>
+        <input id="customer-name" name="customer_name" type="text" autocomplete="name" required>
+        <label for="customer-postal-code">Código postal</label>
+        <input id="customer-postal-code" name="postal_code" type="text" inputmode="numeric" autocomplete="postal-code" required>
+        <div class="modal-actions">
+          <button type="button" class="secondary-button" id="cancel-customer">Cancelar</button>
+          <button type="submit" class="quote-button">Continuar a WhatsApp</button>
+        </div>
+      </form>
+    </div>
+    ${renderShopScript(products, whatsappNumber, shippingSettings)}
+  `;
+};
+
+const renderInteractiveCatalog = () => {
+  const { config, defaultPriceTiers, productsWithTiers } = getCatalogData();
+  const content = `
+    ${renderCoverSection(config)}
+    ${renderWelcomeSection(config, defaultPriceTiers)}
+    ${renderProductsSection(config, productsWithTiers, true)}
+    ${renderCartSection(config, productsWithTiers)}
+    ${renderContactSection(config)}
+  `;
+  return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo`, content, config);
+};
+
+publicRoutes.get("/", (c) => c.redirect("/catalogo"));
+publicRoutes.post("/api/quotes", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const customerName = String(body.customerName ?? body.customer_name ?? "").trim();
+    const postalCode = String(body.postalCode ?? body.postal_code ?? "").trim();
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+
+    if (!customerName || !postalCode) {
+      return c.json({ error: "Nombre y código postal son obligatorios." }, 400);
+    }
+    if (rawItems.length === 0) {
+      return c.json({ error: "Agrega al menos un producto para cotizar." }, 400);
+    }
+
+    const { config, productsWithTiers } = getCatalogData();
+    const productMap = new Map(productsWithTiers.map((entry) => [entry.product.id, entry]));
+    const selected = new Map<number, { product: typeof productsWithTiers[number]["product"], priceTiers: typeof productsWithTiers[number]["priceTiers"], quantity: number }>();
+
+    for (const rawItem of rawItems) {
+      const item = rawItem as Record<string, unknown>;
+      const productId = Number.parseInt(String(item.productId ?? item.product_id ?? item.id ?? ""), 10);
+      const quantity = Math.max(1, Number.parseInt(String(item.quantity ?? "1"), 10) || 1);
+      const productEntry = productMap.get(productId);
+      if (!productEntry) continue;
+      const existing = selected.get(productId);
+      selected.set(productId, { ...productEntry, quantity: (existing?.quantity || 0) + quantity });
+    }
+
+    const totalPieces = Array.from(selected.values()).reduce((total, item) => total + item.quantity, 0);
+    if (totalPieces <= 0) {
+      return c.json({ error: "No se encontraron productos válidos para cotizar." }, 400);
+    }
+
+    const lines: QuoteLine[] = Array.from(selected.values()).map(({ product, priceTiers, quantity }) => {
+      const tier = tierForQuantity(priceTiers, totalPieces);
+      const unitPrice = tier ? Number(tier.price) : 0;
+      return {
+        productId: product.id,
+        productName: product.name,
+        quantity,
+        unitPrice,
+        subtotal: unitPrice * quantity,
+        tier: tier ? { min_volume: tier.min_volume, max_volume: tier.max_volume, delivery_time: tier.delivery_time } : null,
+      };
+    });
+
+    const subtotal = lines.reduce((sum, line) => sum + line.subtotal, 0);
+    const shipping = shippingForPieces(config, totalPieces);
+    const grandTotal = subtotal + shipping.cost;
+    const whatsappNumber = normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304");
+    const messageWithoutFolio = buildQuoteMessage({
+      customerName,
+      postalCode,
+      totalPieces,
+      lines,
+      subtotal,
+      shippingProvider: shipping.provider,
+      shippingCost: shipping.cost,
+      grandTotal,
+    });
+
+    const quoteId = createQuote({
+      customer_name: customerName,
+      postal_code: postalCode,
+      total_pieces: totalPieces,
+      subtotal,
+      shipping_provider: shipping.provider,
+      shipping_cost: shipping.cost,
+      shipping_free_threshold: shipping.freeMinPieces,
+      grand_total: grandTotal,
+      whatsapp_number: whatsappNumber,
+      message: messageWithoutFolio,
+      items: lines.map((line) => ({
+        product_id: line.productId,
+        product_name: line.productName,
+        quantity: line.quantity,
+        unit_price: line.unitPrice,
+        subtotal: line.subtotal,
+        pricing_min_volume: line.tier?.min_volume ?? null,
+        pricing_max_volume: line.tier?.max_volume ?? null,
+        delivery_time: line.tier?.delivery_time ?? null,
+      })),
+    });
+
+    const message = buildQuoteMessage({
+      quoteId,
+      customerName,
+      postalCode,
+      totalPieces,
+      lines,
+      subtotal,
+      shippingProvider: shipping.provider,
+      shippingCost: shipping.cost,
+      grandTotal,
+    });
+    updateQuoteMessage(quoteId, message);
+
+    return c.json({
+      id: quoteId,
+      message,
+      totals: {
+        totalPieces,
+        subtotal,
+        shippingProvider: shipping.provider,
+        shippingCost: shipping.cost,
+        freeShippingMinPieces: shipping.freeMinPieces,
+        grandTotal,
+      },
+    });
+  } catch (error) {
+    console.error("[quotes] save failed", error);
+    return c.json({ error: "No se pudo guardar la cotización." }, 500);
+  }
 });
+publicRoutes.get("/catalogo", (c) => c.html(renderInteractiveCatalog()));
+publicRoutes.get("/imprimir", (c) => c.html(renderPrintableCatalog(c.req.query("embed") !== "1")));
 
 export { publicRoutes };
