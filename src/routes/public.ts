@@ -343,9 +343,11 @@ const buildQuoteMessage = (input: {
   quoteId?: number;
   customerName: string;
   postalCode: string;
+  requiresInvoice?: boolean;
   totalPieces: number;
   lines: QuoteLine[];
   subtotal: number;
+  iva?: number;
   shippingProvider: string;
   shippingCost: number;
   grandTotal: number;
@@ -357,8 +359,9 @@ const buildQuoteMessage = (input: {
     const delivery = line.tier?.delivery_time ? ` · Entrega: ${line.tier.delivery_time}` : "";
     return `${index + 1}. ${line.productName} - ${line.quantity} piezas - ${unit} c/u - ${subtotal}${delivery}`;
   }).join("\n");
+  const ivaLine = input.requiresInvoice ? `IVA (16%): ${hasMissingPrice ? "A cotizar" : currency.format(input.iva || 0)}\n` : "";
 
-  return `Hola PIXKEY3D, quiero cotizar este pedido:\n\n${input.quoteId ? `Folio: #${input.quoteId}\n` : ""}Nombre: ${input.customerName}\nCódigo postal: ${input.postalCode}\n\nProductos:\n${lines}\n\nTotal de piezas: ${input.totalPieces}\nSubtotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.subtotal)}\nEnvío estimado (${input.shippingProvider}): ${input.shippingCost > 0 ? currency.format(input.shippingCost) : "Gratis"}\nTotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.grandTotal)}\n\nQuedo pendiente de la cotización final con envío.`;
+  return `Hola PIXKEY3D, quiero cotizar este pedido:\n\n${input.quoteId ? `Folio: #${input.quoteId}\n` : ""}Nombre: ${input.customerName}\nCódigo postal: ${input.postalCode}${input.requiresInvoice ? "\nRequiere factura: Sí" : ""}\n\nProductos:\n${lines}\n\nTotal de piezas: ${input.totalPieces}\nSubtotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.subtotal)}\n${ivaLine}Envío estimado (${input.shippingProvider}): ${input.shippingCost > 0 ? currency.format(input.shippingCost) : "Gratis"}\nTotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.grandTotal)}\n\nQuedo pendiente de la cotización final con envío.`;
 };
 
 const renderCoverSection = (config: Record<string, string>) => `
@@ -518,6 +521,10 @@ const renderShopScript = (products: Array<{
   const shippingLabelEl = document.getElementById('cart-shipping-label');
   const shippingAmountEl = document.getElementById('cart-shipping-amount');
   const totalAmountEl = document.getElementById('cart-total-amount');
+  const ivaRowEl = document.getElementById('iva-row');
+  const ivaAmountEl = document.getElementById('cart-iva-amount');
+  const grandLabelEl = document.getElementById('cart-grand-label');
+  const invoiceCheckbox = document.getElementById('requires-invoice');
   const quoteStatus = document.getElementById('quote-status');
   const quoteButton = document.getElementById('quote-button');
   const clearButton = document.getElementById('clear-cart');
@@ -548,7 +555,9 @@ const renderShopScript = (products: Array<{
     const subtotal = lines.reduce((sum, line) => sum + line.subtotal, 0);
     const shippingCost = lines.length ? shippingCostForPieces(totalPieces) : 0;
     const hasMissingPrice = lines.some((line) => !line.tier);
-    return { totalPieces, lines, subtotal, shippingCost, grandTotal: subtotal + shippingCost, hasMissingPrice };
+    const needsInvoice = invoiceCheckbox instanceof HTMLInputElement && invoiceCheckbox.checked;
+    const iva = needsInvoice ? Math.round(subtotal * 0.16 * 100) / 100 : 0;
+    return { totalPieces, lines, subtotal, iva, needsInvoice, shippingCost, grandTotal: subtotal + iva + shippingCost, hasMissingPrice };
   };
 
   const renderCart = () => {
@@ -559,6 +568,9 @@ const renderShopScript = (products: Array<{
     if (totalPiecesEl) totalPiecesEl.textContent = String(details.totalPieces);
     if (subtotalAmountEl) subtotalAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal);
     if (shippingLabelEl) shippingLabelEl.textContent = 'Envío estimado (' + (shippingSettings.provider || 'Estafeta') + ')';
+    if (ivaRowEl) ivaRowEl.style.display = details.needsInvoice ? 'flex' : 'none';
+    if (ivaAmountEl) ivaAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.iva);
+    if (grandLabelEl) grandLabelEl.textContent = details.needsInvoice ? 'Total estimado con IVA y envío' : 'Total estimado con envío';
     if (shippingAmountEl) shippingAmountEl.textContent = details.lines.length ? (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') : '$0.00';
     if (totalAmountEl) totalAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.grandTotal);
     if (!cartLines) return;
@@ -583,16 +595,21 @@ const renderShopScript = (products: Array<{
       const delivery = line.tier?.delivery_time ? ' · Entrega: ' + line.tier.delivery_time : '';
       return (index + 1) + '. ' + line.product.name + ' - ' + line.quantity + ' piezas - ' + unit + ' c/u - ' + subtotal + delivery;
     }).join('\\n');
+    const ivaLine = details.needsInvoice ? 'IVA (16%): ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.iva)) + '\\n' : '';
     return 'Hola PIXKEY3D, quiero cotizar este pedido:\\n\\n'
       + 'Nombre: ' + customer.name + '\\n'
-      + 'Código postal: ' + customer.postalCode + '\\n\\n'
-      + 'Productos:\\n' + lines + '\\n\\n'
+      + 'Código postal: ' + customer.postalCode + '\\n'
+      + (details.needsInvoice ? 'Requiere factura: Sí\\n' : '')
+      + '\\nProductos:\\n' + lines + '\\n\\n'
       + 'Total de piezas: ' + details.totalPieces + '\\n'
       + 'Subtotal estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal)) + '\\n'
+      + ivaLine
       + 'Envío estimado (' + (shippingSettings.provider || 'Estafeta') + '): ' + (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') + '\\n'
       + 'Total estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.grandTotal)) + '\\n\\n'
       + 'Quedo pendiente de la cotización final con envío.';
   };
+
+  if (invoiceCheckbox) invoiceCheckbox.addEventListener('change', renderCart);
 
   const saveQuote = async () => {
     const details = cartDetails();
@@ -602,6 +619,7 @@ const renderShopScript = (products: Array<{
       body: JSON.stringify({
         customerName: customer.name,
         postalCode: customer.postalCode,
+        requiresInvoice: details.needsInvoice,
         items: details.lines.map((line) => ({ productId: line.product.id, quantity: line.quantity })),
       }),
     });
@@ -750,10 +768,16 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
         <div id="cart-empty" class="cart-empty">Tu carrito está vacío. Agrega productos para cotizar.</div>
         <div id="cart-lines" class="cart-lines"></div>
         <div class="cart-totals">
+          <div class="cart-total-row" style="margin-bottom:.5rem">
+            <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.9rem">
+              <input type="checkbox" id="requires-invoice"> ¿Requiere factura?
+            </label>
+          </div>
           <div class="cart-total-row"><span>Total de piezas</span><strong id="cart-total-pieces">0</strong></div>
           <div class="cart-total-row"><span>Subtotal estimado</span><strong id="cart-subtotal-amount">$0.00</strong></div>
+          <div class="cart-total-row" id="iva-row" style="display:none"><span>IVA (16%)</span><strong id="cart-iva-amount">$0.00</strong></div>
           <div class="cart-total-row"><span id="cart-shipping-label">Envío estimado (${escapeHtml(shippingSettings.provider)})</span><strong id="cart-shipping-amount">$0.00</strong></div>
-          <div class="cart-total-row"><span>Total estimado con envío</span><strong id="cart-total-amount">$0.00</strong></div>
+          <div class="cart-total-row"><span id="cart-grand-label">Total estimado con envío</span><strong id="cart-total-amount">$0.00</strong></div>
         </div>
         <div class="quote-actions">
           <p class="quote-note" id="quote-status" aria-live="polite">Antes de abrir WhatsApp te pediremos nombre y código postal.</p>
@@ -797,6 +821,7 @@ publicRoutes.post("/api/quotes", async (c) => {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const customerName = String(body.customerName ?? body.customer_name ?? "").trim();
     const postalCode = String(body.postalCode ?? body.postal_code ?? "").trim();
+    const requiresInvoice = Boolean(body.requiresInvoice ?? body.requires_invoice ?? false);
     const rawItems = Array.isArray(body.items) ? body.items : [];
 
     if (!customerName || !postalCode) {
@@ -839,15 +864,18 @@ publicRoutes.post("/api/quotes", async (c) => {
     });
 
     const subtotal = lines.reduce((sum, line) => sum + line.subtotal, 0);
+    const iva = requiresInvoice ? Math.round(subtotal * 0.16 * 100) / 100 : 0;
     const shipping = shippingForPieces(config, totalPieces);
-    const grandTotal = subtotal + shipping.cost;
+    const grandTotal = subtotal + iva + shipping.cost;
     const whatsappNumber = normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304");
     const messageWithoutFolio = buildQuoteMessage({
       customerName,
       postalCode,
+      requiresInvoice,
       totalPieces,
       lines,
       subtotal,
+      iva,
       shippingProvider: shipping.provider,
       shippingCost: shipping.cost,
       grandTotal,
@@ -880,9 +908,11 @@ publicRoutes.post("/api/quotes", async (c) => {
       quoteId,
       customerName,
       postalCode,
+      requiresInvoice,
       totalPieces,
       lines,
       subtotal,
+      iva,
       shippingProvider: shipping.provider,
       shippingCost: shipping.cost,
       grandTotal,

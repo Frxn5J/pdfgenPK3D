@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuoteItems, type PriceTier, type QuoteItem } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 
@@ -21,6 +21,11 @@ const formString = (value: unknown) => {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return formString(value[0]);
   return "";
+};
+const formStringArray = (value: unknown): string[] => {
+  if (Array.isArray(value)) return value.map((v) => (typeof v === "string" ? v : ""));
+  if (typeof value === "string") return [value];
+  return [];
 };
 const formFile = (value: unknown): File | null => {
   if (value instanceof File && value.size > 0) return value;
@@ -49,9 +54,31 @@ const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (
 const configValue = (config: Record<string, string>, key: string, fallback = "") => escapeHtml(config[key] || fallback);
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
 const money = (value: number) => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(value || 0);
+const plainMoney = (value: number) => new Intl.NumberFormat("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0);
 const volumeText = (min: number | null, max: number | null) => {
   if (!min) return "Sin rango";
   return max ? `${min} a ${max} piezas` : `${min} o más piezas`;
+};
+const renderStatusBadge = (status: string) => {
+  if (status === "despachado") {
+    return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-green-100 text-green-800 border border-green-200">Despachada</span>`;
+  }
+  if (status === "produccion") {
+    return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-blue-100 text-blue-800 border border-blue-200">En Producción</span>`;
+  }
+  if (status === "finalizado") {
+    return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-purple-100 text-purple-800 border border-purple-200">Finalizada</span>`;
+  }
+  if (status === "spam") {
+    return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-red-100 text-red-800 border border-red-200">Spam</span>`;
+  }
+  return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">No despachada</span>`;
+};
+const quoteFolio = (quote: Pick<Quote, "id">) => `COT-${String(quote.id).padStart(3, "0")}`;
+const formatDate = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("es-MX");
 };
 
 type MakerWorldDraft = {
@@ -382,11 +409,29 @@ const extractImageCandidate = (payload: unknown): string => {
   return walk(payload);
 };
 
+const urlToDataUrl = async (url: string): Promise<string> => {
+  const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
+  if (!res.ok) throw new Error(`No se pudo descargar la imagen: HTTP ${res.status}`);
+  const mime = res.headers.get("content-type") || "image/png";
+  const buf = Buffer.from(await res.arrayBuffer());
+  return `data:${mime};base64,${buf.toString("base64")}`;
+};
+
 const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceResult> => {
   const config = imageEnhanceConfig();
   const endpoint = resolveImageEnhanceEndpoint(config);
   if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
   if (!imageUrl.trim()) throw new Error("Primero selecciona, pega o sube una imagen para mejorar.");
+
+  // Convert HTTP URLs to base64 data URLs to avoid filename-related OSS signature issues on the provider side
+  let resolvedImage = imageUrl;
+  if (/^https?:\/\//i.test(imageUrl)) {
+    try {
+      resolvedImage = await urlToDataUrl(imageUrl);
+    } catch (e) {
+      console.warn("[Qwen image/enhance] Could not convert URL to data URL, sending raw URL:", e);
+    }
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
@@ -396,7 +441,7 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
       endpoint,
       model: config.model || "provider-default",
       hasApiKey: Boolean(config.apiKey),
-      imageSource: imageUrl.startsWith("data:image/") ? "uploaded-file" : "url",
+      imageSource: resolvedImage.startsWith("data:image/") ? "uploaded-file" : "url",
     });
 
     const headers: Record<string, string> = { "content-type": "application/json" };
@@ -409,9 +454,9 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
       body: JSON.stringify({
         model: config.model || undefined,
         prompt: config.prompt,
-        image: imageUrl,
-        imageUrl,
-        image_url: imageUrl,
+        image: resolvedImage,
+        imageUrl: resolvedImage,
+        image_url: resolvedImage,
         response_format: "url",
         source: "pixkey3d-makerworld",
         intent: "catalog-product-photo-white-background",
@@ -691,6 +736,8 @@ const AdminLayout = (title: string, content: string) => `
                         <a href="/admin/config" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Configuración</a>
                         <a href="/admin/products" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Productos</a>
                         <a href="/admin/quotes" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Cotizaciones</a>
+                        <a href="/admin/production" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Producción</a>
+                        <a href="/admin/production-settings" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">Ajustes Prod</a>
                         <a href="/admin/makerworld" class="px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">MakerWorld</a>
                         <a href="/" target="_blank" class="px-3 py-2 rounded-md text-sm font-medium text-blue-200 hover:text-white hover:bg-blue-700">Ver Catálogo ↗</a>
                     </div>
@@ -779,60 +826,88 @@ adminRoutes.get("/", (c) => {
 });
 
 adminRoutes.get("/quotes", (c) => {
+  const currentStatus = c.req.query("status") || "todos";
   const quotes = getQuotes(100);
-  const rows = quotes.map((quote) => {
-    const items = getQuoteItems(quote.id);
-    const itemsHtml = items.map((item: QuoteItem) => `
+
+  const filteredQuotes = currentStatus === "todos"
+    ? quotes
+    : quotes.filter((q) => {
+        if (currentStatus === "despachado") return q.status === "despachado";
+        if (currentStatus === "no_despachado") return q.status === "new" || q.status === "no_despachado";
+        if (currentStatus === "produccion") return q.status === "produccion";
+        if (currentStatus === "finalizado") return q.status === "finalizado";
+        if (currentStatus === "spam") return q.status === "spam";
+        return true;
+      });
+
+  const rows = filteredQuotes.map((quote) => {
+    const items = getQuoteItemsWithProducts(quote.id);
+    const itemsHtml = items.map((item: QuoteItemWithProduct) => `
       <li>
         <span class="font-medium">${escapeHtml(item.product_name)}</span>:
         ${item.quantity} piezas × ${money(item.unit_price)} = ${money(item.subtotal)}
-        <span class="text-gray-500">(${escapeHtml(volumeText(item.pricing_min_volume, item.pricing_max_volume))}${item.delivery_time ? `, ${escapeHtml(item.delivery_time)}` : ""})</span>
       </li>
     `).join("");
     return `
       <tr class="align-top">
-        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">#${quote.id}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${escapeHtml(quoteFolio(quote))}</td>
         <td class="px-4 py-3 text-sm text-gray-700">
           <div class="font-medium text-gray-900">${escapeHtml(quote.customer_name)}</div>
           <div class="text-gray-500">CP ${escapeHtml(quote.postal_code)}</div>
-          <div class="text-gray-500">${escapeHtml(quote.created_at)}</div>
+          <div class="text-gray-500">${formatDate(quote.created_at)}</div>
         </td>
-        <td class="px-4 py-3 text-sm text-gray-700">${quote.total_pieces}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+          ${renderStatusBadge(quote.status)}
+        </td>
+        <td class="px-4 py-3 text-sm text-gray-700 font-medium">${quote.total_pieces}</td>
         <td class="px-4 py-3 text-sm text-gray-700">
           <div>Subtotal: ${money(quote.subtotal)}</div>
-          <div>Envío ${escapeHtml(quote.shipping_provider)}: ${quote.shipping_cost > 0 ? money(quote.shipping_cost) : "Gratis"}</div>
+          <div>Envío: ${quote.shipping_cost > 0 ? money(quote.shipping_cost) : "Gratis"}</div>
           <div class="font-semibold text-gray-900">Total: ${money(quote.grand_total)}</div>
         </td>
         <td class="px-4 py-3 text-sm text-gray-700">
-          <details>
-            <summary class="cursor-pointer text-blue-700 font-medium">Ver detalle</summary>
-            <ul class="mt-2 list-disc pl-5 space-y-1">${itemsHtml || '<li class="text-gray-500">Sin productos guardados.</li>'}</ul>
-            ${quote.message ? `<pre class="mt-3 whitespace-pre-wrap rounded bg-gray-50 p-3 text-xs text-gray-600 border">${escapeHtml(quote.message)}</pre>` : ""}
-          </details>
+          <ul class="list-disc pl-4 space-y-0.5 text-xs text-gray-600">${itemsHtml || '<li class="text-gray-500">Sin productos.</li>'}</ul>
+        </td>
+        <td class="px-4 py-3 text-right whitespace-nowrap text-sm font-medium">
+          <a href="/admin/quotes/${quote.id}" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-xs font-semibold inline-block transition-colors">
+            Ver detalles y PDF
+          </a>
         </td>
       </tr>
     `;
   }).join("");
 
   return c.html(AdminLayout("Cotizaciones", `
-    <div class="bg-white shadow rounded-lg overflow-hidden">
-      <div class="px-6 py-4 border-b border-gray-200">
-        <h2 class="text-xl font-bold text-gray-800">Cotizaciones guardadas</h2>
-        <p class="text-sm text-gray-500 mt-1">Se guardan automáticamente cuando el cliente continúa a WhatsApp desde /catalogo.</p>
+    <div class="bg-white shadow rounded-lg overflow-hidden p-6">
+      <div class="border-b border-gray-200 pb-4 mb-6">
+        <h2 class="text-2xl font-bold text-gray-800">Cotizaciones guardadas</h2>
+        <p class="text-sm text-gray-500 mt-1">Se guardan automáticamente cuando el cliente inicia la cotización desde el catálogo interactivo.</p>
       </div>
-      <div class="overflow-x-auto">
+
+      <div class="flex border-b border-gray-200 mb-6 bg-gray-50 p-1.5 rounded-lg gap-1.5 max-w-xl">
+        <a href="/admin/quotes?status=todos" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'todos' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">Todas</a>
+        <a href="/admin/quotes?status=no_despachado" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'no_despachado' ? 'bg-yellow-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">No despachadas</a>
+        <a href="/admin/quotes?status=despachado" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'despachado' ? 'bg-green-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">Despachadas</a>
+        <a href="/admin/quotes?status=produccion" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'produccion' ? 'bg-blue-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">En Producción</a>
+        <a href="/admin/quotes?status=finalizado" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'finalizado' ? 'bg-purple-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">Finalizadas</a>
+        <a href="/admin/quotes?status=spam" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'spam' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">Spam</a>
+      </div>
+
+      <div class="overflow-x-auto border rounded-lg">
         <table class="min-w-full divide-y divide-gray-200">
           <thead class="bg-gray-50">
             <tr>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Folio</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cliente</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Piezas</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Totales</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Productos</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Folio</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Cliente</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Estado</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Piezas</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Totales</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Productos</th>
+              <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Acciones</th>
             </tr>
           </thead>
           <tbody class="bg-white divide-y divide-gray-200">
-            ${rows || '<tr><td colspan="5" class="px-6 py-10 text-center text-gray-500">Aún no hay cotizaciones guardadas.</td></tr>'}
+            ${rows || '<tr><td colspan="7" class="px-6 py-10 text-center text-gray-500">No se encontraron cotizaciones con este estado.</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -918,6 +993,26 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
             <p class="text-xs text-purple-700 mt-2">No tienes que seleccionar nada más: esta imagen ya quedó en el campo de URL y se usará al presionar “Agregar al catálogo”.</p>
           </div>
         </div>
+        <div class="border border-orange-200 bg-orange-50 rounded-lg p-4">
+          <h3 class="text-sm font-bold text-orange-900 mb-3">🖨 Datos de Impresión (para planificador de producción)</h3>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Filamento por pieza (gramos)</label>
+              <input type="number" name="filament_grams" min="0" step="0.1" value="0" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+              <p class="text-xs text-gray-500 mt-1">Cuántos gramos consume al imprimir una pieza.</p>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Tiempo de impresión por pieza (minutos)</label>
+              <input type="number" name="print_time_mins" min="0" step="1" value="0" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+              <p class="text-xs text-gray-500 mt-1">Tiempo estimado de impresora ocupada por pieza.</p>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Costos extra por pieza ($ MXN)</label>
+              <input type="number" name="extra_costs" min="0" step="0.01" value="0.00" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+              <p class="text-xs text-gray-500 mt-1">Suma de insumos adicionales: NFC, argolla, etc.</p>
+            </div>
+          </div>
+        </div>
         <div>
           <label class="flex items-start gap-3 text-sm">
             <input type="checkbox" name="use_default_pricing" value="1" checked class="mt-1 h-4 w-4 text-blue-600 border-gray-300 rounded">
@@ -956,10 +1051,13 @@ adminRoutes.post("/makerworld/save", async (c) => {
   const file = formFile(body.image_file);
   if (file) imageUrl = await saveUpload(file, "products", "prod");
   const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
+  const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
+  const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
+  const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
   const result = db.query(`
-    INSERT INTO products (name, description, image_url, use_default_pricing, sort_order)
-    VALUES (?, ?, ?, ?, 0) RETURNING id
-  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, useDefaultPricing) as {id: number};
+    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) RETURNING id
+  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.source_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing) as {id: number};
   if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
   return c.redirect(`/admin/products/${result.id}/edit`);
 });
@@ -1423,6 +1521,26 @@ adminRoutes.get("/products/new", (c) => {
                 <input type="text" name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
 
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Link de MakerWorld (Opcional)</label>
+                <input type="url" name="makerworld_url" placeholder="https://makerworld.com/es/models/..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Filamento Requerido (Gramos)</label>
+                    <input type="number" name="filament_grams" min="0" step="0.1" value="0" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Tiempo de Impresión (Minutos)</label>
+                    <input type="number" name="print_time_mins" min="0" step="1" value="0" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Costos Extra (NFC, argolla, etc. $ MXN)</label>
+                    <input type="number" name="extra_costs" min="0" step="0.01" value="0.00" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+            </div>
+
             ${renderDescriptionField("", 3)}
 
             <div>
@@ -1474,11 +1592,14 @@ adminRoutes.post("/products/new", async (c) => {
   }
 
   const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
+  const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
+  const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
+  const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
 
   const result = db.query(`
-    INSERT INTO products (name, description, image_url, use_default_pricing, sort_order)
-    VALUES (?, ?, ?, ?, 0) RETURNING id
-  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, useDefaultPricing) as {id: number};
+    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) RETURNING id
+  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing) as {id: number};
 
   if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
 
@@ -1506,6 +1627,26 @@ adminRoutes.get("/products/:id/edit", (c) => {
             <div>
                 <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
                 <input type="text" name="name" value="${escapeHtml(product.name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Link de MakerWorld (Opcional)</label>
+                <input type="url" name="makerworld_url" value="${escapeHtml(product.makerworld_url || '')}" placeholder="https://makerworld.com/es/models/..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Filamento Requerido (Gramos)</label>
+                    <input type="number" name="filament_grams" min="0" step="0.1" value="${product.filament_grams || 0}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Tiempo de Impresión (Minutos)</label>
+                    <input type="number" name="print_time_mins" min="0" step="1" value="${product.print_time_mins || 0}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Costos Extra (NFC, argolla, etc. $ MXN)</label>
+                    <input type="number" name="extra_costs" min="0" step="0.01" value="${product.extra_costs || 0}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
             </div>
 
             ${renderDescriptionField(product.description || '', 3)}
@@ -1561,14 +1702,1153 @@ adminRoutes.post("/products/:id/edit", async (c) => {
   }
 
   const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
+  const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
+  const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
+  const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
 
   db.run(`
-    UPDATE products SET name = ?, description = ?, image_url = ?, use_default_pricing = ? WHERE id = ?
-  `, [formString(body.name), formString(body.description) || null, imageUrl || null, useDefaultPricing, id]);
+    UPDATE products SET name = ?, description = ?, image_url = ?, makerworld_url = ?, filament_grams = ?, print_time_mins = ?, extra_costs = ?, use_default_pricing = ? WHERE id = ?
+  `, [formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, id]);
 
   replaceProductPriceTiers(id, useDefaultPricing ? [] : parsePriceTiers(body));
 
   return c.redirect("/admin/products");
+});
+
+adminRoutes.get("/quotes/:id", (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const quote = getQuote(id);
+  if (!quote) return c.notFound();
+
+  const config = getConfig();
+  const items = getQuoteItemsWithProducts(id);
+
+  const itemsRows = items.map((item) => {
+    const makerworldHtml = item.product_makerworld_url
+      ? `<a href="${escapeHtml(item.product_makerworld_url)}" target="_blank" class="text-blue-600 hover:underline font-semibold flex items-center gap-1">
+          MakerWorld ↗
+         </a>`
+      : `<span class="text-gray-400 italic text-xs">Sin enlace</span>`;
+
+    const imgHtml = item.product_image_url
+      ? `<img src="${escapeHtml(item.product_image_url)}" class="h-12 w-12 rounded object-cover border bg-gray-50">`
+      : `<div class="h-12 w-12 rounded bg-gray-100 flex items-center justify-center text-gray-400 text-xs border">Sin img</div>`;
+
+    return `
+      <tr>
+        <td class="px-6 py-4 whitespace-nowrap">${imgHtml}</td>
+        <td class="px-6 py-4 whitespace-nowrap">
+          <div class="text-sm font-medium text-gray-900">${escapeHtml(item.product_name)}</div>
+        </td>
+        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.quantity}</td>
+        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">${money(item.unit_price)}</td>
+        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-semibold">${money(item.subtotal)}</td>
+        <td class="px-6 py-4 whitespace-nowrap text-sm">${makerworldHtml}</td>
+      </tr>
+    `;
+  }).join("");
+
+  const defaultDelivery = `10 días hábiles para el envío por ${quote.shipping_provider || 'paquetería'} despues del pago del anticipo`;
+
+  return c.html(AdminLayout(`Detalle Cotización #${quote.id}`, `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between">
+        <a href="/admin/quotes" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-md text-sm font-semibold transition-colors">
+          ← Volver a lista
+        </a>
+        <h1 class="text-2xl font-bold text-gray-800">Detalle de Cotización: ${escapeHtml(quoteFolio(quote))}</h1>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="md:col-span-1 space-y-6">
+          <div class="bg-white shadow rounded-lg p-6 space-y-4">
+            <h2 class="text-lg font-bold text-gray-800 border-b pb-2">Información del Cliente</h2>
+            <div>
+              <span class="text-xs text-gray-500 block uppercase font-semibold">Cliente</span>
+              <span class="text-sm font-medium text-gray-900">${escapeHtml(quote.customer_name)}</span>
+            </div>
+            <div>
+              <span class="text-xs text-gray-500 block uppercase font-semibold">Código Postal</span>
+              <span class="text-sm font-medium text-gray-900">${escapeHtml(quote.postal_code)}</span>
+            </div>
+            <div>
+              <span class="text-xs text-gray-500 block uppercase font-semibold">Fecha Emisión</span>
+              <span class="text-sm font-medium text-gray-900">${formatDate(quote.created_at)}</span>
+            </div>
+            <div>
+              <span class="text-xs text-gray-500 block uppercase font-semibold">WhatsApp</span>
+              <span class="text-sm font-medium text-gray-900">
+                <a href="https://wa.me/${escapeHtml(quote.whatsapp_number || '')}" target="_blank" class="text-green-600 hover:underline font-semibold flex items-center gap-1 mt-1">
+                  ${escapeHtml(quote.whatsapp_number || '')} ↗
+                </a>
+              </span>
+            </div>
+          </div>
+
+          <div class="bg-white shadow rounded-lg p-6 space-y-4">
+            <h2 class="text-lg font-bold text-gray-800 border-b pb-2">Estado de la Cotización</h2>
+            <div class="flex items-center gap-2 justify-between">
+              <span class="text-xs text-gray-500 uppercase font-semibold">Estado actual:</span>
+              ${renderStatusBadge(quote.status)}
+            </div>
+            <div class="pt-3 border-t">
+              <span class="text-xs text-gray-500 block uppercase font-semibold mb-3">Cambiar estado</span>
+              <form action="/admin/quotes/${quote.id}/status" method="post" class="flex flex-col gap-2">
+                <button type="submit" name="status" value="despachado" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
+                  ✓ Marcar como Despachada
+                </button>
+                <button type="submit" name="status" value="no_despachado" class="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
+                  ⚠ Marcar como No Despachada
+                </button>
+                <button type="submit" name="status" value="spam" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
+                  ✕ Marcar como Spam
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-white shadow rounded-lg overflow-hidden md:col-span-2">
+          <div class="px-6 py-4 border-b border-gray-200">
+            <h2 class="text-lg font-bold text-gray-800">Productos Cotizados</h2>
+          </div>
+          <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Imagen</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Producto</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cant</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Unitario</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Total</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">MakerWorld</th>
+              </tr>
+            </thead>
+            <tbody class="bg-white divide-y divide-gray-200">
+              ${itemsRows}
+            </tbody>
+          </table>
+          <div class="bg-gray-50 px-6 py-4 border-t border-gray-200 flex flex-col items-end space-y-1">
+            <div class="text-sm text-gray-600">Subtotal: <span class="font-medium text-gray-900">${money(quote.subtotal)}</span></div>
+            <div class="text-sm text-gray-600">Envío (${escapeHtml(quote.shipping_provider)}): <span class="font-medium text-gray-900">${quote.shipping_cost > 0 ? money(quote.shipping_cost) : "Gratis"}</span></div>
+            <div class="text-base font-bold text-gray-900 border-t pt-1 w-48 text-right">Total: <span>${money(quote.grand_total)}</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-6">
+        <h2 class="text-lg font-bold text-gray-800 border-b pb-3 mb-6">Generador de Documento PDF de Cotización</h2>
+        <form action="/admin/quotes/${quote.id}/pdf" method="get" target="_blank" class="space-y-6">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Nombre del Emisor</label>
+              <input type="text" name="emisor" value="${escapeHtml(config.company_name || 'JOSÉ FRANCISCO CASTILLO MARMOLEJO')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">RFC Emisor</label>
+              <input type="text" name="emisor_rfc" value="CAMF020607T76" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Correo Emisor</label>
+              <input type="email" name="emisor_correo" value="francisco.castillo@pixkey3d.com" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Teléfono Emisor</label>
+              <input type="text" name="emisor_telefono" value="496 126 6304" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div class="md:col-span-2">
+              <label class="block text-sm font-semibold text-gray-700">Dirección Emisor</label>
+              <input type="text" name="emisor_direccion" value="Av. Cuauhtémoc 620 Tequis, De Tequisquiapan, 78250 San Luis Potosí, S.L.P." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h3 class="text-md font-bold text-gray-800">Condiciones comerciales</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="md:col-span-2">
+              <label class="block text-sm font-semibold text-gray-700">Condiciones de entrega</label>
+              <input type="text" name="cond_entrega" value="${escapeHtml(defaultDelivery)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Condiciones de pago</label>
+              <input type="text" name="cond_pago" value="50% de anticipo y 50% al envio" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Condiciones pago prioritario</label>
+              <input type="text" name="cond_prioritario" value="Unica exhibición" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Forma de pago</label>
+              <input type="text" name="forma_pago" value="Transferencia Bancaria" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Lugar de Expedición</label>
+              <input type="text" name="lugar_expedicion" value="${escapeHtml(quote.postal_code || '78250')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <div class="border rounded-md bg-gray-50 p-4 space-y-4">
+            <div class="flex items-center">
+              <input type="checkbox" id="has_cargo_extra" name="has_cargo_extra" value="1" class="h-4 w-4 text-blue-600 border-gray-300 rounded">
+              <label for="has_cargo_extra" class="ml-2 block text-sm font-bold text-gray-700">¿Agregar cargo extra / Zona Extendida?</label>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4" id="cargo_extra_fields">
+              <div>
+                <label class="block text-xs font-semibold text-gray-600">Clave Cargo Extra</label>
+                <input type="text" name="cargo_extra_clave" value="E-002" class="mt-1 block w-full px-2 py-1 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600">Descripción Cargo Extra</label>
+                <input type="text" name="cargo_extra_desc" value="Zona Extendida Estafeta" class="mt-1 block w-full px-2 py-1 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600">Importe ($ MXN)</label>
+                <input type="number" name="cargo_extra_importe" min="0" step="0.01" value="100.00" class="mt-1 block w-full px-2 py-1 border border-gray-300 rounded-md text-sm">
+              </div>
+            </div>
+          </div>
+
+          <div class="flex justify-end pt-4 border-t">
+            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-md font-bold shadow-md transition-colors flex items-center gap-2">
+              <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Generar Documento de Cotización
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <script>
+      (() => {
+        const checkbox = document.getElementById('has_cargo_extra');
+        const container = document.getElementById('cargo_extra_fields');
+        const toggle = () => {
+          if (!checkbox || !container) return;
+          const inputs = container.querySelectorAll('input');
+          inputs.forEach(input => {
+            input.disabled = !checkbox.checked;
+          });
+          container.style.opacity = checkbox.checked ? '1' : '0.4';
+          container.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
+        };
+        checkbox?.addEventListener('change', toggle);
+        toggle();
+      })();
+    </script>
+  `));
+});
+
+adminRoutes.post("/quotes/:id/status", async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const status = formString(body.status);
+  if (status) {
+    updateQuoteStatus(id, status);
+  }
+  // When dispatching, go straight to the production pipeline
+  if (status === "despachado") return c.redirect("/admin/production?tab=pagos");
+  return c.redirect(`/admin/quotes/${id}`);
+});
+
+adminRoutes.get("/quotes/:id/pdf", (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const quote = getQuote(id);
+  if (!quote) return c.notFound();
+
+  const items = getQuoteItemsWithProducts(id);
+
+  // Read query parameters
+  const emisor = c.req.query("emisor") || "JOSÉ FRANCISCO CASTILLO MARMOLEJO";
+  const emisorRfc = c.req.query("emisor_rfc") || "CAMF020607T76";
+  const emisorCorreo = c.req.query("emisor_correo") || "francisco.castillo@pixkey3d.com";
+  const emisorTelefono = c.req.query("emisor_telefono") || "496 126 6304";
+  const emisorDireccion = c.req.query("emisor_direccion") || "Av. Cuauhtémoc 620 Tequis, De Tequisquiapan, 78250 San Luis Potosí, S.L.P.";
+
+  const condEntrega = c.req.query("cond_entrega") || "";
+  const condPago = c.req.query("cond_pago") || "";
+  const condPrioritario = c.req.query("cond_prioritario") || "";
+  const formaPago = c.req.query("forma_pago") || "";
+  const lugarExpedicion = c.req.query("lugar_expedicion") || "78250";
+
+  const config = getConfig();
+  const companyLogo = config.company_logo || "";
+
+  const hasCargoExtra = c.req.query("has_cargo_extra") === "1";
+  const cargoExtraClave = c.req.query("cargo_extra_clave") || "E-002";
+  const cargoExtraDesc = c.req.query("cargo_extra_desc") || "Zona Extendida Estafeta";
+  const cargoExtraImporte = parseFloat(c.req.query("cargo_extra_importe") || "0");
+
+  let index = 1;
+  const itemsHtml = items.map((item) => {
+    const clave = `U-${String(index++).padStart(3, "0")}`;
+    return `
+      <tr class="border-b border-gray-200">
+        <td class="px-2 py-1.5 text-center font-mono">${clave}</td>
+        <td class="px-2 py-1.5">${escapeHtml(item.product_name)}</td>
+        <td class="px-2 py-1.5 text-center">${item.quantity}</td>
+        <td class="px-2 py-1.5 text-center">1${clave}</td>
+        <td class="px-2 py-1.5 text-center">Pza</td>
+        <td class="px-2 py-1.5 text-center">Pieza</td>
+        <td class="px-2 py-1.5 text-right font-mono">${plainMoney(item.unit_price)}</td>
+        <td class="px-2 py-1.5 text-right font-mono">0.00</td>
+        <td class="px-2 py-1.5 text-right font-mono font-semibold">${plainMoney(item.subtotal)}</td>
+      </tr>
+    `;
+  });
+
+  // Shipping item (ONLY if cost > 0)
+  if (quote.shipping_cost > 0) {
+    const shippingClave = `E-001`;
+    itemsHtml.push(`
+      <tr class="border-b border-gray-200">
+        <td class="px-2 py-1.5 text-center font-mono">${shippingClave}</td>
+        <td class="px-2 py-1.5">Envio ${escapeHtml(quote.shipping_provider)}</td>
+        <td class="px-2 py-1.5 text-center">1</td>
+        <td class="px-2 py-1.5 text-center">1${shippingClave}</td>
+        <td class="px-2 py-1.5 text-center">Servicio</td>
+        <td class="px-2 py-1.5 text-center">Servicio</td>
+        <td class="px-2 py-1.5 text-right font-mono">${plainMoney(quote.shipping_cost)}</td>
+        <td class="px-2 py-1.5 text-right font-mono">0.00</td>
+        <td class="px-2 py-1.5 text-right font-mono font-semibold">${plainMoney(quote.shipping_cost)}</td>
+      </tr>
+    `);
+  }
+
+  let totalAcumulado = quote.subtotal + quote.shipping_cost;
+
+  if (hasCargoExtra && cargoExtraImporte > 0) {
+    itemsHtml.push(`
+      <tr class="border-b border-gray-200">
+        <td class="px-2 py-1.5 text-center font-mono">${escapeHtml(cargoExtraClave)}</td>
+        <td class="px-2 py-1.5">${escapeHtml(cargoExtraDesc)}</td>
+        <td class="px-2 py-1.5 text-center">1</td>
+        <td class="px-2 py-1.5 text-center">1${escapeHtml(cargoExtraClave)}</td>
+        <td class="px-2 py-1.5 text-center">Servicio</td>
+        <td class="px-2 py-1.5 text-center">Servicio</td>
+        <td class="px-2 py-1.5 text-right font-mono">${plainMoney(cargoExtraImporte)}</td>
+        <td class="px-2 py-1.5 text-right font-mono">0.00</td>
+        <td class="px-2 py-1.5 text-right font-mono font-semibold">${plainMoney(cargoExtraImporte)}</td>
+      </tr>
+    `);
+    totalAcumulado += cargoExtraImporte;
+  }
+
+  return c.html(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Cotización ${escapeHtml(quoteFolio(quote))}</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+          @media print {
+            .no-print { display: none !important; }
+            body { background: white; color: black; }
+            .print-border { border: 1px solid #000 !important; }
+          }
+          body { font-family: system-ui, -apple-system, sans-serif; }
+        </style>
+    </head>
+    <body class="bg-gray-100 min-h-screen p-4 sm:p-8">
+        <div class="max-w-4xl mx-auto bg-white p-6 sm:p-10 shadow-lg rounded-lg print-border print:shadow-none print:p-0 print:rounded-none">
+            <div class="flex items-center justify-between no-print border-b pb-4 mb-6">
+              <a href="/admin/quotes/${quote.id}" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded font-semibold text-sm transition-colors">
+                ← Volver al detalle
+              </a>
+              <button onclick="window.print()" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded font-bold shadow text-sm transition-colors flex items-center gap-1.5">
+                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                </svg>
+                Imprimir o Guardar como PDF
+              </button>
+            </div>
+
+            <!-- Header Section matching sample -->
+            <div class="flex flex-col sm:flex-row justify-between items-start gap-4 mb-8">
+              <div class="flex items-start gap-4">
+                ${companyLogo ? `<img src="${escapeHtml(companyLogo)}" alt="Logo" class="h-16 w-auto object-contain flex-shrink-0 print:h-14">` : ""}
+                <div class="space-y-1">
+                <h1 class="text-xl font-bold text-gray-900 tracking-tight uppercase">${escapeHtml(emisor)}</h1>
+                <p class="text-xs text-gray-600 font-semibold">Correo: <span class="font-normal text-gray-900">${escapeHtml(emisorCorreo)}</span></p>
+                <p class="text-xs text-gray-600 font-semibold">Teléfono: <span class="font-normal text-gray-900">${escapeHtml(emisorTelefono)}</span></p>
+                <p class="text-xs text-gray-600 font-semibold max-w-xs leading-normal">Dirección: <span class="font-normal text-gray-900">${escapeHtml(emisorDireccion)}</span></p>
+                </div>
+              </div>
+              <div class="text-right space-y-1 min-w-[200px]">
+                <h2 class="text-2xl font-black text-gray-900 tracking-wide uppercase">COTIZACIÓN</h2>
+                <p class="text-xs text-gray-600 font-semibold">RFC: <span class="font-bold text-gray-900">${escapeHtml(emisorRfc)}</span></p>
+                <p class="text-sm font-bold text-red-600 bg-red-50 inline-block px-2.5 py-0.5 rounded border border-red-100 font-mono tracking-wide mt-1">${escapeHtml(quoteFolio(quote))}</p>
+                <p class="text-xs text-gray-600 font-semibold mt-1">FECHA DE EMISIÓN: <span class="font-normal text-gray-900">${formatDate(quote.created_at)}</span></p>
+              </div>
+            </div>
+
+            <!-- Client Info matching sample -->
+            <div class="bg-gray-50 border border-gray-200 rounded p-4 mb-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">CLIENTE</h3>
+                <p class="text-sm text-gray-600 font-semibold">Nombre: <span class="font-bold text-gray-900 text-base">${escapeHtml(quote.customer_name)}</span></p>
+              </div>
+              <div class="sm:text-right">
+                <p class="text-xs text-gray-600 font-semibold mt-4 sm:mt-0">Lugar de Expedición: <span class="font-bold text-gray-900">${escapeHtml(lugarExpedicion)}</span></p>
+              </div>
+            </div>
+
+            <!-- Items Table exactly matching sample -->
+            <div class="overflow-x-auto mb-6">
+              <table class="min-w-full text-xs text-gray-700">
+                <thead>
+                  <tr class="bg-gray-100 border-t border-b border-gray-300 text-[10px] text-gray-500 uppercase font-bold">
+                    <th class="px-2 py-2 text-center w-16">CLAVE</th>
+                    <th class="px-2 py-2 text-left">DESCRIPCIÓN</th>
+                    <th class="px-2 py-2 text-center w-12">CANT</th>
+                    <th class="px-2 py-2 text-center w-16">CLAVE UNIDAD</th>
+                    <th class="px-2 py-2 text-center w-16">UNIDAD</th>
+                    <th class="px-2 py-2 text-center w-16">UNIDAD(Pieza)</th>
+                    <th class="px-2 py-2 text-right w-24">P. UNITARIO(MAYOREO)</th>
+                    <th class="px-2 py-2 text-right w-16">DESCUENTO</th>
+                    <th class="px-2 py-2 text-right w-24">TOTAL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${itemsHtml.join("")}
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Totals & Terms matching sample -->
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+              <div class="md:col-span-7 space-y-3">
+                <div class="space-y-1">
+                  <p class="text-xs text-gray-600 font-semibold"><span class="text-gray-500 font-normal">Condiciones de entrega:</span> ${escapeHtml(condEntrega)}</p>
+                  <p class="text-xs text-gray-600 font-semibold"><span class="text-gray-500 font-normal">Condiciones de pago:</span> ${escapeHtml(condPago)}</p>
+                  <p class="text-xs text-gray-600 font-semibold"><span class="text-gray-500 font-normal">Condiciones de pago para pedido prioritario:</span> ${escapeHtml(condPrioritario)}</p>
+                  <p class="text-xs text-gray-600 font-semibold"><span class="text-gray-500 font-normal">Forma de pago:</span> ${escapeHtml(formaPago)}</p>
+                </div>
+                <div class="border-t pt-2 mt-4">
+                  <p class="text-xs text-gray-600 font-semibold uppercase">Importe con letra: <span class="font-bold text-gray-900" id="grand-total-letters">...</span></p>
+                </div>
+              </div>
+
+              <div class="md:col-span-5 border border-gray-200 rounded p-4 bg-gray-50 space-y-2 text-sm font-semibold text-gray-700">
+                <div class="flex justify-between">
+                  <span class="text-gray-500 font-normal">Subtotal:</span>
+                  <span class="font-mono">${plainMoney(quote.subtotal)}</span>
+                </div>
+                ${quote.shipping_cost > 0 ? `
+                <div class="flex justify-between">
+                  <span class="text-gray-500 font-normal">Envío:</span>
+                  <span class="font-mono">${plainMoney(quote.shipping_cost)}</span>
+                </div>
+                ` : ""}
+                ${hasCargoExtra && cargoExtraImporte > 0 ? `
+                <div class="flex justify-between">
+                  <span class="text-gray-500 font-normal">Cargo Extra:</span>
+                  <span class="font-mono">${plainMoney(cargoExtraImporte)}</span>
+                </div>
+                ` : ""}
+                <div class="flex justify-between text-base font-black text-gray-900 border-t pt-2 mt-2">
+                  <span>TOTAL:</span>
+                  <span class="font-mono text-red-600">$${plainMoney(totalAcumulado)} MXN</span>
+                </div>
+              </div>
+            </div>
+        </div>
+
+        <script>
+          (() => {
+            function numeroALetras(num) {
+              var data = {
+                numero: num,
+                enteros: Math.floor(num),
+                centavos: Math.round(((num - Math.floor(num)) * 100)),
+                letrasCentavos: '',
+                letrasEnteros: ''
+              };
+
+              if (data.centavos < 10) {
+                data.letrasCentavos = '0' + data.centavos + '/100 M.N.';
+              } else {
+                data.letrasCentavos = data.centavos + '/100 M.N.';
+              }
+
+              if (data.enteros == 0) {
+                return 'CERO PESOS ' + data.letrasCentavos;
+              }
+
+              function Millones(num) {
+                if (num >= 1000000) {
+                  var millones = Math.floor(num / 1000000);
+                  var resto = num % 1000000;
+                  var strMillones = '';
+                  if (millones === 1) {
+                    strMillones = 'UN MILLÓN';
+                  } else {
+                    strMillones = TresCifras(millones) + ' MILLONES';
+                  }
+                  if (resto > 0) {
+                    return strMillones + ' ' + Miles(resto);
+                  }
+                  return strMillones + ' DE';
+                }
+                return Miles(num);
+              }
+
+              function Miles(num) {
+                if (num >= 1000) {
+                  var miles = Math.floor(num / 1000);
+                  var resto = num % 1000;
+                  var strMiles = '';
+                  if (miles === 1) {
+                    strMiles = 'MIL';
+                  } else {
+                    strMiles = TresCifras(miles) + ' MIL';
+                  }
+                  if (resto > 0) {
+                    return strMiles + ' ' + TresCifras(resto);
+                  }
+                  return strMiles;
+                }
+                return TresCifras(num);
+              }
+
+              function TresCifras(num) {
+                var centenas = Math.floor(num / 100);
+                var decenas = num % 100;
+                var str = '';
+
+                if (centenas > 0) {
+                  if (centenas === 1 && decenas > 0) {
+                    str = 'CIENTO';
+                  } else {
+                    var cent = ['CERO', 'CIEN', 'DOSCIENTOS', 'TRESCIENTOS', 'CUATROCIENTOS', 'QUINIENTOS', 'SEISCIENTOS', 'SIETECIENTOS', 'OCHOCIENTOS', 'NOVECIENTOS'];
+                    str = cent[centenas];
+                  }
+                }
+
+                if (decenas > 0) {
+                  if (str !== '') str += ' ';
+                  str += DosCifras(decenas);
+                }
+
+                return str;
+              }
+
+              function DosCifras(num) {
+                if (num < 10) {
+                  var un = ['CERO', 'UN', 'DOS', 'TRES', 'CUATRO', 'CINCO', 'SEIS', 'SIETE', 'OCHO', 'NUEVE'];
+                  return un[num];
+                }
+                if (num >= 10 && num < 20) {
+                  var esp = {
+                    10: 'DIEZ', 11: 'ONCE', 12: 'DOCE', 13: 'TRECE', 14: 'CATORCE', 15: 'QUINCE',
+                    16: 'DIECISÉIS', 17: 'DIECISIETE', 18: 'DIECIOCHO', 19: 'DIECINUEVE'
+                  };
+                  return esp[num];
+                }
+                if (num >= 20 && num < 30) {
+                  if (num === 20) return 'VEINTE';
+                  var un = ['CERO', 'UN', 'DOS', 'TRES', 'CUATRO', 'CINCO', 'SEIS', 'SIETE', 'OCHO', 'NUEVE'];
+                  return 'VEINTI' + un[num - 20];
+                }
+                
+                var decena = Math.floor(num / 10);
+                var unidad = num % 10;
+                var decs = ['CERO', 'DIEZ', 'VEINTE', 'TREINTA', 'CUARENTA', 'CINCUENTA', 'SESENTA', 'SETENTA', 'OCHENTA', 'NOVENTA'];
+                var str = decs[decena];
+                if (unidad > 0) {
+                  var un = ['CERO', 'UN', 'DOS', 'TRES', 'CUATRO', 'CINCO', 'SEIS', 'SIETE', 'OCHO', 'NUEVE'];
+                  str += ' Y ' + un[unidad];
+                }
+                return str;
+              }
+
+              data.letrasEnteros = Millones(data.enteros);
+              return (data.letrasEnteros + ' PESOS ' + data.letrasCentavos).replace(/\s+/g, ' ').trim();
+            }
+
+            const total = ${totalAcumulado};
+            const label = document.getElementById('grand-total-letters');
+            if (label) {
+              label.textContent = numeroALetras(total);
+            }
+          })();
+        </script>
+    </body>
+    </html>
+  `);
+});
+
+
+// Production Settings view and controllers
+adminRoutes.get("/production-settings", (c) => {
+  const printers = getPrinters();
+  const filaments = getFilaments();
+
+  return c.html(AdminLayout("Ajustes de Producción", `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between border-b pb-4">
+        <h1 class="text-2xl font-bold text-gray-800">Ajustes de Producción</h1>
+        <p class="text-sm text-gray-500">Agrega tus impresoras 3D y filamentos para calcular consumos y programar la producción.</p>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Printers Card -->
+        <div class="bg-white shadow rounded-lg p-6 space-y-6">
+          <div>
+            <h2 class="text-lg font-bold text-gray-800">Impresoras 3D</h2>
+            <p class="text-xs text-gray-500 mt-0.5">Define el costo de electricidad por hora de funcionamiento.</p>
+          </div>
+
+          <form action="/admin/production-settings/printers" method="post" class="bg-gray-50 border rounded-lg p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+            <div class="sm:col-span-2">
+              <label class="block text-xs font-bold text-gray-700">Nombre / Modelo *</label>
+              <input type="text" name="name" required placeholder="Ej: Ender 3, Bambu P1S" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Costo Luz/Hora ($ MXN) *</label>
+              <input type="number" name="power_cost" required min="0" step="0.01" value="1.50" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Costo Mensual ($ MXN)</label>
+              <input type="number" name="monthly_cost" min="0" step="0.01" value="0" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Impresiones / Mes</label>
+              <input type="number" name="prints_per_month" min="1" step="1" value="30" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            </div>
+            <div class="sm:col-span-2 flex justify-end">
+              <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-2 rounded shadow-sm">
+                + Agregar Impresora
+              </button>
+            </div>
+          </form>
+          <p class="text-[10px] text-gray-400">Costo por impresión = Costo Mensual ÷ Impresiones/Mes. Se suma al costo de producción de cada trabajo.</p>
+
+          <div class="overflow-x-auto border rounded-lg">
+            <table class="min-w-full divide-y divide-gray-200 text-sm">
+              <thead class="bg-gray-50">
+                <tr>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">Nombre</th>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">Luz/Hora</th>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">Mensual</th>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">Impr./Mes</th>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">$/Impresión</th>
+                  <th class="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                ${printers.map(p => {
+                  const costPerPrint = p.prints_per_month > 0 ? p.monthly_cost / p.prints_per_month : 0;
+                  return `
+                  <tr>
+                    <td class="px-3 py-2 font-medium">${escapeHtml(p.name)}</td>
+                    <td class="px-3 py-2 font-mono">${money(p.power_cost_per_hour)}</td>
+                    <td class="px-3 py-2 font-mono">${money(p.monthly_cost)}</td>
+                    <td class="px-3 py-2 text-center">${p.prints_per_month}</td>
+                    <td class="px-3 py-2 font-mono font-bold text-blue-700">${money(costPerPrint)}</td>
+                    <td class="px-3 py-2 text-right">
+                      <form action="/admin/production-settings/printers/${p.id}/delete" method="post" onsubmit="return confirm('¿Seguro que deseas eliminar esta impresora?');" class="inline">
+                        <button type="submit" class="text-red-600 hover:underline text-xs font-semibold">Eliminar</button>
+                      </form>
+                    </td>
+                  </tr>
+                `;}).join("")}
+                ${printers.length === 0 ? '<tr><td colspan="6" class="px-4 py-6 text-center text-gray-400">No hay impresoras agregadas.</td></tr>' : ""}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Filaments Card -->
+        <div class="bg-white shadow rounded-lg p-6 space-y-6">
+          <div>
+            <h2 class="text-lg font-bold text-gray-800">Filamentos</h2>
+            <p class="text-xs text-gray-500 mt-0.5">Define el costo de tus bobinas por kilogramo.</p>
+          </div>
+
+          <form action="/admin/production-settings/filaments" method="post" class="bg-gray-50 border rounded-lg p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Color / Material *</label>
+              <input type="text" name="color" required placeholder="Ej: PLA Negro, PETG Rojo" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Precio/Kg ($ MXN) *</label>
+              <input type="number" name="price" required min="0" step="0.01" value="380.00" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-700">Stock Actual (gramos) *</label>
+              <input type="number" name="stock_grams" required min="0" step="0.1" value="1000" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            </div>
+            <div class="sm:col-span-3 flex justify-end">
+              <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-2 rounded shadow-sm">
+                + Agregar Filamento
+              </button>
+            </div>
+          </form>
+          <p class="text-[10px] text-gray-400">El stock se resta automáticamente al guardar la planificación de cada trabajo de impresión.</p>
+
+          <div class="overflow-x-auto border rounded-lg">
+            <table class="min-w-full divide-y divide-gray-200 text-sm">
+              <thead class="bg-gray-50">
+                <tr>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">Color / Material</th>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">Precio / Kg</th>
+                  <th class="px-3 py-2 text-left font-semibold text-gray-500">Stock</th>
+                  <th class="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                ${filaments.map(f => {
+                  const stockPct = Math.min(100, (f.stock_grams / 1000) * 100);
+                  const stockColor = f.stock_grams < 100 ? 'bg-red-500' : f.stock_grams < 300 ? 'bg-yellow-500' : 'bg-green-500';
+                  return `
+                  <tr>
+                    <td class="px-3 py-2 font-medium">${escapeHtml(f.color)}</td>
+                    <td class="px-3 py-2 font-mono">${money(f.price_per_kg)}</td>
+                    <td class="px-3 py-2">
+                      <div class="flex items-center gap-2">
+                        <div class="w-20 bg-gray-200 rounded-full h-2">
+                          <div class="${stockColor} h-2 rounded-full" style="width: ${stockPct}%"></div>
+                        </div>
+                        <span class="font-mono text-xs ${f.stock_grams < 100 ? 'text-red-600 font-bold' : ''}">${f.stock_grams.toFixed(0)}g</span>
+                      </div>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <form action="/admin/production-settings/filaments/${f.id}/delete" method="post" onsubmit="return confirm('¿Seguro que deseas eliminar este filamento?');" class="inline">
+                        <button type="submit" class="text-red-600 hover:underline text-xs font-semibold">Eliminar</button>
+                      </form>
+                    </td>
+                  </tr>
+                `;}).join("")}
+                ${filaments.length === 0 ? '<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">No hay filamentos agregados.</td></tr>' : ""}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  `));
+});
+
+adminRoutes.post("/production-settings/printers", async (c) => {
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const name = formString(body.name).trim();
+  const powerCost = parseFloat(formString(body.power_cost)) || 0;
+  const monthlyCost = parseFloat(formString(body.monthly_cost)) || 0;
+  const printsPerMonth = parseInt(formString(body.prints_per_month), 10) || 1;
+  if (name) {
+    createPrinter(name, powerCost, monthlyCost, printsPerMonth);
+  }
+  return c.redirect("/admin/production-settings");
+});
+
+adminRoutes.post("/production-settings/printers/:id/delete", (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  deletePrinter(id);
+  return c.redirect("/admin/production-settings");
+});
+
+adminRoutes.post("/production-settings/filaments", async (c) => {
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const color = formString(body.color).trim();
+  const price = parseFloat(formString(body.price)) || 0;
+  const stockGrams = parseFloat(formString(body.stock_grams)) || 1000;
+  if (color) {
+    createFilament(color, price, stockGrams);
+  }
+  return c.redirect("/admin/production-settings");
+});
+
+adminRoutes.post("/production-settings/filaments/:id/delete", (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  deleteFilament(id);
+  return c.redirect("/admin/production-settings");
+});
+
+// Production pipeline/dashboard view
+adminRoutes.get("/production", (c) => {
+  const currentTab = c.req.query("tab") || "pagos";
+  const quotes = getQuotes(100);
+  const printers = getPrinters();
+  const filaments = getFilaments();
+
+  // Filter based on production tab
+  const unpaidQuotes = quotes.filter((q) => q.status === "despachado");
+  const activeQuotes = quotes.filter((q) => q.status === "produccion");
+  const finishedQuotes = quotes.filter((q) => q.status === "finalizado");
+
+  let activeList = unpaidQuotes;
+  if (currentTab === "produccion") activeList = activeQuotes;
+  if (currentTab === "finalizadas") activeList = finishedQuotes;
+
+  const formatPrintTime = (totalMins: number) => {
+    if (totalMins <= 0) return "0 min";
+    const days = Math.floor(totalMins / (24 * 60));
+    const hours = Math.floor((totalMins % (24 * 60)) / 60);
+    const mins = totalMins % 60;
+    return [
+      days > 0 ? `${days}d` : "",
+      hours > 0 ? `${hours}h` : "",
+      mins > 0 ? `${mins}m` : ""
+    ].filter(Boolean).join(" ");
+  };
+
+  const cardsHtml = activeList.map((quote) => {
+    const items = getQuoteItemsWithProducts(quote.id);
+    
+    // Calculate totals for scheduling
+    let totalGrams = 0;
+    let totalMins = 0;
+    let totalExtraCosts = 0;
+    const itemsListHtml = items.map((item) => {
+      const g = item.product_filament_grams || 0;
+      const t = item.product_print_time_mins || 0;
+      const e = item.product_extra_costs || 0;
+      totalGrams += item.quantity * g;
+      totalMins += item.quantity * t;
+      totalExtraCosts += item.quantity * e;
+
+      return `
+        <div class="text-xs text-gray-700 bg-gray-50 border rounded p-2 flex justify-between items-center">
+          <div>
+            <span class="font-bold text-gray-900">${escapeHtml(item.product_name)}</span> (x${item.quantity})
+            <div class="text-gray-500 font-medium mt-0.5">${g}g · ${t}m por pza · extra: ${money(e)}</div>
+          </div>
+          <div class="text-right">
+            <div class="font-semibold text-gray-800">${g * item.quantity}g · ${formatPrintTime(t * item.quantity)}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    // Delivery time associated
+    const deliveryCondition = items.find((item) => item.delivery_time)?.delivery_time || "A convenir";
+
+    // Power cost calc
+    const activePrinter = printers.find((p) => p.id === quote.printer_id);
+    const powerCost = activePrinter ? (totalMins / 60) * activePrinter.power_cost_per_hour : 0;
+    const printerCostPerPrint = activePrinter && activePrinter.prints_per_month > 0 ? activePrinter.monthly_cost / activePrinter.prints_per_month : 0;
+
+    // Filament cost now calculated per-card from quote_filaments table (see produccion block)
+
+    let contentCard = "";
+    if (quote.status === "despachado") {
+      contentCard = `
+        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mt-4 space-y-3">
+          <div class="text-xs text-yellow-800 font-bold uppercase tracking-wider flex items-center gap-1">
+            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            Esperando Comprobante de Pago
+          </div>
+          <form action="/admin/production/${quote.id}/proof" method="post" enctype="multipart/form-data" class="flex flex-col sm:flex-row gap-2.5 items-end sm:items-center">
+            <div class="flex-1 w-full">
+              <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Subir Imagen del Comprobante *</label>
+              <input type="file" name="payment_proof" accept="image/*" required class="block w-full text-xs text-gray-500 bg-white border border-gray-300 rounded p-1">
+            </div>
+            <button type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold text-xs px-4 py-2.5 rounded shadow-sm whitespace-nowrap w-full sm:w-auto transition-colors">
+              Iniciar Producción
+            </button>
+          </form>
+        </div>
+      `;
+    } else if (quote.status === "produccion") {
+      const printerOptions = printers.map((p) => `<option value="${p.id}" ${p.id === quote.printer_id ? "selected" : ""}>${escapeHtml(p.name)} (${money(p.power_cost_per_hour)}/hr)</option>`).join("");
+      const filamentOptionsHtml = filaments.map((f) => `<option value="${f.id}" data-price="${f.price_per_kg}">${escapeHtml(f.color)} (${money(f.price_per_kg)}/Kg)</option>`).join("");
+
+      // Get saved filaments for this quote
+      const quoteFilaments = getQuoteFilaments(quote.id);
+
+      // Calculate filament cost from saved multi-filament data
+      const filamentCostFromEntries = quoteFilaments.reduce((sum, qf) => sum + (qf.grams_used / 1000) * qf.price_per_kg, 0);
+      const totalAssignedGrams = quoteFilaments.reduce((sum, qf) => sum + qf.grams_used, 0);
+
+      // Build existing filament rows
+      const existingFilamentRows = quoteFilaments.length > 0
+        ? quoteFilaments.map((qf) => `
+          <div class="filament-row flex items-center gap-2">
+            <select name="filament_ids" class="filament-select flex-1 border border-gray-300 rounded p-1.5 text-xs bg-white">
+              <option value="">-- Filamento --</option>
+              ${filaments.map((f) => `<option value="${f.id}" data-price="${f.price_per_kg}" ${f.id === qf.filament_id ? "selected" : ""}>${escapeHtml(f.color)} (${money(f.price_per_kg)}/Kg)</option>`).join("")}
+            </select>
+            <input type="number" name="filament_grams" value="${qf.grams_used}" step="0.1" min="0" placeholder="Gramos" class="w-24 border border-gray-300 rounded p-1.5 text-xs bg-white">
+            <span class="text-[10px] text-gray-400">g</span>
+            <button type="button" onclick="this.closest('.filament-row').remove()" class="text-red-400 hover:text-red-600 text-sm font-bold px-1" title="Quitar">&times;</button>
+          </div>
+        `).join("")
+        : `
+          <div class="filament-row flex items-center gap-2">
+            <select name="filament_ids" class="filament-select flex-1 border border-gray-300 rounded p-1.5 text-xs bg-white">
+              <option value="">-- Filamento --</option>
+              ${filamentOptionsHtml}
+            </select>
+            <input type="number" name="filament_grams" value="" step="0.1" min="0" placeholder="Gramos" class="w-24 border border-gray-300 rounded p-1.5 text-xs bg-white">
+            <span class="text-[10px] text-gray-400">g</span>
+            <button type="button" onclick="this.closest('.filament-row').remove()" class="text-red-400 hover:text-red-600 text-sm font-bold px-1" title="Quitar">&times;</button>
+          </div>
+        `;
+
+      const formId = `sched-${quote.id}`;
+
+      contentCard = `
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 border-t pt-4 mt-4">
+          <!-- Left side scheduling inputs -->
+          <form id="${formId}" action="/admin/production/${quote.id}/schedule" method="post" class="xl:col-span-2 space-y-4">
+            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider">Planificador de Impresión</h4>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-[10px] font-bold text-gray-600 uppercase mb-1">Impresora 3D</label>
+                <select name="printer_id" class="block w-full border border-gray-300 rounded p-1.5 text-xs bg-white">
+                  <option value="">-- No seleccionada --</option>
+                  ${printerOptions}
+                </select>
+              </div>
+              <div>
+                <label class="block text-[10px] font-bold text-gray-600 uppercase mb-1">Inicio de Impresión</label>
+                <input type="datetime-local" name="scheduled_start" value="${quote.scheduled_start || ''}" class="block w-full border border-gray-300 rounded p-1.5 text-xs bg-white">
+              </div>
+            </div>
+
+            <!-- Multi-filament section -->
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <label class="text-[10px] font-bold text-gray-600 uppercase">Filamentos Utilizados</label>
+                <button type="button" onclick="addFilamentRow_${quote.id}()" class="text-[10px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-0.5">
+                  <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                  Agregar Color
+                </button>
+              </div>
+              <div id="filament-list-${quote.id}" class="space-y-2">
+                ${existingFilamentRows}
+              </div>
+              <div class="text-[10px] text-gray-400 mt-1">Peso total estimado del pedido: <strong>${totalGrams.toFixed(1)} g</strong></div>
+            </div>
+
+            <div class="flex justify-between items-center gap-3">
+              ${quote.payment_proof_url ? `
+                <a href="${escapeHtml(quote.payment_proof_url)}" target="_blank" class="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1">
+                  <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                  Ver Comprobante de Pago ↗
+                </a>
+              ` : ""}
+              <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2 rounded transition-colors shadow-sm">
+                Guardar Planificación
+              </button>
+            </div>
+          </form>
+          <template id="filament-tpl-${quote.id}">
+            <div class="filament-row flex items-center gap-2">
+              <select name="filament_ids" class="filament-select flex-1 border border-gray-300 rounded p-1.5 text-xs bg-white">
+                <option value="">-- Filamento --</option>
+                ${filamentOptionsHtml}
+              </select>
+              <input type="number" name="filament_grams" value="" step="0.1" min="0" placeholder="Gramos" class="w-24 border border-gray-300 rounded p-1.5 text-xs bg-white">
+              <span class="text-[10px] text-gray-400">g</span>
+              <button type="button" onclick="this.closest('.filament-row').remove()" class="text-red-400 hover:text-red-600 text-sm font-bold px-1" title="Quitar">&times;</button>
+            </div>
+          </template>
+          <script>
+            function addFilamentRow_${quote.id}() {
+              var tpl = document.getElementById('filament-tpl-${quote.id}');
+              var clone = tpl.content.cloneNode(true);
+              document.getElementById('filament-list-${quote.id}').appendChild(clone);
+            }
+          </script>
+
+          <!-- Right side calculations list -->
+          <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-2.5 text-xs">
+            <h4 class="font-bold text-gray-800 border-b pb-1 mb-2">Métricas y Costos Estimados</h4>
+            <div class="flex justify-between">
+              <span class="text-gray-500">Mínimo (Impresión):</span>
+              <span class="font-bold text-gray-900">${formatPrintTime(totalMins)}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-500">Máximo (Tiempos de Entrega):</span>
+              <span class="font-bold text-blue-800">${escapeHtml(deliveryCondition)}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-500">Peso Total Filamento (estimado):</span>
+              <span class="font-semibold">${totalGrams.toFixed(1)} g</span>
+            </div>
+            ${totalAssignedGrams > 0 ? `
+              <div class="flex justify-between">
+                <span class="text-gray-500">Filamento Asignado:</span>
+                <span class="font-semibold text-blue-700">${totalAssignedGrams.toFixed(1)} g</span>
+              </div>
+            ` : ""}
+            ${quoteFilaments.length > 0 ? quoteFilaments.map((qf) => `
+              <div class="flex justify-between pl-2 text-gray-400">
+                <span>${escapeHtml(qf.color)}:</span>
+                <span>${qf.grams_used.toFixed(1)} g → ${money((qf.grams_used / 1000) * qf.price_per_kg)}</span>
+              </div>
+            `).join("") : ""}
+            <div class="flex justify-between pt-1 border-t border-dashed">
+              <span class="text-gray-500">Costo Filamento:</span>
+              <span>${money(filamentCostFromEntries)}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-500">Costo Luz:</span>
+              <span>${money(powerCost)}</span>
+            </div>
+            ${printerCostPerPrint > 0 ? `
+            <div class="flex justify-between">
+              <span class="text-gray-500">Costo Impresora/Impresión:</span>
+              <span>${money(printerCostPerPrint)}</span>
+            </div>
+            ` : ""}
+            <div class="flex justify-between">
+              <span class="text-gray-500">Costos Extra:</span>
+              <span>${money(totalExtraCosts)}</span>
+            </div>
+            <div class="flex justify-between pt-2 border-t font-bold">
+              <span class="text-gray-700">Total Costo Producción:</span>
+              <span class="text-blue-800">${money(powerCost + printerCostPerPrint + filamentCostFromEntries + totalExtraCosts)}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    const whatsappNum = escapeHtml(quote.whatsapp_number || '');
+    const whatsappLink = quote.whatsapp_number ? '<a href="https://wa.me/' + whatsappNum + '" target="_blank" class="text-green-600 hover:underline text-xs font-semibold">&#128241; ' + whatsappNum + '</a>' : '<span class="text-xs text-gray-400">Sin WhatsApp</span>';
+
+    return `
+      <div class="bg-white shadow rounded-lg border overflow-hidden">
+        <div class="p-4 flex flex-col sm:flex-row sm:items-start justify-between gap-3 bg-gray-50 border-b">
+          <div class="space-y-0.5">
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+              <span class="font-bold text-gray-800 bg-gray-200 px-2 py-0.5 rounded font-mono">${quoteFolio(quote)}</span>
+              <a href="/admin/quotes/${quote.id}" class="text-blue-600 hover:underline font-semibold">Ver cotizaci&#243;n &#8599;</a>
+              <a href="/admin/quotes/${quote.id}/pdf" target="_blank" class="text-blue-600 hover:underline font-semibold">PDF &#8599;</a>
+            </div>
+            <div class="font-bold text-gray-900">${escapeHtml(quote.customer_name)}</div>
+            <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span>${formatDate(quote.created_at)}</span>
+              <span>&middot;</span>
+              ${whatsappLink}
+            </div>
+          </div>
+          <div class="text-right shrink-0">
+            <div class="text-lg font-bold text-gray-900">${money(quote.grand_total)}</div>
+            <div class="text-xs text-gray-500">${quote.total_pieces} pzas</div>
+            <div class="text-xs text-gray-400">Subtotal: ${money(quote.subtotal)}</div>
+            ${quote.shipping_cost > 0 ? '<div class="text-xs text-gray-400">Env&iacute;o: ' + money(quote.shipping_cost) + '</div>' : '<div class="text-xs text-green-600 font-semibold">Env&iacute;o Gratis</div>'}
+          </div>
+        </div>
+        <div class="p-4 space-y-3">
+          <div class="space-y-1.5">${itemsListHtml}</div>
+          ${contentCard}
+          ${quote.status === "finalizado" ? `
+            <div class="pt-3 border-t flex justify-end">
+              <span class="text-xs text-green-700 font-bold bg-green-50 border border-green-200 px-3 py-1 rounded-full">&#10003; Finalizada</span>
+            </div>
+          ` : `
+            <div class="pt-3 border-t flex justify-end">
+              <form action="/admin/production/${quote.id}/finish" method="post" onsubmit="return confirm('&#191;Marcar como finalizada?')">
+                <button type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold text-xs px-4 py-2 rounded shadow-sm transition-colors">
+                  Marcar Finalizada
+                </button>
+              </form>
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return c.html(AdminLayout("Tubería de Producción", `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between border-b pb-4">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-800">Tubería de Producción (Tasklist)</h1>
+          <p class="text-sm text-gray-500 mt-0.5">Controla y planifica los trabajos de impresión 3D a partir de cotizaciones despachadas.</p>
+        </div>
+        <a href="/admin/production-settings" class="bg-gray-100 hover:bg-gray-200 text-gray-700 border px-4 py-2 rounded-md text-sm font-semibold transition-colors">
+          ⚙ Ajustes de Impresoras/Bobinas
+        </a>
+      </div>
+
+      <div class="flex border-b border-gray-200 mb-6 bg-gray-50 p-1.5 rounded-lg gap-1.5 max-w-xl">
+        <a href="/admin/production?tab=pagos" class="px-4 py-2 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 ${currentTab === 'pagos' ? 'bg-yellow-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">
+          Pendientes de Pago
+          <span class="h-4 w-4 rounded-full bg-white text-yellow-800 flex items-center justify-center text-[10px]">${unpaidQuotes.length}</span>
+        </a>
+        <a href="/admin/production?tab=produccion" class="px-4 py-2 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 ${currentTab === 'produccion' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">
+          En Impresión
+          <span class="h-4 w-4 rounded-full bg-white text-blue-800 flex items-center justify-center text-[10px]">${activeQuotes.length}</span>
+        </a>
+        <a href="/admin/production?tab=finalizadas" class="px-4 py-2 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 ${currentTab === 'finalizadas' ? 'bg-green-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">
+          Finalizadas
+          <span class="h-4 w-4 rounded-full bg-white text-green-800 flex items-center justify-center text-[10px]">${finishedQuotes.length}</span>
+        </a>
+      </div>
+
+      <div class="space-y-6">
+        ${cardsHtml || `
+          <div class="bg-white shadow rounded-lg p-10 text-center border">
+            <svg class="mx-auto h-12 w-12 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+            </svg>
+            <h3 class="mt-2 text-sm font-bold text-gray-900">Tubería vacía</h3>
+            <p class="mt-1 text-xs text-gray-500">No hay cotizaciones registradas en este estado.</p>
+          </div>
+        `}
+      </div>
+    </div>
+  `));
+});
+
+// Production proof and schedule actions
+adminRoutes.post("/production/:id/proof", async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const file = formFile(body.payment_proof);
+  if (file) {
+    const fileUrl = await saveUpload(file, "payments", "proof");
+    updateQuotePaymentProof(id, fileUrl);
+  }
+  return c.redirect("/admin/production?tab=produccion");
+});
+
+adminRoutes.post("/production/:id/schedule", async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
+  const printerId = parseInt(formString(body.printer_id), 10) || null;
+  const scheduledStart = formString(body.scheduled_start) || null;
+
+  // Parse multi-filament entries
+  const filamentIds = formStringArray(body.filament_ids);
+  const filamentGrams = formStringArray(body.filament_grams);
+  const entries: { filament_id: number; grams_used: number }[] = [];
+  for (let i = 0; i < filamentIds.length; i++) {
+    const fId = parseInt(filamentIds[i], 10);
+    const grams = parseFloat(filamentGrams[i] || "0");
+    if (fId && grams > 0) {
+      entries.push({ filament_id: fId, grams_used: grams });
+    }
+  }
+
+  // Restore stock from previous filament assignments before replacing
+  const previousFilaments = getQuoteFilaments(id);
+  for (const pf of previousFilaments) {
+    subtractFilamentStock(pf.filament_id, -pf.grams_used); // negative = add back
+  }
+
+  updateQuoteScheduler(id, printerId, scheduledStart);
+  replaceQuoteFilaments(id, entries);
+
+  // Subtract stock for new filament assignments
+  for (const entry of entries) {
+    subtractFilamentStock(entry.filament_id, entry.grams_used);
+  }
+
+  return c.redirect("/admin/production?tab=produccion");
+});
+
+adminRoutes.post("/production/:id/finish", (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  updateQuoteStatus(id, "finalizado");
+  return c.redirect("/admin/production?tab=finalizadas");
 });
 
 export { adminRoutes };
