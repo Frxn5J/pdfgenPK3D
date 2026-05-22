@@ -169,7 +169,7 @@ const normalizeMakerWorldUrl = (rawUrl: string) => {
 
 const scrapeMakerWorld = async (rawUrl: string): Promise<MakerWorldDraft> => {
   const sourceUrl = normalizeMakerWorldUrl(rawUrl);
-  const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Catalog Importer" } });
+  const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "es-ES,es;q=0.9,en;q=0.8" } });
   if (!response.ok) throw new Error(`MakerWorld respondió con HTTP ${response.status}`);
   const html = await response.text();
   const nextRaw = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
