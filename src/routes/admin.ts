@@ -588,41 +588,70 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
 const buildDesignPrompt = (template: string, userPrompt: string) => {
   const cleanedTemplate = (template || "").trim();
   const cleanedUser = userPrompt.trim();
-  if (!cleanedUser) throw new Error("Describe primero el diseño que quieres generar.");
+  // Si hay placeholder lo sustituye (cleanedUser puede estar vacío).
   if (cleanedTemplate.includes("{userPrompt}")) {
-    return cleanedTemplate.replace(/\{userPrompt\}/g, cleanedUser);
+    return cleanedTemplate.replace(/\{userPrompt\}/g, cleanedUser).replace(/\s+/g, " ").trim();
   }
+  // Si no hay placeholder y el usuario escribió descripción extra, la
+  // concatenamos al final.
   if (!cleanedTemplate) return cleanedUser;
-  return `${cleanedTemplate}\n\nDescripción del usuario: ${cleanedUser}`;
+  if (!cleanedUser) return cleanedTemplate;
+  return `${cleanedTemplate}\n\nDescripción adicional del usuario: ${cleanedUser}`;
 };
 
-const resolveImageGenerateEndpoint = (config: ReturnType<typeof imageEnhanceConfig>) => {
-  if (config.baseUrl) {
-    const base = config.baseUrl.replace(/\/+$/, "");
-    if (/\/v1$/i.test(base)) return joinUrl(base, "/images/generations");
-    return joinUrl(base, "/v1/images/generations");
+// Resuelve cualquier imagen entrante (data URL, ruta local /uploads, o URL
+// http) a un data URL listo para mandar al provider.
+const resolveImageInput = async (imageInput: string): Promise<string> => {
+  const trimmed = imageInput.trim();
+  if (!trimmed) throw new Error("Sube una imagen para generar el diseño.");
+  if (/^data:image\//i.test(trimmed)) return trimmed;
+  if (/^\/uploads\//.test(trimmed)) {
+    const localPath = join(process.cwd(), "data", trimmed.replace(/^\//, ""));
+    try {
+      const buf = fs.readFileSync(localPath);
+      const ext = (trimmed.split(".").pop() || "png").toLowerCase();
+      const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+      return `data:${mime};base64,${buf.toString("base64")}`;
+    } catch (e) {
+      console.warn("[design] Could not read local upload, sending raw URL:", e);
+      return trimmed;
+    }
   }
-  if (!config.endpoint) return "";
-  if (/\/v1\/?$/i.test(config.endpoint)) return joinUrl(config.endpoint, "/images/generations");
-  return config.endpoint.replace(/\/images\/edits\/?$/i, "/images/generations");
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      return await urlToDataUrl(trimmed);
+    } catch (e) {
+      console.warn("[design] Could not download remote image, sending raw URL:", e);
+      return trimmed;
+    }
+  }
+  throw new Error("Formato de imagen no reconocido.");
 };
 
-const generateDesign = async (userPrompt: string, basePromptTemplate: string): Promise<ImageEnhanceResult> => {
+const generateDesign = async (
+  imageInput: string,
+  basePromptTemplate: string,
+  userExtraPrompt: string,
+): Promise<ImageEnhanceResult> => {
   const config = imageEnhanceConfig();
-  const endpoint = resolveImageGenerateEndpoint(config);
+  const endpoint = resolveImageEnhanceEndpoint(config);
   if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
 
-  const finalPrompt = buildDesignPrompt(basePromptTemplate, userPrompt);
+  const finalPrompt = buildDesignPrompt(basePromptTemplate, userExtraPrompt);
+  if (!finalPrompt) throw new Error("El prompt base está vacío. Configúralo en /admin/config.");
+
+  const resolvedImage = await resolveImageInput(imageInput);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
 
   try {
-    console.log("[Qwen image/generations] request", {
+    console.log("[Qwen design/generate] request", {
       endpoint,
       model: config.model || "provider-default",
       hasApiKey: Boolean(config.apiKey),
       promptPreview: finalPrompt.slice(0, 160),
+      imageSource: resolvedImage.startsWith("data:image/") ? "uploaded-file" : "url",
     });
 
     const headers: Record<string, string> = { "content-type": "application/json" };
@@ -635,9 +664,11 @@ const generateDesign = async (userPrompt: string, basePromptTemplate: string): P
       body: JSON.stringify({
         model: config.model || undefined,
         prompt: finalPrompt,
-        n: 1,
-        size: "1024x1024",
+        image: resolvedImage,
+        imageUrl: resolvedImage,
+        image_url: resolvedImage,
         response_format: "url",
+        source: "pixkey3d-design-generate",
       }),
     });
 
@@ -648,7 +679,7 @@ const generateDesign = async (userPrompt: string, basePromptTemplate: string): P
     }
 
     const rawPayload = await response.text();
-    console.log("[Qwen image/generations] response", { status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
+    console.log("[Qwen design/generate] response", { status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
     if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `El endpoint respondió HTTP ${response.status}`);
 
     let candidate = "";
@@ -676,24 +707,7 @@ const refineDesign = async (previousImageUrl: string, feedback: string): Promise
   if (!cleanedFeedback) throw new Error("Escribe qué cambio quieres aplicar al diseño.");
   if (!previousImageUrl.trim()) throw new Error("No hay imagen previa para editar.");
 
-  let resolvedImage = previousImageUrl;
-  if (/^\/uploads\//.test(previousImageUrl)) {
-    const localPath = join(process.cwd(), "data", previousImageUrl.replace(/^\//, ""));
-    try {
-      const buf = fs.readFileSync(localPath);
-      const ext = (previousImageUrl.split(".").pop() || "png").toLowerCase();
-      const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
-      resolvedImage = `data:${mime};base64,${buf.toString("base64")}`;
-    } catch (e) {
-      console.warn("[Qwen image/refine] Could not read local upload, sending raw URL:", e);
-    }
-  } else if (/^https?:\/\//i.test(previousImageUrl)) {
-    try {
-      resolvedImage = await urlToDataUrl(previousImageUrl);
-    } catch (e) {
-      console.warn("[Qwen image/refine] Could not download previous image, sending raw URL:", e);
-    }
-  }
+  const resolvedImage = await resolveImageInput(previousImageUrl);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
@@ -1085,6 +1099,14 @@ const AdminLayout = (title: string, content: string) => {
                         </div>
                     </div>
                     <div class="nav-dropdown">
+                        <button class="nav-dropdown-btn" type="button">Herramientas
+                          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+                        </button>
+                        <div class="nav-dropdown-menu">
+                            <a href="/admin/herramientas/creador-disenios">Creador de diseños</a>
+                        </div>
+                    </div>
+                    <div class="nav-dropdown">
                         <button class="nav-dropdown-btn" type="button">Finanzas
                           <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
                         </button>
@@ -1384,10 +1406,14 @@ adminRoutes.post("/description/adapt", async (c) => {
 adminRoutes.post("/design/generate", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const imageInput = formString(body.image) || formString(body.imageUrl);
     const userPrompt = formString(body.userPrompt);
+    if (!imageInput) {
+      return c.json({ error: "Sube una imagen primero." }, 400);
+    }
     const config = getConfig();
     const template = config.design_creator_prompt || "";
-    const result = await generateDesign(userPrompt, template);
+    const result = await generateDesign(imageInput, template, userPrompt);
     return c.json(result);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "No se pudo generar el diseño." }, 400);
@@ -2220,6 +2246,221 @@ adminRoutes.post("/products/:id/edit", async (c) => {
   return c.redirect("/admin/products");
 });
 
+adminRoutes.get("/herramientas/creador-disenios", (c) => {
+  return c.html(AdminLayout("Creador de Diseños", `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between border-b pb-4">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-800">Creador de Diseños con IA</h1>
+          <p class="text-sm text-gray-500 mt-1">Sube una imagen base, deja que el modelo la transforme con el prompt configurado y refina con sugerencias.</p>
+        </div>
+        <a href="/admin/config" class="text-sm font-semibold text-blue-600 hover:text-blue-800 underline">Editar prompt base ↗</a>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Panel izquierdo: input -->
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-bold text-gray-700">Imagen base *</label>
+            <input type="file" id="std-input-image" accept="image/*" class="mt-1 block w-full text-sm text-gray-600">
+          </div>
+          <div class="bg-gray-50 border border-gray-200 rounded p-2 flex items-center justify-center min-h-[220px]">
+            <img id="std-input-preview" class="hidden max-h-[300px] max-w-full object-contain rounded" alt="">
+            <span id="std-input-placeholder" class="text-xs text-gray-400">Vista previa</span>
+          </div>
+          <div>
+            <label class="block text-sm font-bold text-gray-700">Descripción adicional (opcional)</label>
+            <textarea id="std-initial-prompt" rows="3" placeholder="Ej: conservar la forma del logo y poner fondo azul claro" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></textarea>
+            <p class="text-[10px] text-gray-500 mt-1">Se inyecta en el placeholder <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> del prompt base.</p>
+          </div>
+          <div class="flex justify-end">
+            <button type="button" id="std-generate" class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-bold px-5 py-2 rounded shadow">
+              Generar diseño
+            </button>
+          </div>
+        </div>
+
+        <!-- Panel derecho: review -->
+        <div class="space-y-4">
+          <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 flex items-center justify-center min-h-[300px] relative">
+            <img id="std-preview" class="hidden max-h-[420px] max-w-full object-contain rounded" alt="">
+            <div id="std-loading" class="hidden absolute inset-0 bg-white bg-opacity-90 flex flex-col items-center justify-center gap-2">
+              <div class="animate-spin rounded-full h-10 w-10 border-4 border-purple-500 border-t-transparent"></div>
+              <p id="std-loading-text" class="text-sm font-semibold text-gray-700">Generando diseño…</p>
+              <p class="text-xs text-gray-500">15 a 60 segundos</p>
+            </div>
+            <span id="std-preview-placeholder" class="text-xs text-gray-400">El diseño generado aparecerá aquí</span>
+          </div>
+          <div id="std-review-controls" class="hidden space-y-3">
+            <div>
+              <label class="block text-sm font-bold text-gray-700">Sugiere cambios sobre el diseño</label>
+              <textarea id="std-feedback" rows="3" placeholder="Ej: cambia el fondo a blanco puro" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></textarea>
+            </div>
+            <div class="flex flex-wrap justify-between gap-2">
+              <button type="button" id="std-restart" class="bg-gray-200 hover:bg-gray-300 text-gray-800 text-sm font-bold px-4 py-2 rounded">↺ Iniciar de cero</button>
+              <div class="flex gap-2">
+                <button type="button" id="std-refine" class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-bold px-4 py-2 rounded shadow">Aplicar sugerencia</button>
+                <button type="button" id="std-accept" class="bg-green-600 hover:bg-green-700 text-white text-sm font-bold px-4 py-2 rounded shadow">✓ Aceptar diseño</button>
+              </div>
+            </div>
+          </div>
+          <div id="std-accepted" class="hidden bg-green-50 border border-green-200 rounded p-4 space-y-3">
+            <p class="text-sm font-bold text-green-800">Diseño aceptado.</p>
+            <div class="flex flex-wrap gap-2">
+              <a id="std-download" href="#" download class="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-1.5 rounded inline-flex items-center gap-1.5">
+                ⬇ Descargar PNG
+              </a>
+              <button type="button" id="std-copy-url" class="bg-gray-700 hover:bg-gray-900 text-white text-xs font-bold px-3 py-1.5 rounded inline-flex items-center gap-1.5">
+                📋 Copiar URL
+              </button>
+              <span id="std-copy-feedback" class="text-xs text-green-700 self-center"></span>
+            </div>
+            <p class="text-[11px] text-gray-600 break-all">URL: <code id="std-url-display" class="bg-white border rounded px-1.5 py-0.5"></code></p>
+          </div>
+          <div id="std-error" class="hidden bg-red-50 border border-red-200 text-red-700 text-sm rounded p-3"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        const inputEl = document.getElementById('std-input-image');
+        const inputPreview = document.getElementById('std-input-preview');
+        const inputPlaceholder = document.getElementById('std-input-placeholder');
+        const promptEl = document.getElementById('std-initial-prompt');
+        const previewImg = document.getElementById('std-preview');
+        const previewPlaceholder = document.getElementById('std-preview-placeholder');
+        const loadingBox = document.getElementById('std-loading');
+        const loadingText = document.getElementById('std-loading-text');
+        const reviewControls = document.getElementById('std-review-controls');
+        const acceptedBox = document.getElementById('std-accepted');
+        const errorBox = document.getElementById('std-error');
+        const feedbackEl = document.getElementById('std-feedback');
+        const downloadLink = document.getElementById('std-download');
+        const copyBtn = document.getElementById('std-copy-url');
+        const copyFb = document.getElementById('std-copy-feedback');
+        const urlDisplay = document.getElementById('std-url-display');
+
+        let baseImageDataUrl = '';
+        let currentImageUrl = '';
+
+        function fileToDataUrl(file) {
+          return new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(String(r.result || ''));
+            r.onerror = () => reject(new Error('No se pudo leer el archivo.'));
+            r.readAsDataURL(file);
+          });
+        }
+        function showError(msg) { errorBox.textContent = msg; errorBox.classList.remove('hidden'); }
+        function clearError() { errorBox.textContent = ''; errorBox.classList.add('hidden'); }
+
+        function setBusy(busy, text) {
+          loadingBox.classList.toggle('hidden', !busy);
+          if (text) loadingText.textContent = text;
+        }
+        function setPreview(url) {
+          previewImg.src = url;
+          previewImg.classList.remove('hidden');
+          previewPlaceholder.classList.add('hidden');
+        }
+        function resetPreview() {
+          previewImg.removeAttribute('src');
+          previewImg.classList.add('hidden');
+          previewPlaceholder.classList.remove('hidden');
+          reviewControls.classList.add('hidden');
+          acceptedBox.classList.add('hidden');
+        }
+        function restartAll() {
+          baseImageDataUrl = '';
+          currentImageUrl = '';
+          inputEl.value = '';
+          inputPreview.removeAttribute('src');
+          inputPreview.classList.add('hidden');
+          inputPlaceholder.classList.remove('hidden');
+          promptEl.value = '';
+          feedbackEl.value = '';
+          clearError();
+          resetPreview();
+        }
+
+        inputEl.addEventListener('change', async () => {
+          const file = inputEl.files && inputEl.files[0];
+          if (!file) { baseImageDataUrl = ''; inputPreview.classList.add('hidden'); inputPlaceholder.classList.remove('hidden'); return; }
+          try {
+            baseImageDataUrl = await fileToDataUrl(file);
+            inputPreview.src = baseImageDataUrl;
+            inputPreview.classList.remove('hidden');
+            inputPlaceholder.classList.add('hidden');
+            clearError();
+          } catch (err) { showError(err.message || String(err)); }
+        });
+
+        document.getElementById('std-generate').addEventListener('click', async () => {
+          if (!baseImageDataUrl) { showError('Sube una imagen base primero.'); return; }
+          clearError();
+          resetPreview();
+          setBusy(true, 'Generando diseño…');
+          try {
+            const res = await fetch('/admin/design/generate', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin',
+              body: JSON.stringify({ image: baseImageDataUrl, userPrompt: promptEl.value.trim() }),
+            });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);
+            currentImageUrl = data.imageUrl;
+            setPreview(currentImageUrl);
+            reviewControls.classList.remove('hidden');
+          } catch (err) {
+            showError(err.message || String(err));
+          } finally { setBusy(false); }
+        });
+
+        document.getElementById('std-refine').addEventListener('click', async () => {
+          const fb = feedbackEl.value.trim();
+          if (!fb) { showError('Escribe el cambio que quieres aplicar.'); return; }
+          if (!currentImageUrl) { showError('No hay imagen previa.'); return; }
+          clearError();
+          setBusy(true, 'Aplicando sugerencia…');
+          try {
+            const res = await fetch('/admin/design/refine', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin',
+              body: JSON.stringify({ imageUrl: currentImageUrl, feedback: fb }),
+            });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);
+            currentImageUrl = data.imageUrl;
+            setPreview(currentImageUrl);
+            feedbackEl.value = '';
+          } catch (err) {
+            showError(err.message || String(err));
+          } finally { setBusy(false); }
+        });
+
+        document.getElementById('std-restart').addEventListener('click', restartAll);
+        document.getElementById('std-accept').addEventListener('click', () => {
+          if (!currentImageUrl) return;
+          reviewControls.classList.add('hidden');
+          acceptedBox.classList.remove('hidden');
+          const absoluteUrl = new URL(currentImageUrl, window.location.origin).href;
+          downloadLink.href = currentImageUrl;
+          downloadLink.download = currentImageUrl.split('/').pop() || 'diseno.png';
+          urlDisplay.textContent = absoluteUrl;
+        });
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(urlDisplay.textContent || '');
+            copyFb.textContent = '¡Copiado!';
+            setTimeout(() => copyFb.textContent = '', 2000);
+          } catch (err) {
+            copyFb.textContent = 'Error al copiar';
+          }
+        });
+      })();
+    </script>
+  `));
+});
+
 adminRoutes.get("/quotes/new", (c) => {
   const config = getConfig();
   const products = getProducts();
@@ -2344,14 +2585,25 @@ adminRoutes.get("/quotes/new", (c) => {
           <button type="button" id="design-close" class="text-gray-500 hover:text-gray-800 text-2xl leading-none">&times;</button>
         </div>
 
-        <!-- Step 1: initial prompt -->
+        <!-- Step 1: subir imagen base + descripción opcional -->
         <div id="design-step-initial" class="p-6 space-y-4">
-          <label class="block text-sm font-bold text-gray-700">¿Qué imagen quieres generar?</label>
-          <textarea id="design-initial-prompt" rows="4" placeholder="Ej: un llavero en forma de gato negro estilizado, con anillo metálico" class="block w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></textarea>
-          <p class="text-xs text-gray-500">El sistema añadirá automáticamente el prompt base configurado en <a href="/admin/config" target="_blank" class="text-blue-600 underline">Configuraciones</a>.</p>
+          <div>
+            <label class="block text-sm font-bold text-gray-700">Imagen base *</label>
+            <input type="file" id="design-input-image" accept="image/*" class="mt-1 block w-full text-sm text-gray-600">
+            <p class="text-xs text-gray-500 mt-1">Esta imagen será transformada usando el prompt base configurado en <a href="/admin/config" target="_blank" class="text-blue-600 underline">Configuraciones</a>.</p>
+          </div>
+          <div class="bg-gray-50 border border-gray-200 rounded p-2 flex items-center justify-center min-h-[160px]">
+            <img id="design-input-preview" class="hidden max-h-[220px] max-w-full object-contain rounded" alt="">
+            <span id="design-input-placeholder" class="text-xs text-gray-400">Vista previa de la imagen base</span>
+          </div>
+          <div>
+            <label class="block text-sm font-bold text-gray-700">Descripción adicional (opcional)</label>
+            <textarea id="design-initial-prompt" rows="3" placeholder="Ej: que conserve la forma del gato y agrega un fondo azul claro" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></textarea>
+            <p class="text-xs text-gray-500 mt-1">Se inyecta en el placeholder <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> del prompt base. Si lo dejas vacío, se usa solo el prompt configurado.</p>
+          </div>
           <div class="flex justify-end gap-2">
             <button type="button" id="design-generate" class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-bold px-5 py-2 rounded shadow">
-              Generar primera versión
+              Generar diseño
             </button>
           </div>
         </div>
@@ -2480,10 +2732,14 @@ adminRoutes.get("/quotes/new", (c) => {
         const loadingText = document.getElementById('design-loading-text');
         const errorBox = document.getElementById('design-error');
         const initialPrompt = document.getElementById('design-initial-prompt');
+        const inputImageEl = document.getElementById('design-input-image');
+        const inputPreview = document.getElementById('design-input-preview');
+        const inputPlaceholder = document.getElementById('design-input-placeholder');
         const feedback = document.getElementById('design-feedback');
         const previewImg = document.getElementById('design-preview');
         let activeRow = null;
         let currentImageUrl = '';
+        let baseImageDataUrl = '';
 
         function showStep(which) {
           stepInitial.classList.toggle('hidden', which !== 'initial');
@@ -2499,10 +2755,38 @@ adminRoutes.get("/quotes/new", (c) => {
           errorBox.classList.add('hidden');
         }
 
+        function fileToDataUrl(file) {
+          return new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(String(r.result || ''));
+            r.onerror = () => reject(new Error('No se pudo leer el archivo.'));
+            r.readAsDataURL(file);
+          });
+        }
+
+        inputImageEl.addEventListener('change', async () => {
+          const file = inputImageEl.files && inputImageEl.files[0];
+          if (!file) { baseImageDataUrl = ''; inputPreview.classList.add('hidden'); inputPlaceholder.classList.remove('hidden'); return; }
+          try {
+            baseImageDataUrl = await fileToDataUrl(file);
+            inputPreview.src = baseImageDataUrl;
+            inputPreview.classList.remove('hidden');
+            inputPlaceholder.classList.add('hidden');
+            clearError();
+          } catch (err) {
+            showError(err.message || String(err));
+          }
+        });
+
         function openDesignModal(row) {
           activeRow = row;
           currentImageUrl = '';
-          initialPrompt.value = (row.querySelector('.js-name').value || '').trim();
+          baseImageDataUrl = '';
+          initialPrompt.value = '';
+          inputImageEl.value = '';
+          inputPreview.removeAttribute('src');
+          inputPreview.classList.add('hidden');
+          inputPlaceholder.classList.remove('hidden');
           feedback.value = '';
           previewImg.removeAttribute('src');
           clearError();
@@ -2515,23 +2799,24 @@ adminRoutes.get("/quotes/new", (c) => {
           modal.classList.remove('flex');
           activeRow = null;
           currentImageUrl = '';
+          baseImageDataUrl = '';
         }
 
         document.getElementById('design-close').addEventListener('click', closeDesignModal);
         modal.addEventListener('click', (e) => { if (e.target === modal) closeDesignModal(); });
 
         document.getElementById('design-generate').addEventListener('click', async () => {
+          if (!baseImageDataUrl) { showError('Sube una imagen base primero.'); return; }
           const userPrompt = initialPrompt.value.trim();
-          if (!userPrompt) { showError('Describe primero el diseño que quieres generar.'); return; }
           clearError();
-          loadingText.textContent = 'Generando primera versión…';
+          loadingText.textContent = 'Generando diseño…';
           showStep('loading');
           try {
             const res = await fetch('/admin/design/generate', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               credentials: 'same-origin',
-              body: JSON.stringify({ userPrompt }),
+              body: JSON.stringify({ image: baseImageDataUrl, userPrompt }),
             });
             const data = await res.json();
             if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);

@@ -274,13 +274,16 @@ export function initDb() {
   seedConfig("welcome_text", defaultWelcome);
   seedConfig("contact_text", defaultContact);
 
-  // Design creator prompt — used by /admin/design/generate to build the
-  // optimized prompt from the user's description. {userPrompt} is replaced
-  // with whatever the user typed in the modal.
-  seedConfig(
-    "design_creator_prompt",
-    "Diseña una imagen profesional de producto para una tienda de impresión 3D, basada en la siguiente descripción del cliente: {userPrompt}. Aplica las siguientes pautas: fondo blanco puro, iluminación de estudio suave, composición centrada, alta nitidez, sin texto, sin marcas de agua, sin manos ni props extra. Estilo realista, listo para catálogo.",
-  );
+  // Design creator prompt — used by /admin/design/generate. Recibe la
+  // imagen subida por el usuario y la transforma según este template.
+  // El placeholder opcional {userPrompt} se sustituye por la descripción
+  // adicional escrita en el modal (puede estar vacía).
+  const designPromptDefault = "Transforma esta imagen en un diseño profesional listo para impresión 3D y catálogo: conserva la forma y los elementos principales del diseño original, mejora la nitidez, ajusta a fondo blanco puro, iluminación de estudio suave, sombras naturales discretas, sin texto, sin marcas de agua, sin manos, sin props ni elementos extra. {userPrompt}";
+  seedConfig("design_creator_prompt", designPromptDefault);
+  // One-shot migration: si el valor sigue siendo el primer default de
+  // text→image (cuando el flujo aún no aceptaba imagen), lo reemplazamos.
+  const previousTextOnlyDefault = "Diseña una imagen profesional de producto para una tienda de impresión 3D, basada en la siguiente descripción del cliente: {userPrompt}. Aplica las siguientes pautas: fondo blanco puro, iluminación de estudio suave, composición centrada, alta nitidez, sin texto, sin marcas de agua, sin manos ni props extra. Estilo realista, listo para catálogo.";
+  db.run(`UPDATE config SET value = ? WHERE key = 'design_creator_prompt' AND value = ?`, [designPromptDefault, previousTextOnlyDefault]);
 
   // Styling defaults
   seedConfig("color_primary", "#ef4444");
