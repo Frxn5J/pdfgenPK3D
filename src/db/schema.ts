@@ -274,7 +274,12 @@ export function initDb() {
   seedConfig("welcome_text", defaultWelcome);
   seedConfig("contact_text", defaultContact);
 
-  // Design creator prompt — used by /admin/design/generate. Recibe la
+  // ── Prompts de IA ─────────────────────────────────────────────────────
+  // Cada prompt vive en config para que el admin lo pueda editar sin tocar
+  // env vars. Cuando un prompt está vacío, el helper que lo consume cae al
+  // env var correspondiente y luego a un hardcoded de seguridad.
+
+  // Design creator prompt — usado por /admin/design/generate. Recibe la
   // imagen subida por el usuario y la transforma según este template.
   // El placeholder opcional {userPrompt} se sustituye por la descripción
   // adicional escrita en el modal (puede estar vacía).
@@ -284,6 +289,12 @@ export function initDb() {
   // text→image (cuando el flujo aún no aceptaba imagen), lo reemplazamos.
   const previousTextOnlyDefault = "Diseña una imagen profesional de producto para una tienda de impresión 3D, basada en la siguiente descripción del cliente: {userPrompt}. Aplica las siguientes pautas: fondo blanco puro, iluminación de estudio suave, composición centrada, alta nitidez, sin texto, sin marcas de agua, sin manos ni props extra. Estilo realista, listo para catálogo.";
   db.run(`UPDATE config SET value = ? WHERE key = 'design_creator_prompt' AND value = ?`, [designPromptDefault, previousTextOnlyDefault]);
+
+  // Catalog image prompt — usado por enhanceImageForCatalog al agregar /
+  // importar productos (MakerWorld y "Mejorar imagen" en el catálogo).
+  // Toma una imagen existente y la limpia para ficha de catálogo.
+  const catalogImagePromptDefault = "Transforma esta imagen en una fotografía profesional para catálogo ecommerce: producto centrado y completo, fondo blanco puro, iluminación de estudio suave, sombras naturales discretas, alta nitidez, colores fieles al producto, sin texto, sin marcas de agua, sin manos, sin props y sin elementos extra. Conserva la forma y detalles reales del objeto. Resultado limpio, realista y listo para catálogo.";
+  seedConfig("catalog_image_prompt", catalogImagePromptDefault);
 
   // Styling defaults
   seedConfig("color_primary", "#ef4444");

@@ -510,6 +510,11 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
   if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
   if (!imageUrl.trim()) throw new Error("Primero selecciona, pega o sube una imagen para mejorar.");
 
+  // Prompt: DB config primero, luego env, luego el hardcoded del provider
+  // helper (queda como último fallback).
+  const dbConfig = getConfig();
+  const prompt = (dbConfig.catalog_image_prompt || "").trim() || config.prompt;
+
   // Convert HTTP URLs to base64 data URLs to avoid filename-related OSS signature issues on the provider side
   let resolvedImage = imageUrl;
   if (/^https?:\/\//i.test(imageUrl)) {
@@ -540,7 +545,7 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
       signal: controller.signal,
       body: JSON.stringify({
         model: config.model || undefined,
-        prompt: config.prompt,
+        prompt,
         image: resolvedImage,
         imageUrl: resolvedImage,
         image_url: resolvedImage,
@@ -559,7 +564,7 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
     const contentType = response.headers.get("content-type") || "";
     if (contentType.startsWith("image/")) {
       if (!response.ok) throw new Error(`El endpoint de mejora respondió con HTTP ${response.status}`);
-      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "enhanced"), prompt: config.prompt };
+      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "enhanced"), prompt };
     }
 
     const rawPayload = await response.text();
@@ -576,7 +581,7 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
       candidate = extractImageCandidate(rawPayload);
     }
 
-    return { imageUrl: await persistImageReference(candidate), prompt: config.prompt };
+    return { imageUrl: await persistImageReference(candidate), prompt };
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw new Error("El endpoint de mejora tardó demasiado en responder.");
     throw error;
@@ -1672,10 +1677,26 @@ adminRoutes.get("/config", (c) => {
                 <p class="text-xs text-gray-500 mt-1">Este contenido se inserta como HTML en la última página del catálogo.</p>
             </div>
 
-            <div>
-                <label class="block text-sm font-medium text-gray-700">Prompt base del Creador de Diseños</label>
-                <textarea name="design_creator_prompt" rows="5" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "design_creator_prompt")}</textarea>
-                <p class="text-xs text-gray-500 mt-1">Se usa al generar diseños desde el creador en cotizaciones manuales. Incluye <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> donde quieras inyectar la descripción del usuario. Si no incluyes el placeholder, la descripción se concatena al final.</p>
+            <div class="border-t pt-6 mt-4">
+                <h3 class="text-lg font-semibold mb-1 flex items-center gap-2">
+                  <svg class="h-5 w-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                  Prompts de IA
+                </h3>
+                <p class="text-sm text-gray-500 mb-4">Estos prompts se envían junto con la imagen al provider configurado. Edítalos para ajustar el resultado al estilo de tu marca.</p>
+
+                <div class="space-y-5">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Prompt: Creador de Diseños (Herramientas)</label>
+                        <textarea name="design_creator_prompt" rows="5" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "design_creator_prompt")}</textarea>
+                        <p class="text-xs text-gray-500 mt-1">Usado por <code class="bg-gray-100 px-1 rounded">Herramientas → Creador de Diseños</code> y por el botón "Crear diseño con IA" dentro de cotizaciones manuales. Incluye <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> donde quieras inyectar la descripción adicional del usuario; si no incluyes el placeholder y el usuario escribe algo, se concatena al final. Si el usuario no escribe nada, se manda solo este prompt.</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Prompt: Imagen para Catálogo / MakerWorld</label>
+                        <textarea name="catalog_image_prompt" rows="5" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "catalog_image_prompt")}</textarea>
+                        <p class="text-xs text-gray-500 mt-1">Usado al hacer clic en "Mejorar imagen con IA" al importar productos desde MakerWorld o al editar un producto del catálogo. Aquí no aplica <code class="bg-gray-100 px-1 rounded">{userPrompt}</code>: el prompt se envía tal cual junto con la imagen seleccionada.</p>
+                    </div>
+                </div>
             </div>
 
             <div>
@@ -1949,6 +1970,7 @@ adminRoutes.post("/config", async (c) => {
     welcome_text: formString(body.welcome_text),
     contact_text: formString(body.contact_text),
     design_creator_prompt: formString(body.design_creator_prompt),
+    catalog_image_prompt: formString(body.catalog_image_prompt),
     color_primary: formString(body.color_primary),
     color_secondary: formString(body.color_secondary),
     color_accent: formString(body.color_accent),
