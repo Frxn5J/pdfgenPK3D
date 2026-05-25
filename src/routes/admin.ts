@@ -585,6 +585,163 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
   }
 };
 
+const buildDesignPrompt = (template: string, userPrompt: string) => {
+  const cleanedTemplate = (template || "").trim();
+  const cleanedUser = userPrompt.trim();
+  if (!cleanedUser) throw new Error("Describe primero el diseño que quieres generar.");
+  if (cleanedTemplate.includes("{userPrompt}")) {
+    return cleanedTemplate.replace(/\{userPrompt\}/g, cleanedUser);
+  }
+  if (!cleanedTemplate) return cleanedUser;
+  return `${cleanedTemplate}\n\nDescripción del usuario: ${cleanedUser}`;
+};
+
+const resolveImageGenerateEndpoint = (config: ReturnType<typeof imageEnhanceConfig>) => {
+  if (config.baseUrl) {
+    const base = config.baseUrl.replace(/\/+$/, "");
+    if (/\/v1$/i.test(base)) return joinUrl(base, "/images/generations");
+    return joinUrl(base, "/v1/images/generations");
+  }
+  if (!config.endpoint) return "";
+  if (/\/v1\/?$/i.test(config.endpoint)) return joinUrl(config.endpoint, "/images/generations");
+  return config.endpoint.replace(/\/images\/edits\/?$/i, "/images/generations");
+};
+
+const generateDesign = async (userPrompt: string, basePromptTemplate: string): Promise<ImageEnhanceResult> => {
+  const config = imageEnhanceConfig();
+  const endpoint = resolveImageGenerateEndpoint(config);
+  if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
+
+  const finalPrompt = buildDesignPrompt(basePromptTemplate, userPrompt);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
+
+  try {
+    console.log("[Qwen image/generations] request", {
+      endpoint,
+      model: config.model || "provider-default",
+      hasApiKey: Boolean(config.apiKey),
+      promptPreview: finalPrompt.slice(0, 160),
+    });
+
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: config.model || undefined,
+        prompt: finalPrompt,
+        n: 1,
+        size: "1024x1024",
+        response_format: "url",
+      }),
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.startsWith("image/")) {
+      if (!response.ok) throw new Error(`El endpoint respondió HTTP ${response.status}`);
+      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "design"), prompt: finalPrompt };
+    }
+
+    const rawPayload = await response.text();
+    console.log("[Qwen image/generations] response", { status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
+    if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `El endpoint respondió HTTP ${response.status}`);
+
+    let candidate = "";
+    try {
+      candidate = extractImageCandidate(JSON.parse(rawPayload));
+    } catch {
+      candidate = extractImageCandidate(rawPayload);
+    }
+
+    return { imageUrl: await persistImageReference(candidate), prompt: finalPrompt };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error("La generación de diseño tardó demasiado.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const refineDesign = async (previousImageUrl: string, feedback: string): Promise<ImageEnhanceResult> => {
+  const config = imageEnhanceConfig();
+  const endpoint = resolveImageEnhanceEndpoint(config);
+  if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
+
+  const cleanedFeedback = feedback.trim();
+  if (!cleanedFeedback) throw new Error("Escribe qué cambio quieres aplicar al diseño.");
+  if (!previousImageUrl.trim()) throw new Error("No hay imagen previa para editar.");
+
+  let resolvedImage = previousImageUrl;
+  if (/^\/uploads\//.test(previousImageUrl)) {
+    const localPath = join(process.cwd(), "data", previousImageUrl.replace(/^\//, ""));
+    try {
+      const buf = fs.readFileSync(localPath);
+      const ext = (previousImageUrl.split(".").pop() || "png").toLowerCase();
+      const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+      resolvedImage = `data:${mime};base64,${buf.toString("base64")}`;
+    } catch (e) {
+      console.warn("[Qwen image/refine] Could not read local upload, sending raw URL:", e);
+    }
+  } else if (/^https?:\/\//i.test(previousImageUrl)) {
+    try {
+      resolvedImage = await urlToDataUrl(previousImageUrl);
+    } catch (e) {
+      console.warn("[Qwen image/refine] Could not download previous image, sending raw URL:", e);
+    }
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
+
+  try {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: config.model || undefined,
+        prompt: cleanedFeedback,
+        image: resolvedImage,
+        imageUrl: resolvedImage,
+        image_url: resolvedImage,
+        response_format: "url",
+        source: "pixkey3d-design-refine",
+      }),
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.startsWith("image/")) {
+      if (!response.ok) throw new Error(`El endpoint respondió HTTP ${response.status}`);
+      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "design"), prompt: cleanedFeedback };
+    }
+
+    const rawPayload = await response.text();
+    if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `El endpoint respondió HTTP ${response.status}`);
+
+    let candidate = "";
+    try {
+      candidate = extractImageCandidate(JSON.parse(rawPayload));
+    } catch {
+      candidate = extractImageCandidate(rawPayload);
+    }
+
+    return { imageUrl: await persistImageReference(candidate), prompt: cleanedFeedback };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error("La edición de diseño tardó demasiado.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 const bodyValues = (body: Record<string, unknown>, key: string) => {
   const value = body[key];
   return Array.isArray(value) ? value : value === undefined ? [] : [value];
@@ -1224,6 +1381,31 @@ adminRoutes.post("/description/adapt", async (c) => {
   }
 });
 
+adminRoutes.post("/design/generate", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const userPrompt = formString(body.userPrompt);
+    const config = getConfig();
+    const template = config.design_creator_prompt || "";
+    const result = await generateDesign(userPrompt, template);
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo generar el diseño." }, 400);
+  }
+});
+
+adminRoutes.post("/design/refine", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const previousImageUrl = formString(body.imageUrl);
+    const feedback = formString(body.feedback);
+    const result = await refineDesign(previousImageUrl, feedback);
+    return c.json(result);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo refinar el diseño." }, 400);
+  }
+});
+
 adminRoutes.post("/image/enhance", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
@@ -1462,6 +1644,12 @@ adminRoutes.get("/config", (c) => {
                 <label class="block text-sm font-medium text-gray-700">Texto de Contacto / Pie de página (acepta HTML)</label>
                 <textarea name="contact_text" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "contact_text")}</textarea>
                 <p class="text-xs text-gray-500 mt-1">Este contenido se inserta como HTML en la última página del catálogo.</p>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Prompt base del Creador de Diseños</label>
+                <textarea name="design_creator_prompt" rows="5" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "design_creator_prompt")}</textarea>
+                <p class="text-xs text-gray-500 mt-1">Se usa al generar diseños desde el creador en cotizaciones manuales. Incluye <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> donde quieras inyectar la descripción del usuario. Si no incluyes el placeholder, la descripción se concatena al final.</p>
             </div>
 
             <div>
@@ -1734,6 +1922,7 @@ adminRoutes.post("/config", async (c) => {
     free_shipping_min_pieces: formString(body.free_shipping_min_pieces) || "0",
     welcome_text: formString(body.welcome_text),
     contact_text: formString(body.contact_text),
+    design_creator_prompt: formString(body.design_creator_prompt),
     color_primary: formString(body.color_primary),
     color_secondary: formString(body.color_secondary),
     color_accent: formString(body.color_accent),
@@ -2130,6 +2319,11 @@ adminRoutes.get("/quotes/new", (c) => {
         <div class="md:col-span-6">
           <label class="block text-xs font-bold text-gray-600 uppercase">Imagen de la pieza (opcional)</label>
           <input type="file" name="item_image" accept="image/*" class="js-image mt-1 block w-full text-xs text-gray-600">
+          <input type="hidden" name="item_image_url" class="js-image-url" value="">
+          <button type="button" class="js-design-btn mt-2 inline-flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold px-3 py-1.5 rounded shadow-sm">
+            <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+            Crear diseño con IA
+          </button>
           <p class="text-[10px] text-gray-500 mt-0.5">Si seleccionas un producto del catálogo, se usa su imagen automáticamente.</p>
         </div>
         <div class="md:col-span-3">
@@ -2141,6 +2335,62 @@ adminRoutes.get("/quotes/new", (c) => {
         </div>
       </div>
     </template>
+
+    <!-- Design creator modal -->
+    <div id="design-modal" class="fixed inset-0 bg-black bg-opacity-60 z-50 hidden items-center justify-center p-4">
+      <div class="bg-white rounded-lg shadow-2xl max-w-3xl w-full max-h-[95vh] overflow-y-auto">
+        <div class="flex items-center justify-between border-b px-6 py-4">
+          <h3 class="text-lg font-bold text-gray-900">Creador de diseños con IA</h3>
+          <button type="button" id="design-close" class="text-gray-500 hover:text-gray-800 text-2xl leading-none">&times;</button>
+        </div>
+
+        <!-- Step 1: initial prompt -->
+        <div id="design-step-initial" class="p-6 space-y-4">
+          <label class="block text-sm font-bold text-gray-700">¿Qué imagen quieres generar?</label>
+          <textarea id="design-initial-prompt" rows="4" placeholder="Ej: un llavero en forma de gato negro estilizado, con anillo metálico" class="block w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></textarea>
+          <p class="text-xs text-gray-500">El sistema añadirá automáticamente el prompt base configurado en <a href="/admin/config" target="_blank" class="text-blue-600 underline">Configuraciones</a>.</p>
+          <div class="flex justify-end gap-2">
+            <button type="button" id="design-generate" class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-bold px-5 py-2 rounded shadow">
+              Generar primera versión
+            </button>
+          </div>
+        </div>
+
+        <!-- Step 2: review + iterate -->
+        <div id="design-step-review" class="p-6 space-y-4 hidden">
+          <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 flex items-center justify-center min-h-[320px]">
+            <img id="design-preview" class="max-h-[460px] max-w-full object-contain rounded" alt="Diseño generado">
+          </div>
+          <div>
+            <label class="block text-sm font-bold text-gray-700">Sugiere cambios sobre el diseño</label>
+            <textarea id="design-feedback" rows="3" placeholder="Ej: que el gato sea blanco, agregar un moño rojo en el cuello" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></textarea>
+          </div>
+          <div class="flex flex-wrap justify-between items-center gap-2">
+            <button type="button" id="design-restart" class="bg-gray-200 hover:bg-gray-300 text-gray-800 text-sm font-bold px-4 py-2 rounded">
+              ↺ Iniciar de cero
+            </button>
+            <div class="flex gap-2">
+              <button type="button" id="design-refine" class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-bold px-4 py-2 rounded shadow">
+                Aplicar sugerencia
+              </button>
+              <button type="button" id="design-accept" class="bg-green-600 hover:bg-green-700 text-white text-sm font-bold px-4 py-2 rounded shadow">
+                ✓ Aceptar y guardar
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Loading overlay -->
+        <div id="design-loading" class="hidden p-6 text-center space-y-3">
+          <div class="inline-block animate-spin rounded-full h-10 w-10 border-4 border-purple-500 border-t-transparent"></div>
+          <p id="design-loading-text" class="text-sm font-semibold text-gray-700">Generando diseño…</p>
+          <p class="text-xs text-gray-500">Esto puede tardar entre 15 y 60 segundos.</p>
+        </div>
+
+        <!-- Error -->
+        <div id="design-error" class="hidden m-6 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded"></div>
+      </div>
+    </div>
 
     <script>
       (() => {
@@ -2201,14 +2451,19 @@ adminRoutes.get("/quotes/new", (c) => {
             }
           });
           const fileInput = row.querySelector('.js-image');
+          const imageUrlInput = row.querySelector('.js-image-url');
           fileInput.addEventListener('change', () => {
             const file = fileInput.files && fileInput.files[0];
             if (file) {
               const url = URL.createObjectURL(file);
               preview.src = url;
               preview.classList.remove('hidden');
+              // Subir un archivo invalida cualquier diseño previo en la URL oculta
+              imageUrlInput.value = '';
             }
           });
+          const designBtn = row.querySelector('.js-design-btn');
+          designBtn.addEventListener('click', () => openDesignModal(row));
           container.appendChild(node);
           recalc();
         }
@@ -2216,6 +2471,125 @@ adminRoutes.get("/quotes/new", (c) => {
         addBtn.addEventListener('click', addItem);
         shippingInput.addEventListener('input', recalc);
         addItem();
+
+        // ── Design creator modal ──
+        const modal = document.getElementById('design-modal');
+        const stepInitial = document.getElementById('design-step-initial');
+        const stepReview = document.getElementById('design-step-review');
+        const loading = document.getElementById('design-loading');
+        const loadingText = document.getElementById('design-loading-text');
+        const errorBox = document.getElementById('design-error');
+        const initialPrompt = document.getElementById('design-initial-prompt');
+        const feedback = document.getElementById('design-feedback');
+        const previewImg = document.getElementById('design-preview');
+        let activeRow = null;
+        let currentImageUrl = '';
+
+        function showStep(which) {
+          stepInitial.classList.toggle('hidden', which !== 'initial');
+          stepReview.classList.toggle('hidden', which !== 'review');
+          loading.classList.toggle('hidden', which !== 'loading');
+        }
+        function showError(msg) {
+          errorBox.textContent = msg;
+          errorBox.classList.remove('hidden');
+        }
+        function clearError() {
+          errorBox.textContent = '';
+          errorBox.classList.add('hidden');
+        }
+
+        function openDesignModal(row) {
+          activeRow = row;
+          currentImageUrl = '';
+          initialPrompt.value = (row.querySelector('.js-name').value || '').trim();
+          feedback.value = '';
+          previewImg.removeAttribute('src');
+          clearError();
+          showStep('initial');
+          modal.classList.remove('hidden');
+          modal.classList.add('flex');
+        }
+        function closeDesignModal() {
+          modal.classList.add('hidden');
+          modal.classList.remove('flex');
+          activeRow = null;
+          currentImageUrl = '';
+        }
+
+        document.getElementById('design-close').addEventListener('click', closeDesignModal);
+        modal.addEventListener('click', (e) => { if (e.target === modal) closeDesignModal(); });
+
+        document.getElementById('design-generate').addEventListener('click', async () => {
+          const userPrompt = initialPrompt.value.trim();
+          if (!userPrompt) { showError('Describe primero el diseño que quieres generar.'); return; }
+          clearError();
+          loadingText.textContent = 'Generando primera versión…';
+          showStep('loading');
+          try {
+            const res = await fetch('/admin/design/generate', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ userPrompt }),
+            });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);
+            currentImageUrl = data.imageUrl;
+            previewImg.src = currentImageUrl;
+            showStep('review');
+          } catch (err) {
+            showStep('initial');
+            showError(err.message || String(err));
+          }
+        });
+
+        document.getElementById('design-refine').addEventListener('click', async () => {
+          const fb = feedback.value.trim();
+          if (!fb) { showError('Escribe el cambio que quieres aplicar.'); return; }
+          if (!currentImageUrl) { showError('No hay imagen previa.'); return; }
+          clearError();
+          loadingText.textContent = 'Aplicando sugerencia…';
+          showStep('loading');
+          try {
+            const res = await fetch('/admin/design/refine', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ imageUrl: currentImageUrl, feedback: fb }),
+            });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);
+            currentImageUrl = data.imageUrl;
+            previewImg.src = currentImageUrl;
+            feedback.value = '';
+            showStep('review');
+          } catch (err) {
+            showStep('review');
+            showError(err.message || String(err));
+          }
+        });
+
+        document.getElementById('design-restart').addEventListener('click', () => {
+          currentImageUrl = '';
+          previewImg.removeAttribute('src');
+          feedback.value = '';
+          clearError();
+          showStep('initial');
+        });
+
+        document.getElementById('design-accept').addEventListener('click', () => {
+          if (!activeRow || !currentImageUrl) { closeDesignModal(); return; }
+          const imageUrlInput = activeRow.querySelector('.js-image-url');
+          const fileInput = activeRow.querySelector('.js-image');
+          const rowPreview = activeRow.querySelector('.js-preview');
+          imageUrlInput.value = currentImageUrl;
+          // Limpiar cualquier archivo subido para que el backend use la URL del diseño
+          fileInput.value = '';
+          rowPreview.src = currentImageUrl;
+          rowPreview.classList.remove('hidden');
+          closeDesignModal();
+        });
       })();
     </script>
   `));
@@ -2237,6 +2611,7 @@ adminRoutes.post("/quotes/new", async (c) => {
   const names = formStringArray(body.item_name);
   const quantities = formStringArray(body.item_quantity);
   const prices = formStringArray(body.item_unit_price);
+  const imageUrls = formStringArray(body.item_image_url);
   const imageFiles = Array.isArray(body.item_image) ? body.item_image : (body.item_image ? [body.item_image] : []);
 
   const itemCount = Math.max(names.length, quantities.length, prices.length, productIds.length);
@@ -2256,6 +2631,9 @@ adminRoutes.post("/quotes/new", async (c) => {
     const fileVal = imageFiles[i];
     if (fileVal instanceof File && fileVal.size > 0) {
       customImageUrl = await saveUpload(fileVal, "quote-items", "qitem");
+    } else {
+      const designUrl = (imageUrls[i] || "").trim();
+      if (designUrl) customImageUrl = designUrl;
     }
 
     const lineSubtotal = qty * price;

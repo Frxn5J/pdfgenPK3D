@@ -274,6 +274,14 @@ export function initDb() {
   seedConfig("welcome_text", defaultWelcome);
   seedConfig("contact_text", defaultContact);
 
+  // Design creator prompt — used by /admin/design/generate to build the
+  // optimized prompt from the user's description. {userPrompt} is replaced
+  // with whatever the user typed in the modal.
+  seedConfig(
+    "design_creator_prompt",
+    "Diseña una imagen profesional de producto para una tienda de impresión 3D, basada en la siguiente descripción del cliente: {userPrompt}. Aplica las siguientes pautas: fondo blanco puro, iluminación de estudio suave, composición centrada, alta nitidez, sin texto, sin marcas de agua, sin manos ni props extra. Estilo realista, listo para catálogo.",
+  );
+
   // Styling defaults
   seedConfig("color_primary", "#ef4444");
   seedConfig("color_secondary", "#1f2937");
