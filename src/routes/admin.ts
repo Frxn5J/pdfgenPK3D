@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 
@@ -918,7 +918,15 @@ const AdminLayout = (title: string, content: string) => {
                             <a href="/" target="_blank">Ver Catálogo ↗</a>
                         </div>
                     </div>
-                    <a href="/admin/quotes" class="nav-direct-link">Cotizaciones</a>
+                    <div class="nav-dropdown">
+                        <button class="nav-dropdown-btn" type="button">Cotizaciones
+                          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+                        </button>
+                        <div class="nav-dropdown-menu">
+                            <a href="/admin/quotes">Ver cotizaciones</a>
+                            <a href="/admin/quotes/new">Nueva cotización</a>
+                        </div>
+                    </div>
                     <div class="nav-dropdown">
                         <button class="nav-dropdown-btn" type="button">Finanzas
                           <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
@@ -1961,6 +1969,271 @@ adminRoutes.post("/products/:id/edit", async (c) => {
   return c.redirect("/admin/products");
 });
 
+adminRoutes.get("/quotes/new", (c) => {
+  const config = getConfig();
+  const products = getProducts();
+  const defaultShippingProvider = config.shipping_provider || "Estafeta";
+  const defaultShippingPrice = parseFloat(config.shipping_price || "0") || 0;
+  const defaultWhatsapp = config.quote_whatsapp_number || "";
+
+  const productOptionsHtml = products.map((p) => `<option value="${p.id}" data-name="${escapeHtml(p.name)}" data-image="${escapeHtml(p.image_url || '')}">${escapeHtml(p.name)}</option>`).join("");
+
+  return c.html(AdminLayout("Nueva cotización manual", `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between">
+        <a href="/admin/quotes" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-md text-sm font-semibold transition-colors">
+          ← Volver a lista
+        </a>
+        <h1 class="text-2xl font-bold text-gray-800">Nueva cotización manual</h1>
+      </div>
+
+      <form action="/admin/quotes/new" method="post" enctype="multipart/form-data" class="space-y-6" id="manual-quote-form">
+        <div class="bg-white shadow rounded-lg p-6 space-y-4">
+          <h2 class="text-lg font-bold text-gray-800 border-b pb-2">Datos del cliente</h2>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Nombre del cliente *</label>
+              <input type="text" name="customer_name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Código Postal *</label>
+              <input type="text" name="postal_code" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">WhatsApp</label>
+              <input type="text" name="whatsapp_number" value="${escapeHtml(defaultWhatsapp)}" placeholder="Opcional" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Paquetería</label>
+              <input type="text" name="shipping_provider" value="${escapeHtml(defaultShippingProvider)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700">Costo de envío (MXN)</label>
+              <input type="number" name="shipping_cost" min="0" step="0.01" value="${defaultShippingPrice.toFixed(2)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+              <p class="text-xs text-gray-500 mt-1">Pon 0 para envío gratis.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-white shadow rounded-lg p-6 space-y-4">
+          <div class="flex items-center justify-between border-b pb-2">
+            <h2 class="text-lg font-bold text-gray-800">Piezas / Productos</h2>
+            <button type="button" id="add-item-btn" class="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-1.5 rounded shadow-sm">
+              + Agregar otra pieza
+            </button>
+          </div>
+          <p class="text-xs text-gray-500">Puedes elegir un producto del catálogo o capturar una pieza personalizada con su propio nombre, precio e imagen.</p>
+
+          <div id="items-container" class="space-y-4"></div>
+        </div>
+
+        <div class="bg-white shadow rounded-lg p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div class="text-sm text-gray-700">
+            <div>Subtotal: <span id="sum-subtotal" class="font-mono font-semibold">$0.00</span></div>
+            <div>Piezas: <span id="sum-pieces" class="font-mono font-semibold">0</span></div>
+            <div>Envío: <span id="sum-shipping" class="font-mono font-semibold">$0.00</span></div>
+            <div class="text-base font-bold text-gray-900 mt-1">Total: <span id="sum-total" class="font-mono">$0.00</span></div>
+          </div>
+          <button type="submit" class="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-md font-bold shadow-md transition-colors">
+            Guardar cotización
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <template id="item-template">
+      <div class="border border-gray-200 rounded-lg p-4 bg-gray-50 grid grid-cols-1 md:grid-cols-12 gap-3 items-end item-row">
+        <div class="md:col-span-4">
+          <label class="block text-xs font-bold text-gray-600 uppercase">Producto del catálogo (opcional)</label>
+          <select name="item_product_id" class="js-product-select mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+            <option value="">— Pieza personalizada —</option>
+            ${productOptionsHtml}
+          </select>
+        </div>
+        <div class="md:col-span-4">
+          <label class="block text-xs font-bold text-gray-600 uppercase">Nombre / descripción *</label>
+          <input type="text" name="item_name" required class="js-name mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm">
+        </div>
+        <div class="md:col-span-1">
+          <label class="block text-xs font-bold text-gray-600 uppercase">Cant. *</label>
+          <input type="number" name="item_quantity" min="1" step="1" value="1" required class="js-qty mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm">
+        </div>
+        <div class="md:col-span-2">
+          <label class="block text-xs font-bold text-gray-600 uppercase">P. Unitario *</label>
+          <input type="number" name="item_unit_price" min="0" step="0.01" value="0" required class="js-price mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm">
+        </div>
+        <div class="md:col-span-1 text-right">
+          <button type="button" class="js-remove text-red-600 hover:text-red-800 text-xs font-bold">Eliminar</button>
+        </div>
+        <div class="md:col-span-6">
+          <label class="block text-xs font-bold text-gray-600 uppercase">Imagen de la pieza (opcional)</label>
+          <input type="file" name="item_image" accept="image/*" class="js-image mt-1 block w-full text-xs text-gray-600">
+          <p class="text-[10px] text-gray-500 mt-0.5">Si seleccionas un producto del catálogo, se usa su imagen automáticamente.</p>
+        </div>
+        <div class="md:col-span-3">
+          <div class="text-xs text-gray-500">Subtotal</div>
+          <div class="js-subtotal font-mono font-semibold text-sm">$0.00</div>
+        </div>
+        <div class="md:col-span-3">
+          <img class="js-preview hidden h-16 w-16 object-cover rounded border bg-white" alt="">
+        </div>
+      </div>
+    </template>
+
+    <script>
+      (() => {
+        const container = document.getElementById('items-container');
+        const template = document.getElementById('item-template');
+        const addBtn = document.getElementById('add-item-btn');
+        const sumSubtotalEl = document.getElementById('sum-subtotal');
+        const sumPiecesEl = document.getElementById('sum-pieces');
+        const sumShippingEl = document.getElementById('sum-shipping');
+        const sumTotalEl = document.getElementById('sum-total');
+        const shippingInput = document.querySelector('input[name="shipping_cost"]');
+        const fmt = (n) => '$' + (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
+
+        function recalc() {
+          let subtotal = 0;
+          let pieces = 0;
+          container.querySelectorAll('.item-row').forEach((row) => {
+            const qty = parseFloat(row.querySelector('.js-qty').value) || 0;
+            const price = parseFloat(row.querySelector('.js-price').value) || 0;
+            const s = qty * price;
+            row.querySelector('.js-subtotal').textContent = fmt(s);
+            subtotal += s;
+            pieces += qty;
+          });
+          const shipping = parseFloat(shippingInput.value) || 0;
+          sumSubtotalEl.textContent = fmt(subtotal);
+          sumPiecesEl.textContent = String(pieces);
+          sumShippingEl.textContent = fmt(shipping);
+          sumTotalEl.textContent = fmt(subtotal + shipping);
+        }
+
+        function addItem() {
+          const node = template.content.cloneNode(true);
+          const row = node.querySelector('.item-row');
+          row.querySelector('.js-remove').addEventListener('click', () => {
+            row.remove();
+            recalc();
+          });
+          row.querySelectorAll('input').forEach((inp) => inp.addEventListener('input', recalc));
+          const select = row.querySelector('.js-product-select');
+          const nameInput = row.querySelector('.js-name');
+          const preview = row.querySelector('.js-preview');
+          select.addEventListener('change', () => {
+            const opt = select.options[select.selectedIndex];
+            if (opt && opt.value) {
+              nameInput.value = opt.dataset.name || nameInput.value;
+              const img = opt.dataset.image;
+              if (img) {
+                preview.src = img;
+                preview.classList.remove('hidden');
+              } else {
+                preview.classList.add('hidden');
+                preview.removeAttribute('src');
+              }
+            } else {
+              preview.classList.add('hidden');
+              preview.removeAttribute('src');
+            }
+          });
+          const fileInput = row.querySelector('.js-image');
+          fileInput.addEventListener('change', () => {
+            const file = fileInput.files && fileInput.files[0];
+            if (file) {
+              const url = URL.createObjectURL(file);
+              preview.src = url;
+              preview.classList.remove('hidden');
+            }
+          });
+          container.appendChild(node);
+          recalc();
+        }
+
+        addBtn.addEventListener('click', addItem);
+        shippingInput.addEventListener('input', recalc);
+        addItem();
+      })();
+    </script>
+  `));
+});
+
+adminRoutes.post("/quotes/new", async (c) => {
+  const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
+  const customerName = formString(body.customer_name).trim();
+  const postalCode = formString(body.postal_code).trim();
+  const whatsappNumber = formString(body.whatsapp_number).trim();
+  const shippingProvider = formString(body.shipping_provider).trim() || "Estafeta";
+  const shippingCost = parseFloat(formString(body.shipping_cost)) || 0;
+
+  if (!customerName || !postalCode) {
+    return c.redirect("/admin/quotes/new");
+  }
+
+  const productIds = formStringArray(body.item_product_id);
+  const names = formStringArray(body.item_name);
+  const quantities = formStringArray(body.item_quantity);
+  const prices = formStringArray(body.item_unit_price);
+  const imageFiles = Array.isArray(body.item_image) ? body.item_image : (body.item_image ? [body.item_image] : []);
+
+  const itemCount = Math.max(names.length, quantities.length, prices.length, productIds.length);
+  const items: QuoteItemInput[] = [];
+  let subtotal = 0;
+  let totalPieces = 0;
+
+  for (let i = 0; i < itemCount; i++) {
+    const name = (names[i] || "").trim();
+    const qty = parseInt(quantities[i] || "0", 10) || 0;
+    const price = parseFloat(prices[i] || "0") || 0;
+    if (!name || qty <= 0) continue;
+    const productIdRaw = (productIds[i] || "").trim();
+    const productId = productIdRaw ? parseInt(productIdRaw, 10) || null : null;
+
+    let customImageUrl: string | null = null;
+    const fileVal = imageFiles[i];
+    if (fileVal instanceof File && fileVal.size > 0) {
+      customImageUrl = await saveUpload(fileVal, "quote-items", "qitem");
+    }
+
+    const lineSubtotal = qty * price;
+    subtotal += lineSubtotal;
+    totalPieces += qty;
+    items.push({
+      product_id: productId,
+      product_name: name,
+      quantity: qty,
+      unit_price: price,
+      subtotal: lineSubtotal,
+      pricing_min_volume: null,
+      pricing_max_volume: null,
+      delivery_time: null,
+      custom_image_url: customImageUrl,
+    });
+  }
+
+  if (items.length === 0) {
+    return c.redirect("/admin/quotes/new");
+  }
+
+  const grandTotal = subtotal + shippingCost;
+  const quoteId = createQuote({
+    customer_name: customerName,
+    postal_code: postalCode,
+    total_pieces: totalPieces,
+    subtotal,
+    shipping_provider: shippingProvider,
+    shipping_cost: shippingCost,
+    shipping_free_threshold: null,
+    grand_total: grandTotal,
+    whatsapp_number: whatsappNumber,
+    message: "Cotización creada manualmente desde el panel administrativo.",
+    items,
+  });
+
+  return c.redirect(`/admin/quotes/${quoteId}`);
+});
+
 adminRoutes.get("/quotes/:id", (c) => {
   const id = parseInt(c.req.param("id"), 10);
   const quote = getQuote(id);
@@ -2261,6 +2534,26 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
     `);
   }
 
+  const itemsForGallery = items.map((item) => ({
+    name: item.product_name,
+    quantity: item.quantity,
+    imageUrl: item.product_image_url || item.custom_image_url || null,
+  }));
+
+  const galleryCardsHtml = itemsForGallery.map((it) => `
+    <div class="border border-gray-300 rounded-md overflow-hidden bg-white flex flex-col">
+      <div class="bg-gray-50 flex items-center justify-center" style="height: 220px;">
+        ${it.imageUrl
+          ? `<img src="${escapeHtml(it.imageUrl)}" alt="${escapeHtml(it.name)}" style="max-height: 100%; max-width: 100%; object-fit: contain;">`
+          : `<div class="text-gray-300 text-xs uppercase tracking-wide">Sin imagen</div>`}
+      </div>
+      <div class="p-3 border-t border-gray-200">
+        <div class="text-sm font-bold text-gray-900 leading-tight">${escapeHtml(it.name)}</div>
+        <div class="text-xs text-gray-600 mt-1 font-semibold">Cantidad: <span class="text-gray-900">${it.quantity}</span></div>
+      </div>
+    </div>
+  `).join("");
+
   let totalAcumulado = quote.subtotal + quote.shipping_cost;
 
   if (hasCargoExtra && cargoExtraImporte > 0) {
@@ -2295,6 +2588,11 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
             .no-print { display: none !important; }
             body { background: white; color: black; }
             .print-border { border: 1px solid #000 !important; }
+            .page-break { page-break-before: always; break-before: page; }
+          }
+          .page-break { margin-top: 2.5rem; padding-top: 2rem; border-top: 2px dashed #d1d5db; }
+          @media print {
+            .page-break { margin-top: 0; padding-top: 0; border-top: none; }
           }
           body { font-family: ${adminFontStack("Uploaded Body Font", config.font_body_file, adminCssValue(config.font_body, "system-ui, -apple-system, sans-serif"))}; }
           h1, h2, h3, h4 { font-family: ${adminFontStack("Uploaded Heading Font", config.font_heading_file, adminCssValue(config.font_heading, "system-ui, -apple-system, sans-serif"))}; }
@@ -2403,6 +2701,23 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
                 </div>
               </div>
             </div>
+
+            <!-- Second page: product gallery -->
+            <section class="page-break">
+              <div class="flex items-center justify-between border-b border-gray-300 pb-3 mb-6">
+                <div>
+                  <h2 class="text-lg font-black text-gray-900 tracking-wide uppercase">Productos cotizados</h2>
+                  <p class="text-xs text-gray-500">Cotización ${escapeHtml(quoteFolio(quote))} · ${escapeHtml(quote.customer_name)}</p>
+                </div>
+                <div class="text-right">
+                  <p class="text-xs text-gray-500 uppercase font-semibold">Total piezas</p>
+                  <p class="text-lg font-black text-gray-900">${quote.total_pieces}</p>
+                </div>
+              </div>
+              ${itemsForGallery.length > 0
+                ? `<div class="grid grid-cols-2 sm:grid-cols-3 gap-4">${galleryCardsHtml}</div>`
+                : `<p class="text-sm text-gray-500 text-center py-8">No hay productos en esta cotización.</p>`}
+            </section>
         </div>
 
         <script>

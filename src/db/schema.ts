@@ -96,9 +96,16 @@ export function initDb() {
       pricing_min_volume INTEGER,
       pricing_max_volume INTEGER,
       delivery_time TEXT,
+      custom_image_url TEXT,
       FOREIGN KEY (quote_id) REFERENCES quotes(id) ON DELETE CASCADE
     )
   `);
+
+  try {
+    db.run(`ALTER TABLE quote_items ADD COLUMN custom_image_url TEXT`);
+  } catch {
+    // Column already exists.
+  }
 
   // Extra tables for printer and filament settings
   db.run(`
@@ -403,6 +410,7 @@ export interface QuoteItemInput {
   pricing_min_volume: number | null;
   pricing_max_volume: number | null;
   delivery_time: string | null;
+  custom_image_url?: string | null;
 }
 
 export interface QuoteInput {
@@ -451,6 +459,7 @@ export interface QuoteItem {
   pricing_min_volume: number | null;
   pricing_max_volume: number | null;
   delivery_time: string | null;
+  custom_image_url: string | null;
 }
 
 export function createQuote(input: QuoteInput) {
@@ -463,8 +472,8 @@ export function createQuote(input: QuoteInput) {
   const insertItem = db.prepare(`
     INSERT INTO quote_items (
       quote_id, product_id, product_name, quantity, unit_price, subtotal,
-      pricing_min_volume, pricing_max_volume, delivery_time
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      pricing_min_volume, pricing_max_volume, delivery_time, custom_image_url
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const transaction = db.transaction((quote: QuoteInput) => {
     const row = insertQuote.get(
@@ -491,6 +500,7 @@ export function createQuote(input: QuoteInput) {
         item.pricing_min_volume,
         item.pricing_max_volume,
         item.delivery_time,
+        item.custom_image_url ?? null,
       );
     }
 
