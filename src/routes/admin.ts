@@ -1152,6 +1152,68 @@ adminRoutes.get("/quotes", (c) => {
   `));
 });
 
+adminRoutes.get("/zona-extendida/:cp", async (c) => {
+  const cp = c.req.param("cp").trim();
+  if (!/^\d{4,5}$/.test(cp)) {
+    return c.json({ error: "Código postal inválido" }, 400);
+  }
+
+  try {
+    const valores = Buffer.from(cp, "utf-8").toString("base64");
+    const url = `https://zonaextendida.com/consultarGuia.php?valores=${encodeURIComponent(valores)}`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://zonaextendida.com/",
+        "Accept": "application/json, text/plain, */*",
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) {
+      return c.json({ error: `Upstream HTTP ${res.status}` }, 502);
+    }
+
+    const data = await res.json() as {
+      encontrado?: boolean;
+      mensaje?: string;
+      informacion?: {
+        cp?: string;
+        estado?: string;
+        municipio?: string;
+        Estafeta?: { zonaExtendida?: string };
+        Fedex?: { zonaExtendida?: string };
+        DHL?: { zonaExtendida?: string };
+      };
+    };
+
+    if (!data.encontrado || !data.informacion) {
+      return c.json({ found: false, message: data.mensaje || "CP no encontrado" });
+    }
+
+    const info = data.informacion;
+    const estafetaZE = info.Estafeta?.zonaExtendida ?? "";
+    const fedexZE = info.Fedex?.zonaExtendida ?? "";
+    const dhlZE = info.DHL?.zonaExtendida ?? "";
+
+    const isExtended = (v: string) => v !== "" && v !== "0" && v.toUpperCase() !== "N";
+
+    return c.json({
+      found: true,
+      cp: info.cp || cp,
+      estado: info.estado || "",
+      municipio: info.municipio || "",
+      estafeta: { extended: isExtended(estafetaZE), raw: estafetaZE },
+      fedex: { extended: isExtended(fedexZE), raw: fedexZE },
+      dhl: { extended: isExtended(dhlZE), raw: dhlZE },
+    });
+  } catch (error) {
+    console.error("[zona-extendida] failed", error);
+    return c.json({ error: error instanceof Error ? error.message : "Error al consultar" }, 500);
+  }
+});
+
 adminRoutes.post("/description/adapt", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
@@ -2407,10 +2469,15 @@ adminRoutes.get("/quotes/:id", (c) => {
 
           <hr class="my-4">
           <div class="border rounded-md bg-gray-50 p-4 space-y-4">
-            <div class="flex items-center">
-              <input type="checkbox" id="has_cargo_extra" name="has_cargo_extra" value="1" class="h-4 w-4 text-blue-600 border-gray-300 rounded">
-              <label for="has_cargo_extra" class="ml-2 block text-sm font-bold text-gray-700">¿Agregar cargo extra / Zona Extendida?</label>
+            <div class="flex flex-wrap items-center gap-3">
+              <div class="flex items-center">
+                <input type="checkbox" id="has_cargo_extra" name="has_cargo_extra" value="1" class="h-4 w-4 text-blue-600 border-gray-300 rounded">
+                <label for="has_cargo_extra" class="ml-2 block text-sm font-bold text-gray-700">¿Agregar cargo extra / Zona Extendida?</label>
+              </div>
+              <span id="ze-badge" class="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-100 text-gray-600 border border-gray-200">Verificando CP ${escapeHtml(quote.postal_code)}…</span>
+              <button type="button" id="ze-recheck" class="text-xs font-semibold text-blue-600 hover:text-blue-800 underline ml-auto">Volver a verificar</button>
             </div>
+            <p id="ze-detail" class="text-xs text-gray-500"></p>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4" id="cargo_extra_fields">
               <div>
                 <label class="block text-xs font-semibold text-gray-600">Clave Cargo Extra</label>
@@ -2442,6 +2509,11 @@ adminRoutes.get("/quotes/:id", (c) => {
       (() => {
         const checkbox = document.getElementById('has_cargo_extra');
         const container = document.getElementById('cargo_extra_fields');
+        const badge = document.getElementById('ze-badge');
+        const detail = document.getElementById('ze-detail');
+        const recheck = document.getElementById('ze-recheck');
+        const postalCode = ${JSON.stringify(quote.postal_code || "")};
+
         const toggle = () => {
           if (!checkbox || !container) return;
           const inputs = container.querySelectorAll('input');
@@ -2453,6 +2525,58 @@ adminRoutes.get("/quotes/:id", (c) => {
         };
         checkbox?.addEventListener('change', toggle);
         toggle();
+
+        function setBadge(text, cls) {
+          if (!badge) return;
+          badge.textContent = text;
+          badge.className = 'text-xs font-bold px-2.5 py-1 rounded-full border ' + cls;
+        }
+
+        async function checkZonaExtendida() {
+          if (!postalCode) {
+            setBadge('Sin CP', 'bg-gray-100 text-gray-600 border-gray-200');
+            return;
+          }
+          setBadge('Verificando CP ' + postalCode + '…', 'bg-gray-100 text-gray-600 border-gray-200');
+          if (detail) detail.textContent = '';
+          try {
+            const res = await fetch('/admin/zona-extendida/' + encodeURIComponent(postalCode), { credentials: 'same-origin' });
+            const data = await res.json();
+            if (!res.ok || data.error) {
+              setBadge('Error al verificar', 'bg-red-50 text-red-700 border-red-200');
+              if (detail) detail.textContent = data.error || 'No se pudo consultar zonaextendida.com';
+              return;
+            }
+            if (!data.found) {
+              setBadge('CP no encontrado en zonaextendida.com', 'bg-yellow-50 text-yellow-800 border-yellow-200');
+              if (detail) detail.textContent = data.message || '';
+              return;
+            }
+            const isExt = !!(data.estafeta && data.estafeta.extended);
+            const place = [data.municipio, data.estado].filter(Boolean).join(', ');
+            if (isExt) {
+              setBadge('Estafeta: SÍ es Zona Extendida', 'bg-orange-100 text-orange-800 border-orange-300');
+              if (detail) detail.textContent = 'CP ' + data.cp + ' · ' + place + ' · Se activó el cargo extra automáticamente.';
+              if (checkbox && !checkbox.checked) {
+                checkbox.checked = true;
+                toggle();
+              }
+            } else {
+              setBadge('Estafeta: NO es Zona Extendida', 'bg-green-100 text-green-800 border-green-300');
+              if (detail) detail.textContent = 'CP ' + data.cp + ' · ' + place + ' · No requiere cargo extra.';
+              if (checkbox && checkbox.checked) {
+                checkbox.checked = false;
+                toggle();
+              }
+            }
+          } catch (err) {
+            setBadge('Error de red', 'bg-red-50 text-red-700 border-red-200');
+            if (detail) detail.textContent = String(err);
+          }
+        }
+
+        recheck?.addEventListener('click', checkZonaExtendida);
+        checkZonaExtendida();
       })();
     </script>
   `));
