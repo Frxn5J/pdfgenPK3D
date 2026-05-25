@@ -326,6 +326,28 @@ const parseLlmError = (rawPayload: string) => {
   }
 };
 
+// Algunos providers (p. ej. el wrapper de Qwen en aiapibun.duckdns.org)
+// devuelven errores con el mensaje real anidado dentro de otra estructura
+// JSON estringificada. Desempaqueta hasta encontrar la hoja legible.
+const unwrapProviderError = (rawPayload: string): string => {
+  let text = rawPayload.trim();
+  for (let i = 0; i < 4; i++) {
+    let obj: unknown;
+    try { obj = JSON.parse(text); }
+    catch { return text.slice(0, 240); }
+    const message = (obj as { error?: { message?: unknown }; message?: unknown })?.error?.message
+      ?? (obj as { message?: unknown })?.message;
+    if (typeof message !== "string" || !message) return text.slice(0, 240);
+    const candidate = message.trim();
+    if (candidate.startsWith("{") || candidate.startsWith("[")) {
+      text = candidate;
+      continue;
+    }
+    return candidate;
+  }
+  return text.slice(0, 240);
+};
+
 const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "") => {
   const config = llmConfig();
   if (!config.apiKey) throw new Error("LLM_API_KEY no está configurada en el entorno.");
@@ -633,132 +655,139 @@ const resolveImageInput = async (imageInput: string): Promise<string> => {
   throw new Error("Formato de imagen no reconocido.");
 };
 
+// Provider (aiapibun.duckdns.org wrapper sobre Qwen) presenta flakiness:
+// a veces responde 500 "Failed to extract image URL from response" tras
+// 2s, otras veces responde 200 con la imagen tras ~30s. Los retries son
+// baratos porque los fallos son rápidos.
+const DESIGN_RETRY_DELAYS_MS = [2000, 2500];
+
+const callImageEditProvider = async (args: {
+  prompt: string;
+  image: string;
+  source: string;
+  logTag: string;
+  filePrefix: string;
+}): Promise<ImageEnhanceResult> => {
+  const config = imageEnhanceConfig();
+  const endpoint = resolveImageEnhanceEndpoint(config);
+  if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
+
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
+
+  const body = JSON.stringify({
+    model: config.model || undefined,
+    prompt: args.prompt,
+    image: args.image,
+    imageUrl: args.image,
+    image_url: args.image,
+    response_format: "url",
+    source: args.source,
+  });
+
+  const totalAttempts = DESIGN_RETRY_DELAYS_MS.length + 1;
+  let lastReason = "";
+
+  for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
+    let retriable = false;
+    let attemptError: Error | null = null;
+
+    try {
+      console.log(`[${args.logTag}] request (attempt ${attempt}/${totalAttempts})`, {
+        endpoint,
+        model: config.model || "provider-default",
+        hasApiKey: Boolean(config.apiKey),
+        promptPreview: args.prompt.slice(0, 160),
+        imageSource: args.image.startsWith("data:image/") ? "uploaded-file" : "url",
+      });
+
+      const response = await fetch(endpoint, { method: "POST", headers, signal: controller.signal, body });
+      const contentType = response.headers.get("content-type") || "";
+
+      if (contentType.startsWith("image/")) {
+        if (!response.ok) {
+          retriable = response.status >= 500;
+          attemptError = new Error(`El proveedor respondió HTTP ${response.status} con un binario de imagen.`);
+        } else {
+          return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, args.filePrefix), prompt: args.prompt };
+        }
+      } else {
+        const rawPayload = await response.text();
+        console.log(`[${args.logTag}] response`, { attempt, status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
+
+        if (!response.ok) {
+          retriable = response.status >= 500;
+          attemptError = new Error(unwrapProviderError(rawPayload) || `HTTP ${response.status}`);
+        } else {
+          let candidate = "";
+          try { candidate = extractImageCandidate(JSON.parse(rawPayload)); }
+          catch { candidate = extractImageCandidate(rawPayload); }
+
+          if (candidate) {
+            return { imageUrl: await persistImageReference(candidate), prompt: args.prompt };
+          }
+          // 200 OK pero sin URL de imagen → flakiness del wrapper, vale la
+          // pena reintentar.
+          retriable = true;
+          attemptError = new Error("El proveedor respondió 200 pero sin URL de imagen.");
+        }
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("El proveedor tardó demasiado en responder.");
+      }
+      retriable = true; // errores de red son siempre reintentables
+      attemptError = error instanceof Error ? error : new Error(String(error));
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    lastReason = attemptError?.message || "Error desconocido";
+
+    if (!retriable || attempt === totalAttempts) {
+      const exhaustedSuffix = attempt > 1 ? ` (tras ${attempt} intentos)` : "";
+      throw new Error(`El proveedor de IA falló${exhaustedSuffix}: ${lastReason}. Intenta de nuevo en unos segundos o usa otra imagen.`);
+    }
+
+    console.log(`[${args.logTag}] retrying`, { attempt, nextDelayMs: DESIGN_RETRY_DELAYS_MS[attempt - 1], reason: lastReason });
+    await new Promise(resolve => setTimeout(resolve, DESIGN_RETRY_DELAYS_MS[attempt - 1]));
+  }
+
+  // Inalcanzable por la lógica del loop, pero el compilador no lo sabe.
+  throw new Error(`El proveedor de IA no respondió tras ${totalAttempts} intentos: ${lastReason}`);
+};
+
 const generateDesign = async (
   imageInput: string,
   basePromptTemplate: string,
   userExtraPrompt: string,
 ): Promise<ImageEnhanceResult> => {
-  const config = imageEnhanceConfig();
-  const endpoint = resolveImageEnhanceEndpoint(config);
-  if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
-
   const finalPrompt = buildDesignPrompt(basePromptTemplate, userExtraPrompt);
   if (!finalPrompt) throw new Error("El prompt base está vacío. Configúralo en /admin/config.");
-
   const resolvedImage = await resolveImageInput(imageInput);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
-
-  try {
-    console.log("[Qwen design/generate] request", {
-      endpoint,
-      model: config.model || "provider-default",
-      hasApiKey: Boolean(config.apiKey),
-      promptPreview: finalPrompt.slice(0, 160),
-      imageSource: resolvedImage.startsWith("data:image/") ? "uploaded-file" : "url",
-    });
-
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: config.model || undefined,
-        prompt: finalPrompt,
-        image: resolvedImage,
-        imageUrl: resolvedImage,
-        image_url: resolvedImage,
-        response_format: "url",
-        source: "pixkey3d-design-generate",
-      }),
-    });
-
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.startsWith("image/")) {
-      if (!response.ok) throw new Error(`El endpoint respondió HTTP ${response.status}`);
-      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "design"), prompt: finalPrompt };
-    }
-
-    const rawPayload = await response.text();
-    console.log("[Qwen design/generate] response", { status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
-    if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `El endpoint respondió HTTP ${response.status}`);
-
-    let candidate = "";
-    try {
-      candidate = extractImageCandidate(JSON.parse(rawPayload));
-    } catch {
-      candidate = extractImageCandidate(rawPayload);
-    }
-
-    return { imageUrl: await persistImageReference(candidate), prompt: finalPrompt };
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw new Error("La generación de diseño tardó demasiado.");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
+  return callImageEditProvider({
+    prompt: finalPrompt,
+    image: resolvedImage,
+    source: "pixkey3d-design-generate",
+    logTag: "Qwen design/generate",
+    filePrefix: "design",
+  });
 };
 
 const refineDesign = async (previousImageUrl: string, feedback: string): Promise<ImageEnhanceResult> => {
-  const config = imageEnhanceConfig();
-  const endpoint = resolveImageEnhanceEndpoint(config);
-  if (!endpoint) throw new Error("QWEN_IMAGE_ENDPOINT o QWEN_IMAGE_BASE_URL no está configurado en el entorno.");
-
   const cleanedFeedback = feedback.trim();
   if (!cleanedFeedback) throw new Error("Escribe qué cambio quieres aplicar al diseño.");
   if (!previousImageUrl.trim()) throw new Error("No hay imagen previa para editar.");
-
   const resolvedImage = await resolveImageInput(previousImageUrl);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
-
-  try {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: config.model || undefined,
-        prompt: cleanedFeedback,
-        image: resolvedImage,
-        imageUrl: resolvedImage,
-        image_url: resolvedImage,
-        response_format: "url",
-        source: "pixkey3d-design-refine",
-      }),
-    });
-
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.startsWith("image/")) {
-      if (!response.ok) throw new Error(`El endpoint respondió HTTP ${response.status}`);
-      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "design"), prompt: cleanedFeedback };
-    }
-
-    const rawPayload = await response.text();
-    if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `El endpoint respondió HTTP ${response.status}`);
-
-    let candidate = "";
-    try {
-      candidate = extractImageCandidate(JSON.parse(rawPayload));
-    } catch {
-      candidate = extractImageCandidate(rawPayload);
-    }
-
-    return { imageUrl: await persistImageReference(candidate), prompt: cleanedFeedback };
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw new Error("La edición de diseño tardó demasiado.");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
+  return callImageEditProvider({
+    prompt: cleanedFeedback,
+    image: resolvedImage,
+    source: "pixkey3d-design-refine",
+    logTag: "Qwen design/refine",
+    filePrefix: "design",
+  });
 };
 
 const bodyValues = (body: Record<string, unknown>, key: string) => {
