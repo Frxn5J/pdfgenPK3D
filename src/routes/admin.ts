@@ -397,7 +397,12 @@ const imageEnhanceConfig = () => ({
 const joinUrl = (base: string, path: string) => `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 
 const resolveImageEnhanceEndpoint = (config: ReturnType<typeof imageEnhanceConfig>) => {
-  if (config.baseUrl) return joinUrl(config.baseUrl, config.route || "/v1/images/edits");
+  if (config.baseUrl) {
+    const base = config.baseUrl.replace(/\/+$/, "");
+    if (config.route) return joinUrl(base, config.route);
+    if (/\/v1$/i.test(base)) return joinUrl(base, "/images/edits");
+    return joinUrl(base, "/v1/images/edits");
+  }
   if (!config.endpoint) return "";
   if (config.route) return joinUrl(config.endpoint, config.route);
   if (/\/v1\/?$/i.test(config.endpoint)) return joinUrl(config.endpoint, "/images/edits");
