@@ -177,13 +177,22 @@ const isCloudflareChallenge = (html: string) => {
 const fetchViaFlareSolverr = async (targetUrl: string): Promise<string> => {
   const base = (process.env.FLARESOLVERR_URL || "").trim();
   if (!base) throw new Error("FLARESOLVERR_URL no está configurada");
+  console.log("[MakerWorld/FlareSolverr] POST", base, "→", targetUrl);
   const res = await fetch(base, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ cmd: "request.get", url: targetUrl, maxTimeout: 60000 }),
+    body: JSON.stringify({ cmd: "request.get", url: targetUrl, maxTimeout: 90000 }),
   });
-  if (!res.ok) throw new Error(`FlareSolverr HTTP ${res.status}`);
-  const payload = await res.json() as { status?: string; message?: string; solution?: { response?: string } };
+  const rawBody = await res.text();
+  console.log("[MakerWorld/FlareSolverr] HTTP", res.status, "body len", rawBody.length);
+  if (!res.ok) throw new Error(`FlareSolverr HTTP ${res.status} body=${rawBody.slice(0, 400)}`);
+  let payload: { status?: string; message?: string; solution?: { response?: string; status?: number; url?: string } };
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    throw new Error(`FlareSolverr devolvió JSON inválido: ${rawBody.slice(0, 400)}`);
+  }
+  console.log("[MakerWorld/FlareSolverr] payload", { status: payload.status, message: payload.message, solutionStatus: payload.solution?.status, solutionUrl: payload.solution?.url, responseLen: payload.solution?.response?.length });
   if (payload.status !== "ok" || !payload.solution?.response) {
     throw new Error(`FlareSolverr falló: ${payload.message || "respuesta inválida"}`);
   }

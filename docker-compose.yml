@@ -20,9 +20,12 @@ services:
     restart: always
     ports:
       - "8191:8191"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     environment:
-      - LOG_LEVEL=info
-      - BROWSER_TIMEOUT=40000
+      - LOG_LEVEL=debug
+      - BROWSER_TIMEOUT=90000
       - TZ=America/Mexico_City
 
 volumes:
