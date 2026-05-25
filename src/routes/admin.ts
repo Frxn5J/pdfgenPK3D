@@ -1600,6 +1600,7 @@ adminRoutes.get("/config", (c) => {
         <h2 class="text-xl font-bold mb-4">Configuración General</h2>
         <p class="text-sm text-gray-500 mb-6">Edita los datos del catálogo y usa la vista previa para probar CSS personalizado antes de guardar.</p>
         <form action="/admin/config" method="post" enctype="multipart/form-data" class="space-y-6">
+            <input type="hidden" name="__config_form" value="1">
             <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start mb-8">
                 <div class="border border-gray-200 rounded-lg bg-gray-50 p-4">
                     <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
@@ -1930,82 +1931,109 @@ adminRoutes.get("/config", (c) => {
 
 adminRoutes.post("/config", async (c) => {
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
-  const currentConfig = getConfig();
 
-  let logoUrl = formString(body.company_logo_url);
-  let fontBodyFileUrl = body.remove_font_body_file === "1" ? "" : (currentConfig.font_body_file || "");
-  let fontHeadingFileUrl = body.remove_font_heading_file === "1" ? "" : (currentConfig.font_heading_file || "");
-
-  // Handle file upload
-  const file = formFile(body.company_logo_file);
-  if (file) {
-    const filename = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-    const uploadPath = join(process.cwd(), "data", "uploads", filename);
-    const buffer = await file.arrayBuffer();
-    fs.writeFileSync(uploadPath, Buffer.from(buffer));
-    logoUrl = `/uploads/${filename}`;
+  // Anti-wipe: rechazamos POSTs que no traigan el marcador de formulario.
+  // Esto evita que un POST parcial (smoke test, fetch externo, repetición
+  // accidental) sobreescriba campos no enviados con cadena vacía.
+  if (!("__config_form" in body)) {
+    return c.text("Bad request: falta el marcador __config_form. Solo se acepta el POST desde el formulario completo de /admin/config.", 400);
   }
 
+  const updates: Record<string, string> = {};
+  const put = (key: string) => {
+    if (key in body) updates[key] = formString(body[key]);
+  };
+
+  // Campos simples: solo se escriben si vinieron en el body.
+  const simpleFields = [
+    "company_name",
+    "cover_subtitle",
+    "products_title",
+    "quote_whatsapp_number",
+    "welcome_text",
+    "contact_text",
+    "design_creator_prompt",
+    "catalog_image_prompt",
+    "color_primary",
+    "color_secondary",
+    "color_accent",
+    "bg_cover",
+    "color_cover_text",
+    "bg_welcome",
+    "bg_products",
+    "bg_contact",
+    "color_contact_text",
+    "bg_card",
+    "color_card_border",
+    "bg_table_header",
+    "color_table_header_text",
+    "color_body_text",
+    "color_heading_text",
+    "color_muted_text",
+    "font_body",
+    "font_heading",
+    "border_radius",
+    "button_radius",
+    "card_shadow",
+    "card_style",
+    "layout_density",
+    "product_image_fit",
+    "decorative_shape_style",
+    "decorative_shape_color",
+    "decorative_shape_opacity",
+    "decorative_shape_blur",
+    "custom_css",
+  ];
+  for (const key of simpleFields) put(key);
+
+  // Campos con default cuando llegan vacíos.
+  if ("shipping_provider" in body) updates.shipping_provider = formString(body.shipping_provider) || "Estafeta";
+  if ("shipping_price" in body) updates.shipping_price = formString(body.shipping_price) || "0";
+  if ("free_shipping_min_pieces" in body) updates.free_shipping_min_pieces = formString(body.free_shipping_min_pieces) || "0";
+
+  // Logo: archivo nuevo OR campo URL presente. Si ninguno aplica, no se toca.
+  const logoFile = formFile(body.company_logo_file);
+  if (logoFile) {
+    const filename = `${Date.now()}-${logoFile.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+    const uploadPath = join(process.cwd(), "data", "uploads", filename);
+    const buffer = await logoFile.arrayBuffer();
+    fs.writeFileSync(uploadPath, Buffer.from(buffer));
+    updates.company_logo = `/uploads/${filename}`;
+  } else if ("company_logo_url" in body) {
+    updates.company_logo = formString(body.company_logo_url);
+  }
+
+  // Fonts: archivo nuevo OR flag de eliminar. Si ninguno aplica, no se toca.
   const fontBodyFile = formFile(body.font_body_file);
   if (fontBodyFile) {
     if (!isFontFile(fontBodyFile)) return c.text("Formato de fuente principal no permitido. Usa .woff, .woff2, .ttf u .otf.", 400);
-    fontBodyFileUrl = await saveUpload(fontBodyFile, "fonts", "body-font");
+    updates.font_body_file = await saveUpload(fontBodyFile, "fonts", "body-font");
+  } else if (body.remove_font_body_file === "1") {
+    updates.font_body_file = "";
   }
 
   const fontHeadingFile = formFile(body.font_heading_file);
   if (fontHeadingFile) {
     if (!isFontFile(fontHeadingFile)) return c.text("Formato de fuente de encabezados no permitido. Usa .woff, .woff2, .ttf u .otf.", 400);
-    fontHeadingFileUrl = await saveUpload(fontHeadingFile, "fonts", "heading-font");
+    updates.font_heading_file = await saveUpload(fontHeadingFile, "fonts", "heading-font");
+  } else if (body.remove_font_heading_file === "1") {
+    updates.font_heading_file = "";
   }
 
-  updateConfig({
-    company_name: formString(body.company_name),
-    company_logo: logoUrl,
-    cover_subtitle: formString(body.cover_subtitle),
-    products_title: formString(body.products_title),
-    quote_whatsapp_number: formString(body.quote_whatsapp_number),
-    shipping_provider: formString(body.shipping_provider) || "Estafeta",
-    shipping_price: formString(body.shipping_price) || "0",
-    free_shipping_min_pieces: formString(body.free_shipping_min_pieces) || "0",
-    welcome_text: formString(body.welcome_text),
-    contact_text: formString(body.contact_text),
-    design_creator_prompt: formString(body.design_creator_prompt),
-    catalog_image_prompt: formString(body.catalog_image_prompt),
-    color_primary: formString(body.color_primary),
-    color_secondary: formString(body.color_secondary),
-    color_accent: formString(body.color_accent),
-    bg_cover: formString(body.bg_cover),
-    color_cover_text: formString(body.color_cover_text),
-    bg_welcome: formString(body.bg_welcome),
-    bg_products: formString(body.bg_products),
-    bg_contact: formString(body.bg_contact),
-    color_contact_text: formString(body.color_contact_text),
-    bg_card: formString(body.bg_card),
-    color_card_border: formString(body.color_card_border),
-    bg_table_header: formString(body.bg_table_header),
-    color_table_header_text: formString(body.color_table_header_text),
-    color_body_text: formString(body.color_body_text),
-    color_heading_text: formString(body.color_heading_text),
-    color_muted_text: formString(body.color_muted_text),
-    font_body: formString(body.font_body),
-    font_heading: formString(body.font_heading),
-    font_body_file: fontBodyFileUrl,
-    font_heading_file: fontHeadingFileUrl,
-    border_radius: formString(body.border_radius),
-    button_radius: formString(body.button_radius),
-    card_shadow: formString(body.card_shadow),
-    card_style: formString(body.card_style),
-    layout_density: formString(body.layout_density),
-    product_image_fit: formString(body.product_image_fit),
-    decorative_shapes_enabled: (body.decorative_shapes_enabled ? "1" : "0"),
-    decorative_shape_style: formString(body.decorative_shape_style),
-    decorative_shape_color: formString(body.decorative_shape_color),
-    decorative_shape_opacity: formString(body.decorative_shape_opacity),
-    decorative_shape_blur: formString(body.decorative_shape_blur),
-    custom_css: formString(body.custom_css),
-  });
+  // Checkbox: el marcador garantiza que el form fue enviado, así que la
+  // ausencia se interpreta como "desmarcado".
+  updates.decorative_shapes_enabled = body.decorative_shapes_enabled ? "1" : "0";
 
-  replaceDefaultPriceTiers(parsePriceTiers(body));
+  updateConfig(updates);
+
+  // Price tiers: solo reemplazamos si vinieron campos tier_min Y el parse
+  // arrojó al menos un tier válido. Eso impide vaciados accidentales.
+  if ("tier_min" in body) {
+    const tiers = parsePriceTiers(body);
+    if (tiers.length > 0) {
+      replaceDefaultPriceTiers(tiers);
+    }
+  }
 
   return c.redirect("/admin/config");
 });
