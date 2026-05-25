@@ -661,9 +661,18 @@ const resolveImageInput = async (imageInput: string): Promise<string> => {
 // baratos porque los fallos son rápidos.
 const DESIGN_RETRY_DELAYS_MS = [2000, 2500];
 
+// Heurística para el mensaje de error final. Cuando el wrapper repite
+// "image_url_missing" o "Failed to extract image URL", casi siempre es
+// porque el modelo devolvió texto/código en vez de imagen (típicamente
+// cuando el prompt menciona "svg", "código", "html", etc).
+const looksLikeTextOutputError = (reason: string) =>
+  /image_url_missing|failed to extract image url|no image in response/i.test(reason);
+
 const callImageEditProvider = async (args: {
   prompt: string;
   image: string;
+  intent?: string;
+  options?: Record<string, unknown>;
   source: string;
   logTag: string;
   filePrefix: string;
@@ -675,7 +684,7 @@ const callImageEditProvider = async (args: {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
-  const body = JSON.stringify({
+  const requestBody: Record<string, unknown> = {
     model: config.model || undefined,
     prompt: args.prompt,
     image: args.image,
@@ -683,10 +692,30 @@ const callImageEditProvider = async (args: {
     image_url: args.image,
     response_format: "url",
     source: args.source,
+  };
+  if (args.intent) requestBody.intent = args.intent;
+  if (args.options) requestBody.options = args.options;
+  const body = JSON.stringify(requestBody);
+
+  // Diagnóstico que el usuario puede usar para verificar que NADA se está
+  // truncando antes de salir al proveedor.
+  const imageSizeKb = Math.round(args.image.length / 1024);
+  console.log(`[${args.logTag}] preparing`, {
+    endpoint,
+    model: config.model || "provider-default",
+    hasApiKey: Boolean(config.apiKey),
+    promptLength: args.prompt.length,
+    promptHead: args.prompt.slice(0, 120),
+    promptTail: args.prompt.length > 120 ? "…" + args.prompt.slice(-120) : "",
+    imageSizeKb,
+    imageSource: args.image.startsWith("data:image/") ? "uploaded-file" : "url",
+    totalBodyKb: Math.round(body.length / 1024),
+    intent: args.intent || null,
   });
 
   const totalAttempts = DESIGN_RETRY_DELAYS_MS.length + 1;
   let lastReason = "";
+  let lastRawPayload = "";
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
     const controller = new AbortController();
@@ -695,13 +724,7 @@ const callImageEditProvider = async (args: {
     let attemptError: Error | null = null;
 
     try {
-      console.log(`[${args.logTag}] request (attempt ${attempt}/${totalAttempts})`, {
-        endpoint,
-        model: config.model || "provider-default",
-        hasApiKey: Boolean(config.apiKey),
-        promptPreview: args.prompt.slice(0, 160),
-        imageSource: args.image.startsWith("data:image/") ? "uploaded-file" : "url",
-      });
+      console.log(`[${args.logTag}] request (attempt ${attempt}/${totalAttempts})`);
 
       const response = await fetch(endpoint, { method: "POST", headers, signal: controller.signal, body });
       const contentType = response.headers.get("content-type") || "";
@@ -715,7 +738,17 @@ const callImageEditProvider = async (args: {
         }
       } else {
         const rawPayload = await response.text();
-        console.log(`[${args.logTag}] response`, { attempt, status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
+        lastRawPayload = rawPayload;
+        console.log(`[${args.logTag}] response`, {
+          attempt,
+          status: response.status,
+          ok: response.ok,
+          contentType,
+          bodyLength: rawPayload.length,
+          // Cuando falla mostramos el body COMPLETO (hasta 1500 chars)
+          // para poder diagnosticar; en éxito solo el preview.
+          body: response.ok ? rawPayload.slice(0, 200) : rawPayload.slice(0, 1500),
+        });
 
         if (!response.ok) {
           retriable = response.status >= 500;
@@ -747,8 +780,12 @@ const callImageEditProvider = async (args: {
     lastReason = attemptError?.message || "Error desconocido";
 
     if (!retriable || attempt === totalAttempts) {
-      const exhaustedSuffix = attempt > 1 ? ` (tras ${attempt} intentos)` : "";
-      throw new Error(`El proveedor de IA falló${exhaustedSuffix}: ${lastReason}. Intenta de nuevo en unos segundos o usa otra imagen.`);
+      const exhaustedSuffix = attempt > 1 ? ` tras ${attempt} intentos` : "";
+      // Sugerencia accionable según el patrón del error
+      const hint = looksLikeTextOutputError(lastReason)
+        ? " El modelo probablemente devolvió texto/código en vez de imagen. Quita palabras como \"svg\", \"código\", \"html\" del prompt y pídele explícitamente una imagen rasterizada (PNG)."
+        : " Intenta de nuevo en unos segundos o prueba con otra imagen.";
+      throw new Error(`El proveedor de IA falló${exhaustedSuffix}: ${lastReason}.${hint}`);
     }
 
     console.log(`[${args.logTag}] retrying`, { attempt, nextDelayMs: DESIGN_RETRY_DELAYS_MS[attempt - 1], reason: lastReason });
@@ -770,6 +807,17 @@ const generateDesign = async (
   return callImageEditProvider({
     prompt: finalPrompt,
     image: resolvedImage,
+    // intent/options son sugerencias al wrapper para que sesgue al modelo
+    // hacia salida de imagen rasterizada (no texto). Replica lo que
+    // MakerWorld enhance manda, que sí funciona.
+    intent: "image-to-image-product-design",
+    options: {
+      output: "raster",
+      format: "png",
+      noText: true,
+      noCode: true,
+      preserveSubject: true,
+    },
     source: "pixkey3d-design-generate",
     logTag: "Qwen design/generate",
     filePrefix: "design",
@@ -784,6 +832,14 @@ const refineDesign = async (previousImageUrl: string, feedback: string): Promise
   return callImageEditProvider({
     prompt: cleanedFeedback,
     image: resolvedImage,
+    intent: "image-to-image-refine",
+    options: {
+      output: "raster",
+      format: "png",
+      noText: true,
+      noCode: true,
+      preserveSubject: true,
+    },
     source: "pixkey3d-design-refine",
     logTag: "Qwen design/refine",
     filePrefix: "design",
