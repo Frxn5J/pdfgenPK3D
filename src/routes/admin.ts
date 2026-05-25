@@ -167,7 +167,30 @@ const normalizeMakerWorldUrl = (rawUrl: string) => {
   return url.toString();
 };
 
-const fetchViaProxy = async (targetUrl: string): Promise<string> => {
+const isCloudflareChallenge = (html: string) => {
+  if (!html) return true;
+  return html.includes("Just a moment...")
+    || html.includes("cdn-cgi/challenge-platform")
+    || html.includes("Enable JavaScript and cookies to continue");
+};
+
+const fetchViaFlareSolverr = async (targetUrl: string): Promise<string> => {
+  const base = (process.env.FLARESOLVERR_URL || "").trim();
+  if (!base) throw new Error("FLARESOLVERR_URL no está configurada");
+  const res = await fetch(base, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cmd: "request.get", url: targetUrl, maxTimeout: 60000 }),
+  });
+  if (!res.ok) throw new Error(`FlareSolverr HTTP ${res.status}`);
+  const payload = await res.json() as { status?: string; message?: string; solution?: { response?: string } };
+  if (payload.status !== "ok" || !payload.solution?.response) {
+    throw new Error(`FlareSolverr falló: ${payload.message || "respuesta inválida"}`);
+  }
+  return payload.solution.response;
+};
+
+const fetchViaPublicProxy = async (targetUrl: string): Promise<string> => {
   const proxies = [
     (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
@@ -175,26 +198,51 @@ const fetchViaProxy = async (targetUrl: string): Promise<string> => {
   for (const makeUrl of proxies) {
     try {
       const res = await fetch(makeUrl(targetUrl), { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" } });
-      if (res.ok) return await res.text();
+      if (res.ok) {
+        const html = await res.text();
+        if (!isCloudflareChallenge(html)) return html;
+      }
     } catch { /* try next proxy */ }
   }
-  throw new Error("No se pudo descargar la página de MakerWorld. Todos los proxies fallaron.");
+  throw new Error("Los proxies públicos devolvieron el desafío de Cloudflare");
+};
+
+const fetchMakerWorldHtml = async (targetUrl: string): Promise<string> => {
+  const errors: string[] = [];
+  if ((process.env.FLARESOLVERR_URL || "").trim()) {
+    try {
+      const html = await fetchViaFlareSolverr(targetUrl);
+      if (!isCloudflareChallenge(html)) return html;
+      errors.push("FlareSolverr devolvió desafío de Cloudflare");
+    } catch (e) {
+      errors.push(`FlareSolverr: ${e instanceof Error ? e.message : "error"}`);
+    }
+  }
+  try {
+    const response = await fetch(targetUrl, { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "es-ES,es;q=0.9,en;q=0.8" } });
+    if (response.ok) {
+      const html = await response.text();
+      if (!isCloudflareChallenge(html)) return html;
+      errors.push("Fetch directo devolvió desafío de Cloudflare");
+    } else {
+      errors.push(`Fetch directo HTTP ${response.status}`);
+    }
+  } catch (e) {
+    errors.push(`Fetch directo: ${e instanceof Error ? e.message : "error"}`);
+  }
+  try {
+    return await fetchViaPublicProxy(targetUrl);
+  } catch (e) {
+    errors.push(`Proxies públicos: ${e instanceof Error ? e.message : "error"}`);
+  }
+  throw new Error(`No se pudo descargar la página de MakerWorld. ${errors.join("; ")}`);
 };
 
 const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<MakerWorldDraft> => {
   const sourceUrl = normalizeMakerWorldUrl(rawUrl);
-  let html: string;
-  if (clientHtml) {
-    html = clientHtml;
-  } else {
-    try {
-      const response = await fetch(sourceUrl, { headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "es-ES,es;q=0.9,en;q=0.8" } });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      html = await response.text();
-    } catch {
-      html = await fetchViaProxy(sourceUrl);
-    }
-  }
+  const html = clientHtml && !isCloudflareChallenge(clientHtml)
+    ? clientHtml
+    : await fetchMakerWorldHtml(sourceUrl);
   const nextRaw = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
   let design: Record<string, any> | undefined;
   if (nextRaw) {

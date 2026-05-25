@@ -11,7 +11,19 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      
+      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
+    depends_on:
+      - flaresolverr
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    restart: always
+    ports:
+      - "8191:8191"
+    environment:
+      - LOG_LEVEL=info
+      - BROWSER_TIMEOUT=40000
+      - TZ=America/Mexico_City
 
 volumes:
   catalog_data:
