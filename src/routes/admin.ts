@@ -169,9 +169,11 @@ const normalizeMakerWorldUrl = (rawUrl: string) => {
 
 const isCloudflareChallenge = (html: string) => {
   if (!html) return true;
-  return html.includes("Just a moment...")
-    || html.includes("cdn-cgi/challenge-platform")
-    || html.includes("Enable JavaScript and cookies to continue");
+  const title = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim() || "";
+  if (title === "Just a moment..." || title === "Just a moment…") return true;
+  if (/Checking if the site connection is secure/i.test(html)) return true;
+  if (html.length < 50000 && /cdn-cgi\/challenge-platform/i.test(html)) return true;
+  return false;
 };
 
 const fetchViaFlareSolverr = async (targetUrl: string): Promise<string> => {
