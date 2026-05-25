@@ -27,6 +27,8 @@ services:
       - LOG_LEVEL=debug
       - BROWSER_TIMEOUT=90000
       - TZ=America/Mexico_City
+      - HOST=0.0.0.0
+      - PORT=8191
 
 volumes:
   catalog_data:
