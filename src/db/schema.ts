@@ -274,6 +274,28 @@ export function initDb() {
   seedConfig("welcome_text", defaultWelcome);
   seedConfig("contact_text", defaultContact);
 
+  // ── Prompts de IA ─────────────────────────────────────────────────────
+  // Cada prompt vive en config para que el admin lo pueda editar sin tocar
+  // env vars. Cuando un prompt está vacío, el helper que lo consume cae al
+  // env var correspondiente y luego a un hardcoded de seguridad.
+
+  // Design creator prompt — usado por /admin/design/generate. Recibe la
+  // imagen subida por el usuario y la transforma según este template.
+  // El placeholder opcional {userPrompt} se sustituye por la descripción
+  // adicional escrita en el modal (puede estar vacía).
+  const designPromptDefault = "Transforma esta imagen en un diseño profesional listo para impresión 3D y catálogo: conserva la forma y los elementos principales del diseño original, mejora la nitidez, ajusta a fondo blanco puro, iluminación de estudio suave, sombras naturales discretas, sin texto, sin marcas de agua, sin manos, sin props ni elementos extra. {userPrompt}";
+  seedConfig("design_creator_prompt", designPromptDefault);
+  // One-shot migration: si el valor sigue siendo el primer default de
+  // text→image (cuando el flujo aún no aceptaba imagen), lo reemplazamos.
+  const previousTextOnlyDefault = "Diseña una imagen profesional de producto para una tienda de impresión 3D, basada en la siguiente descripción del cliente: {userPrompt}. Aplica las siguientes pautas: fondo blanco puro, iluminación de estudio suave, composición centrada, alta nitidez, sin texto, sin marcas de agua, sin manos ni props extra. Estilo realista, listo para catálogo.";
+  db.run(`UPDATE config SET value = ? WHERE key = 'design_creator_prompt' AND value = ?`, [designPromptDefault, previousTextOnlyDefault]);
+
+  // Catalog image prompt — usado por enhanceImageForCatalog al agregar /
+  // importar productos (MakerWorld y "Mejorar imagen" en el catálogo).
+  // Toma una imagen existente y la limpia para ficha de catálogo.
+  const catalogImagePromptDefault = "Transforma esta imagen en una fotografía profesional para catálogo ecommerce: producto centrado y completo, fondo blanco puro, iluminación de estudio suave, sombras naturales discretas, alta nitidez, colores fieles al producto, sin texto, sin marcas de agua, sin manos, sin props y sin elementos extra. Conserva la forma y detalles reales del objeto. Resultado limpio, realista y listo para catálogo.";
+  seedConfig("catalog_image_prompt", catalogImagePromptDefault);
+
   // Styling defaults
   seedConfig("color_primary", "#ef4444");
   seedConfig("color_secondary", "#1f2937");
@@ -307,6 +329,27 @@ export function initDb() {
   seedConfig("decorative_shape_opacity", "0.45");
   seedConfig("decorative_shape_blur", "0px");
   seedConfig("custom_css", "");
+
+  // ── Settings que históricamente vivían en .env ────────────────────────
+  // Se siembran vacías. Los helpers leen DB primero y caen al .env como
+  // fallback, así un cambio guardado desde /admin/config se aplica al
+  // instante sin reiniciar el container.
+  seedConfig("llm_base_url", "");
+  seedConfig("llm_api_key", "");
+  seedConfig("llm_model", "");
+  seedConfig("llm_fallback_models", "");
+  seedConfig("llm_temperature", "");
+  seedConfig("llm_description_max_words", "");
+  seedConfig("image_base_url", "");
+  seedConfig("image_endpoint", "");
+  seedConfig("image_route", "");
+  seedConfig("image_api_key", "");
+  seedConfig("image_model", "");
+  seedConfig("image_fallback_models", "");
+  seedConfig("image_timeout_ms", "");
+  seedConfig("flaresolverr_url", "");
+  seedConfig("admin_username", "");
+  seedConfig("admin_password", "");
 
   // Existing databases created before theme customization kept this old default.
   db.run(`
