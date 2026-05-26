@@ -411,24 +411,76 @@ type AdaptedDescriptionResult = {
   category: CategorySuggestion;
 };
 
-// Limpia un JSON que el LLM puede haber envuelto en cercas markdown.
-const stripJsonFences = (raw: string): string => {
-  const trimmed = raw.trim();
-  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  if (fenceMatch && fenceMatch[1]) return fenceMatch[1].trim();
-  return trimmed;
+// Encuentra el primer objeto JSON BALANCEADO dentro de un texto. Útil cuando
+// el modelo agrega prefijo ("Aquí está el resultado:") o sufijo ("Listo!")
+// alrededor del JSON. Respeta strings y escapes para no contar { o } que
+// estén DENTRO de un valor string.
+const findBalancedJsonObject = (raw: string): string | null => {
+  const start = raw.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
+  }
+  return null;
+};
+
+// Intenta extraer un JSON parseable del raw del LLM, pasando por varios
+// niveles de tolerancia: directo → cercas markdown → primer {} balanceado.
+// Devuelve el objeto parseado, o null si nada funcionó.
+const tryExtractJsonObject = (raw: string): any | null => {
+  // 1) Strip BOM (U+FEFF) y zero-width chars (U+200B..U+200D, U+2060) que
+  //    rompen JSON.parse. Algunos providers los inyectan al principio.
+  const ZERO_WIDTH = /[﻿​‌‍⁠]/g;
+  raw = raw.replace(ZERO_WIDTH, "");
+  const cleaned = raw.trim();
+  if (!cleaned) return null;
+
+  // 2) Parse directo.
+  try { return JSON.parse(cleaned); } catch {}
+
+  // 3) Strip de cercas markdown ```json ... ``` (anchored, antes el regex
+  //    requería que la cerca abarque TODO el string; ahora aceptamos cerca
+  //    parcial en cualquier posición).
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch && fenceMatch[1]) {
+    try { return JSON.parse(fenceMatch[1].trim()); } catch {}
+  }
+
+  // 4) Primer objeto balanceado.
+  const candidate = findBalancedJsonObject(cleaned);
+  if (candidate) {
+    try { return JSON.parse(candidate); } catch {}
+  }
+
+  return null;
 };
 
 // Intenta parsear un JSON con la forma esperada. Tolera respuestas malformadas:
 // si no se puede parsear, devuelve {description: raw, category: null} para que
 // la UI por lo menos rellene la descripción.
 const parseAdaptedJson = (raw: string, categories: Category[]): AdaptedDescriptionResult => {
-  const cleaned = stripJsonFences(raw);
-  let parsed: any;
-  try { parsed = JSON.parse(cleaned); }
-  catch { return { description: raw.trim(), category: null }; }
-  if (!parsed || typeof parsed !== "object") return { description: raw.trim(), category: null };
+  const parsed = tryExtractJsonObject(raw);
+  if (!parsed || typeof parsed !== "object") {
+    console.warn("[LLM description/adapt] No se pudo extraer JSON del raw. Cae al fallback (raw como descripción).", { rawPreview: raw.slice(0, 300) });
+    return { description: raw.trim(), category: null };
+  }
   const desc = typeof parsed.description === "string" ? parsed.description.trim() : "";
+  if (!desc) {
+    console.warn("[LLM description/adapt] JSON parseado pero sin 'description' string. Cae al fallback.", { parsedKeys: Object.keys(parsed), rawPreview: raw.slice(0, 300) });
+    return { description: raw.trim(), category: null };
+  }
   const catRaw = parsed.category;
   let category: CategorySuggestion = null;
   if (catRaw && typeof catRaw === "object") {
@@ -438,6 +490,7 @@ const parseAdaptedJson = (raw: string, categories: Category[]): AdaptedDescripti
       if (Number.isFinite(id)) {
         const found = categories.find((c) => c.id === id);
         if (found) category = { match: "existing", id: found.id, name: found.name };
+        else console.warn("[LLM description/adapt] match=existing pero id no existe en la DB; sugerencia descartada", { id, availableIds: categories.map((c) => c.id) });
       }
     } else if (match === "new") {
       const name = typeof catRaw.name === "string" ? catRaw.name.trim() : "";
@@ -451,7 +504,7 @@ const parseAdaptedJson = (raw: string, categories: Category[]): AdaptedDescripti
       }
     }
   }
-  return { description: desc || raw.trim(), category };
+  return { description: desc, category };
 };
 
 const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "", categories: Category[] = []): Promise<AdaptedDescriptionResult> => {
