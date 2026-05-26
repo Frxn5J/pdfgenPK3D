@@ -31,6 +31,14 @@ export function initDb() {
   `);
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -38,7 +46,8 @@ export function initDb() {
       image_url TEXT,
       makerworld_url TEXT,
       use_default_pricing BOOLEAN DEFAULT 1,
-      sort_order INTEGER DEFAULT 0
+      sort_order INTEGER DEFAULT 0,
+      category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL
     )
   `);
 
@@ -46,6 +55,11 @@ export function initDb() {
     db.run(`ALTER TABLE products ADD COLUMN makerworld_url TEXT`);
   } catch {
     // Column already exists in databases initialized with the current schema.
+  }
+  try {
+    db.run(`ALTER TABLE products ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL`);
+  } catch {
+    // Column already exists.
   }
 
   db.run(`
@@ -408,6 +422,12 @@ export function replaceDefaultPriceTiers(tiers: Omit<PriceTier, "id">[]) {
   transaction(tiers);
 }
 
+export interface Category {
+  id: number;
+  name: string;
+  sort_order: number;
+}
+
 export interface Product {
   id: number;
   name: string;
@@ -419,6 +439,36 @@ export interface Product {
   extra_costs: number;
   use_default_pricing: boolean;
   sort_order: number;
+  category_id: number | null;
+}
+
+// ── Categorías ──────────────────────────────────────────────────────────
+export function getCategories(): Category[] {
+  return db.query<Category, []>(`SELECT * FROM categories ORDER BY sort_order ASC, name ASC`).all();
+}
+
+export function getCategory(id: number): Category | null {
+  return db.query<Category, [number]>(`SELECT * FROM categories WHERE id = ?`).get(id) || null;
+}
+
+export function createCategory(name: string, sortOrder?: number): Category {
+  const order = Number.isFinite(sortOrder) ? sortOrder! : (db.query<{ m: number }, []>(`SELECT COALESCE(MAX(sort_order), 0) as m FROM categories`).get()?.m || 0) + 10;
+  const row = db.query<{ id: number }, [string, number]>(`INSERT INTO categories (name, sort_order) VALUES (?, ?) RETURNING id`).get(name, order);
+  return { id: row!.id, name, sort_order: order };
+}
+
+export function updateCategory(id: number, name: string, sortOrder: number) {
+  db.run(`UPDATE categories SET name = ?, sort_order = ? WHERE id = ?`, [name, sortOrder, id]);
+}
+
+export function deleteCategory(id: number) {
+  // SQLite no tiene PRAGMA foreign_keys=ON, así que el FK ON DELETE SET NULL
+  // no es enforced. Nulificamos a mano los productos con esta categoría
+  // y luego borramos la fila — todo en una sola transacción.
+  db.transaction(() => {
+    db.run(`UPDATE products SET category_id = NULL WHERE category_id = ?`, [id]);
+    db.run(`DELETE FROM categories WHERE id = ?`, [id]);
+  })();
 }
 
 export function getProducts() {
@@ -427,6 +477,31 @@ export function getProducts() {
 
 export function getProduct(id: number) {
   return db.query<Product, [number]>(`SELECT * FROM products WHERE id = ?`).get(id);
+}
+
+// Agrupa productos por categoría respetando sort_order de categorías.
+// Productos sin categoría caen en un grupo final {category: null}. Si no hay
+// ninguna categoría definida ni asignada, devuelve un solo grupo con todos
+// los productos para mantener el render plano del catálogo.
+export type ProductGroup = { category: Category | null; products: Product[] };
+export function getProductsGroupedByCategory(): ProductGroup[] {
+  const categories = getCategories();
+  const products = getProducts();
+  if (categories.length === 0) return [{ category: null, products }];
+  const byId = new Map<number, Product[]>();
+  const orphans: Product[] = [];
+  for (const product of products) {
+    if (product.category_id == null) { orphans.push(product); continue; }
+    const list = byId.get(product.category_id) || [];
+    list.push(product);
+    byId.set(product.category_id, list);
+  }
+  const groups: ProductGroup[] = [];
+  for (const category of categories) {
+    groups.push({ category, products: byId.get(category.id) || [] });
+  }
+  if (orphans.length > 0) groups.push({ category: null, products: orphans });
+  return groups;
 }
 
 export function getProductPriceTiers(productId: number) {

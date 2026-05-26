@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 
@@ -397,7 +397,64 @@ const unwrapProviderError = (rawPayload: string): string => {
   return text.slice(0, 240);
 };
 
-const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "") => {
+// Sugerencia de categoría que el LLM puede devolver junto con la descripción.
+// "existing" → ID de una categoría ya creada en la DB. "new" → nombre nuevo,
+// la UI puede confirmar y crearla. null cuando el modelo no devolvió nada
+// parseable (la UI no muestra sugerencia en ese caso).
+type CategorySuggestion =
+  | { match: "existing"; id: number; name: string }
+  | { match: "new"; name: string }
+  | null;
+
+type AdaptedDescriptionResult = {
+  description: string;
+  category: CategorySuggestion;
+};
+
+// Limpia un JSON que el LLM puede haber envuelto en cercas markdown.
+const stripJsonFences = (raw: string): string => {
+  const trimmed = raw.trim();
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenceMatch && fenceMatch[1]) return fenceMatch[1].trim();
+  return trimmed;
+};
+
+// Intenta parsear un JSON con la forma esperada. Tolera respuestas malformadas:
+// si no se puede parsear, devuelve {description: raw, category: null} para que
+// la UI por lo menos rellene la descripción.
+const parseAdaptedJson = (raw: string, categories: Category[]): AdaptedDescriptionResult => {
+  const cleaned = stripJsonFences(raw);
+  let parsed: any;
+  try { parsed = JSON.parse(cleaned); }
+  catch { return { description: raw.trim(), category: null }; }
+  if (!parsed || typeof parsed !== "object") return { description: raw.trim(), category: null };
+  const desc = typeof parsed.description === "string" ? parsed.description.trim() : "";
+  const catRaw = parsed.category;
+  let category: CategorySuggestion = null;
+  if (catRaw && typeof catRaw === "object") {
+    const match = catRaw.match;
+    if (match === "existing") {
+      const id = Number.parseInt(String(catRaw.id), 10);
+      if (Number.isFinite(id)) {
+        const found = categories.find((c) => c.id === id);
+        if (found) category = { match: "existing", id: found.id, name: found.name };
+      }
+    } else if (match === "new") {
+      const name = typeof catRaw.name === "string" ? catRaw.name.trim() : "";
+      if (name) {
+        // Si el "name" coincide (case-insensitive) con una existente, lo tratamos
+        // como existing — el modelo a veces ignora la lista y propone el mismo
+        // nombre como "new".
+        const existing = categories.find((c) => c.name.trim().toLowerCase() === name.toLowerCase());
+        if (existing) category = { match: "existing", id: existing.id, name: existing.name };
+        else category = { match: "new", name };
+      }
+    }
+  }
+  return { description: desc || raw.trim(), category };
+};
+
+const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "", categories: Category[] = []): Promise<AdaptedDescriptionResult> => {
   const config = llmConfig();
   if (!config.apiKey) throw new Error("LLM_API_KEY no está configurada en el entorno.");
   if (!description.trim()) throw new Error("Primero necesitas una descripción base para adaptarla.");
@@ -414,9 +471,17 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
     imageSource: imageUrl.startsWith("data:image/") ? "uploaded-file" : hasImage ? "url" : "none",
     nameLength: name.length,
     descriptionLength: description.length,
+    availableCategories: categories.length,
   });
 
-  const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}\n\nReescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Máximo ${config.maxWords} palabras. Usa un solo párrafo corto, comercial y descriptivo. Invita a comprar sin sonar exagerado. Mantente fiel a la información original. ${hasImage ? "Usa la imagen solo para complementar detalles visuales evidentes, como forma, estilo o apariencia; no inventes medidas, materiales ni funciones que no se puedan confirmar." : ""} Devuelve solo el texto final.`;
+  // Contrato JSON: el modelo debe devolver descripción + sugerencia de categoría.
+  // Cuando hay categorías disponibles las inyectamos en el prompt; cuando no,
+  // el modelo siempre debe proponer una nueva.
+  const categoryList = categories.length > 0
+    ? `\n\nCategorías disponibles:\n${categories.map((c) => `- id=${c.id} → ${c.name}`).join("\n")}`
+    : "\n\nNo hay categorías creadas todavía.";
+
+  const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}${categoryList}\n\nTareas:\n1) Reescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Máximo ${config.maxWords} palabras. Un solo párrafo corto, comercial, descriptivo, que invite a comprar sin exagerar. Mantente fiel a la información original.\n2) Asigna una categoría:\n   - Si el producto encaja claramente en alguna de las categorías disponibles, devuelve {"match":"existing","id":<id>}.\n   - Si NO encaja en ninguna existente (o si no hay ninguna), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado), devuelve {"match":"new","name":"<nombre>"}.\n   - Prefiere reutilizar una existente antes que crear una nueva si dudas.\n${hasImage ? "3) Si la imagen aporta información clara sobre forma, estilo o apariencia, úsala como contexto adicional, sin inventar medidas/materiales/funciones." : ""}\n\nDevuelve SOLO un objeto JSON válido con esta forma exacta, sin texto extra ni cercas de markdown:\n{"description":"...","category":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"}}`;
 
   const attempts: { model: string; error: string }[] = [];
 
@@ -431,10 +496,11 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
         body: JSON.stringify({
           model,
           temperature: Number.isFinite(config.temperature) ? config.temperature : 0.7,
+          response_format: { type: "json_object" },
           messages: [
             {
               role: "system",
-              content: "Eres un copywriter experto en catálogos de productos de impresión 3D. Escribes en español claro, comercial y profesional. Tu trabajo es convertir descripciones técnicas o informales en microdescripciones de catálogo atractivas y orientadas a venta. No inventes materiales, medidas, licencias, compatibilidades ni usos no presentes en el texto original. No uses markdown.",
+              content: "Eres un copywriter y clasificador experto en catálogos de productos de impresión 3D. Escribes en español claro, comercial y profesional. No inventes materiales, medidas, licencias, compatibilidades ni usos no presentes en el texto original. Devuelves SIEMPRE JSON válido siguiendo el esquema indicado.",
             },
             {
               role: "user",
@@ -470,7 +536,11 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
       if (attempts.length > 0) {
         console.log(`[LLM description/adapt] modelo "${model}" tuvo éxito tras ${attempts.length} fallback(s)`);
       }
-      return trimToWordLimit(content, config.maxWords);
+      const parsed = parseAdaptedJson(content, categories);
+      return {
+        description: trimToWordLimit(parsed.description, config.maxWords),
+        category: parsed.category,
+      };
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
       attempts.push({ model, error: errMsg });
@@ -1120,6 +1190,53 @@ const descriptionAiScript = `
         preview?.classList.remove('hidden');
       };
 
+      // Aplica la sugerencia de categoría al <select name="category_id"> del
+      // form. Si el modelo propuso una EXISTENTE, la selecciona. Si propuso
+      // una NUEVA, pregunta al usuario antes de crearla via quick-create.
+      const applyCategorySuggestion = async (form, suggestion, status) => {
+        if (!suggestion || !form) return '';
+        const select = form.querySelector('select[name="category_id"]');
+        if (!(select instanceof HTMLSelectElement)) return ''; // El form puede no tener dropdown (ej. MakerWorld import legacy).
+
+        if (suggestion.match === 'existing') {
+          const id = String(suggestion.id);
+          const option = Array.from(select.options).find((o) => o.value === id);
+          if (option) {
+            select.value = id;
+            return ' Categoría asignada: ' + option.textContent + '.';
+          }
+          return ' (No se encontró la categoría sugerida id=' + id + ' en el dropdown.)';
+        }
+
+        if (suggestion.match === 'new') {
+          const accept = window.confirm('La IA sugiere crear una nueva categoría: "' + suggestion.name + '".\\n\\n¿Quieres crearla y asignarla a este producto?');
+          if (!accept) return ' Sugerencia de nueva categoría "' + suggestion.name + '" descartada.';
+          if (status) status.textContent = 'Creando categoría "' + suggestion.name + '"...';
+          try {
+            const res = await fetch('/admin/categorias/quick-create', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ name: suggestion.name }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.category) throw new Error(data.error || 'No se pudo crear la categoría.');
+            const cat = data.category;
+            let option = Array.from(select.options).find((o) => o.value === String(cat.id));
+            if (!option) {
+              option = new Option(cat.name, String(cat.id));
+              select.appendChild(option);
+            }
+            select.value = String(cat.id);
+            return data.created
+              ? ' Nueva categoría "' + cat.name + '" creada y asignada.'
+              : ' Reutilizada categoría existente "' + cat.name + '".';
+          } catch (e) {
+            return ' No se pudo crear la categoría: ' + (e instanceof Error ? e.message : String(e));
+          }
+        }
+        return '';
+      };
+
       document.addEventListener('click', async (event) => {
         const button = event.target instanceof HTMLElement ? event.target.closest('[data-ai-description]') : null;
         if (!(button instanceof HTMLButtonElement)) return;
@@ -1131,7 +1248,7 @@ const descriptionAiScript = `
         const previousText = button.textContent;
         button.disabled = true;
         button.textContent = 'Adaptando...';
-        if (status) status.textContent = 'Generando texto de catálogo con IA...';
+        if (status) status.textContent = 'Generando texto de catálogo y categoría con IA...';
         try {
           const response = await fetch('/admin/description/adapt', {
             method: 'POST',
@@ -1145,7 +1262,8 @@ const descriptionAiScript = `
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || 'No se pudo adaptar la descripción.');
           description.value = payload.description || description.value;
-          if (status) status.textContent = 'Descripción adaptada. Revisa el texto antes de guardar.';
+          const catNote = await applyCategorySuggestion(form, payload.category, status);
+          if (status) status.textContent = 'Descripción adaptada. Revisa el texto antes de guardar.' + catNote;
         } catch (error) {
           if (status) status.textContent = error instanceof Error ? error.message : 'No se pudo adaptar la descripción.';
         } finally {
@@ -1301,6 +1419,7 @@ const AdminLayout = (title: string, content: string) => {
                         </button>
                         <div class="nav-dropdown-menu">
                             <a href="/admin/products">Productos</a>
+                            <a href="/admin/categorias">Categorías</a>
                             <a href="/admin/makerworld">Importar MakerWorld</a>
                             <div class="menu-divider"></div>
                             <a href="/" target="_blank">Ver Catálogo ↗</a>
@@ -1605,8 +1724,14 @@ adminRoutes.get("/zona-extendida/:cp", async (c) => {
 adminRoutes.post("/description/adapt", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-    const description = await adaptDescriptionForCatalog(formString(body.name), formString(body.description), formString(body.imageUrl));
-    return c.json({ description });
+    const categories = getCategories();
+    const result = await adaptDescriptionForCatalog(
+      formString(body.name),
+      formString(body.description),
+      formString(body.imageUrl),
+      categories,
+    );
+    return c.json(result);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "No se pudo adaptar la descripción." }, 400);
   }
@@ -2513,16 +2638,179 @@ adminRoutes.post("/config", async (c) => {
   return c.redirect("/admin/config");
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// CRUD de Categorías de Productos
+// ═══════════════════════════════════════════════════════════════════════
+
+adminRoutes.get("/categorias", (c) => {
+  const categories = getCategories();
+  const productCounts = db.query<{ category_id: number | null; count: number }, []>(
+    `SELECT category_id, COUNT(*) as count FROM products GROUP BY category_id`
+  ).all();
+  const countByCat = new Map<number | null, number>();
+  for (const row of productCounts) countByCat.set(row.category_id, row.count);
+  const orphanCount = countByCat.get(null) || 0;
+
+  return c.html(AdminLayout("Categorías", `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between border-b pb-4">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-800">Categorías de Productos</h1>
+          <p class="text-sm text-gray-500">Agrupan productos en el catálogo público y en el PDF. Los productos sin categoría aparecen al final como "Sin categoría".</p>
+        </div>
+        <a href="/admin/products" class="text-sm text-blue-600 hover:underline">← Volver a productos</a>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-6 space-y-6">
+        <form action="/admin/categorias" method="post" class="bg-gray-50 border rounded-lg p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+          <div class="sm:col-span-2">
+            <label class="block text-xs font-bold text-gray-700">Nombre *</label>
+            <input type="text" name="name" required placeholder="Ej: Llaveros, Figuras, Hogar" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-700">Orden</label>
+            <input type="number" name="sort_order" step="1" placeholder="auto" class="mt-1 block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+          </div>
+          <div class="sm:col-span-3 flex justify-end">
+            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-2 rounded shadow-sm">
+              + Crear Categoría
+            </button>
+          </div>
+        </form>
+        <p class="text-[11px] text-gray-400">Orden vacío = se asigna automáticamente al final. Cambia el número y guarda para reordenar.</p>
+
+        <div class="overflow-x-auto border rounded-lg">
+          <table class="min-w-full divide-y divide-gray-200 text-sm">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="px-3 py-2 text-left font-semibold text-gray-500 w-20">Orden</th>
+                <th class="px-3 py-2 text-left font-semibold text-gray-500">Nombre</th>
+                <th class="px-3 py-2 text-left font-semibold text-gray-500 w-32">Productos</th>
+                <th class="px-3 py-2 text-right font-semibold text-gray-500 w-40">Acciones</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200">
+              ${categories.map((cat) => {
+                const productCount = countByCat.get(cat.id) || 0;
+                return `
+                <tr>
+                  <td class="px-3 py-2">
+                    <form action="/admin/categorias/${cat.id}/edit" method="post" class="contents">
+                      <input type="number" name="sort_order" value="${cat.sort_order}" step="1" class="w-16 px-2 py-1 border border-gray-300 rounded text-xs">
+                  </td>
+                  <td class="px-3 py-2">
+                      <input type="text" name="name" value="${escapeHtml(cat.name)}" required class="block w-full px-2 py-1 border border-gray-300 rounded text-sm">
+                  </td>
+                  <td class="px-3 py-2 text-xs text-gray-600">
+                      <a href="/admin/products?category=${cat.id}" class="text-blue-600 hover:underline">${productCount} producto${productCount === 1 ? '' : 's'}</a>
+                  </td>
+                  <td class="px-3 py-2 text-right space-x-2">
+                      <button type="submit" class="text-blue-600 hover:underline text-xs font-semibold">Guardar</button>
+                    </form>
+                    <form action="/admin/categorias/${cat.id}/delete" method="post" onsubmit="return confirm('¿Eliminar la categoría &quot;${escapeHtml(cat.name).replace(/'/g, "\\'")}&quot;? Los ${productCount} producto${productCount === 1 ? '' : 's'} de esta categoría quedarán sin categoría.');" class="inline">
+                      <button type="submit" class="text-red-600 hover:underline text-xs font-semibold">Eliminar</button>
+                    </form>
+                  </td>
+                </tr>
+              `;}).join("")}
+              ${categories.length === 0 ? '<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">No hay categorías todavía. Crea la primera arriba.</td></tr>' : ""}
+              ${orphanCount > 0 ? `<tr class="bg-amber-50"><td class="px-3 py-2 text-amber-700 text-xs">—</td><td class="px-3 py-2 text-amber-800 italic">Sin categoría</td><td class="px-3 py-2 text-xs text-amber-700"><a href="/admin/products?category=none" class="hover:underline">${orphanCount} producto${orphanCount === 1 ? '' : 's'}</a></td><td class="px-3 py-2 text-right text-[11px] text-amber-700">Asigna una categoría desde cada producto</td></tr>` : ""}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `));
+});
+
+adminRoutes.post("/categorias", async (c) => {
+  const body = await c.req.parseBody();
+  const name = formString(body.name).trim();
+  if (!name) return c.text("El nombre es obligatorio.", 400);
+  const rawOrder = formString(body.sort_order).trim();
+  const sortOrder = rawOrder === "" ? undefined : Number.parseInt(rawOrder, 10);
+  createCategory(name, Number.isFinite(sortOrder) ? sortOrder : undefined);
+  return c.redirect("/admin/categorias");
+});
+
+adminRoutes.post("/categorias/:id/edit", async (c) => {
+  const id = Number.parseInt(c.req.param("id"), 10);
+  if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
+  const body = await c.req.parseBody();
+  const name = formString(body.name).trim();
+  if (!name) return c.text("El nombre es obligatorio.", 400);
+  const sortOrder = Number.parseInt(formString(body.sort_order) || "0", 10) || 0;
+  updateCategory(id, name, sortOrder);
+  return c.redirect("/admin/categorias");
+});
+
+adminRoutes.post("/categorias/:id/delete", (c) => {
+  const id = Number.parseInt(c.req.param("id"), 10);
+  if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
+  deleteCategory(id);
+  return c.redirect("/admin/categorias");
+});
+
+// Crea una categoría desde JS (botón "Adaptar a IA" que acepta una sugerencia
+// del modelo). Devuelve la categoría completa para que el frontend pueda
+// inyectarla al <select> y seleccionarla sin recargar.
+adminRoutes.post("/categorias/quick-create", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const name = formString(body.name).trim();
+    if (!name) return c.json({ error: "El nombre es obligatorio." }, 400);
+    // Si ya existe una con ese nombre (case-insensitive) la reusamos en lugar
+    // de duplicar. El frontend la trata igual.
+    const existing = getCategories().find((c) => c.name.trim().toLowerCase() === name.toLowerCase());
+    if (existing) return c.json({ category: existing, created: false });
+    const created = createCategory(name);
+    return c.json({ category: created, created: true });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo crear la categoría." }, 400);
+  }
+});
+
 adminRoutes.get("/products", (c) => {
-  const products = getProducts();
+  const allProducts = getProducts();
+  const categories = getCategories();
+  const categoryById = new Map<number, Category>();
+  for (const cat of categories) categoryById.set(cat.id, cat);
+
+  // ?category=<id> filtra por categoría, ?category=none filtra los sin categoría.
+  const filter = (c.req.query("category") || "").trim();
+  const filteredProducts = !filter
+    ? allProducts
+    : filter === "none"
+      ? allProducts.filter((p) => p.category_id == null)
+      : allProducts.filter((p) => String(p.category_id) === filter);
+
+  const filterLabel = (() => {
+    if (!filter) return "Todas";
+    if (filter === "none") return "Sin categoría";
+    return categoryById.get(Number.parseInt(filter, 10))?.name || filter;
+  })();
 
   return c.html(AdminLayout("Productos", `
     <div class="bg-white shadow rounded-lg overflow-hidden">
-        <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-            <h2 class="text-xl font-bold text-gray-800">Catálogo de Productos</h2>
-            <a href="/admin/products/new" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 text-sm font-medium">
-                + Nuevo Producto
-            </a>
+        <div class="px-6 py-4 border-b border-gray-200 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
+            <div>
+                <h2 class="text-xl font-bold text-gray-800">Catálogo de Productos</h2>
+                <p class="text-xs text-gray-500 mt-0.5">Mostrando <strong>${filterLabel}</strong> — ${filteredProducts.length} de ${allProducts.length} producto${allProducts.length === 1 ? '' : 's'}.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <form method="get" action="/admin/products" class="inline-flex items-center gap-2">
+                    <label class="text-xs font-medium text-gray-600">Categoría:</label>
+                    <select name="category" onchange="this.form.submit()" class="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+                        <option value="" ${filter === "" ? 'selected' : ''}>Todas</option>
+                        <option value="none" ${filter === "none" ? 'selected' : ''}>Sin categoría</option>
+                        ${categories.map((cat) => `<option value="${cat.id}" ${filter === String(cat.id) ? 'selected' : ''}>${escapeHtml(cat.name)}</option>`).join("")}
+                    </select>
+                </form>
+                <a href="/admin/categorias" class="text-xs text-blue-600 hover:underline">Gestionar categorías ↗</a>
+                <a href="/admin/products/new" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 text-sm font-medium">
+                    + Nuevo Producto
+                </a>
+            </div>
         </div>
 
         <table class="min-w-full divide-y divide-gray-200">
@@ -2530,12 +2818,18 @@ adminRoutes.get("/products", (c) => {
                 <tr>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Imagen</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nombre</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Categoría</th>
                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Precios</th>
                     <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th>
                 </tr>
             </thead>
             <tbody class="bg-white divide-y divide-gray-200">
-                ${products.map(p => `
+                ${filteredProducts.map(p => {
+                  const cat = p.category_id != null ? categoryById.get(p.category_id) : null;
+                  const catCell = cat
+                    ? `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-700">${escapeHtml(cat.name)}</span>`
+                    : `<span class="text-xs italic text-amber-700">Sin categoría</span>`;
+                  return `
                 <tr>
                     <td class="px-6 py-4 whitespace-nowrap">
                         ${p.image_url
@@ -2546,6 +2840,7 @@ adminRoutes.get("/products", (c) => {
                     <td class="px-6 py-4 whitespace-nowrap">
                         <div class="text-sm font-medium text-gray-900">${escapeHtml(p.name)}</div>
                     </td>
+                    <td class="px-6 py-4 whitespace-nowrap">${catCell}</td>
                     <td class="px-6 py-4 whitespace-nowrap">
                         <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${p.use_default_pricing ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}">
                             ${p.use_default_pricing ? 'Globales' : 'Personalizados'}
@@ -2558,8 +2853,8 @@ adminRoutes.get("/products", (c) => {
                         </form>
                     </td>
                 </tr>
-                `).join('')}
-                ${products.length === 0 ? '<tr><td colspan="4" class="px-6 py-10 text-center text-gray-500">No hay productos. Crea uno nuevo.</td></tr>' : ''}
+                `;}).join('')}
+                ${filteredProducts.length === 0 ? `<tr><td colspan="5" class="px-6 py-10 text-center text-gray-500">${allProducts.length === 0 ? 'No hay productos. Crea uno nuevo.' : `No hay productos en "${filterLabel}".`}</td></tr>` : ''}
             </tbody>
         </table>
     </div>
@@ -2568,13 +2863,24 @@ adminRoutes.get("/products", (c) => {
 
 adminRoutes.get("/products/new", (c) => {
   const defaultTiers = getDefaultPriceTiers();
+  const categories = getCategories();
   return c.html(AdminLayout("Nuevo Producto", `
     <div class="bg-white shadow rounded-lg p-6">
         <h2 class="text-xl font-bold mb-6">Agregar Nuevo Producto</h2>
         <form action="/admin/products/new" method="post" enctype="multipart/form-data" class="space-y-6">
-            <div>
-                <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
-                <input type="text" name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
+                    <input type="text" name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Categoría</label>
+                    <select name="category_id" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                        <option value="">— Sin categoría —</option>
+                        ${categories.map((cat) => `<option value="${cat.id}">${escapeHtml(cat.name)}</option>`).join("")}
+                    </select>
+                    <p class="text-xs text-gray-500 mt-1">¿Falta una? <a href="/admin/categorias" target="_blank" class="text-blue-600 underline">Crear categoría</a></p>
+                </div>
             </div>
 
             <div>
@@ -2651,11 +2957,13 @@ adminRoutes.post("/products/new", async (c) => {
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
   const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
+  const rawCategory = formString(body.category_id);
+  const categoryId = rawCategory && rawCategory !== "" ? (Number.parseInt(rawCategory, 10) || null) : null;
 
   const result = db.query(`
-    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) RETURNING id
-  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing) as {id: number};
+    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order, category_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?) RETURNING id
+  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId) as {id: number};
 
   if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
 
@@ -2675,14 +2983,25 @@ adminRoutes.get("/products/:id/edit", (c) => {
   if (!product) return c.notFound();
   const productTiers = getProductPriceTiers(id);
   const tiers = productTiers.length ? productTiers : getDefaultPriceTiers();
+  const categories = getCategories();
 
   return c.html(AdminLayout("Editar Producto", `
     <div class="bg-white shadow rounded-lg p-6">
         <h2 class="text-xl font-bold mb-6">Editar Producto: ${escapeHtml(product.name)}</h2>
         <form action="/admin/products/${id}/edit" method="post" enctype="multipart/form-data" class="space-y-6">
-            <div>
-                <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
-                <input type="text" name="name" value="${escapeHtml(product.name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
+                    <input type="text" name="name" value="${escapeHtml(product.name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Categoría</label>
+                    <select name="category_id" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                        <option value="" ${product.category_id == null ? 'selected' : ''}>— Sin categoría —</option>
+                        ${categories.map((cat) => `<option value="${cat.id}" ${product.category_id === cat.id ? 'selected' : ''}>${escapeHtml(cat.name)}</option>`).join("")}
+                    </select>
+                    <p class="text-xs text-gray-500 mt-1">¿Falta una? <a href="/admin/categorias" target="_blank" class="text-blue-600 underline">Crear categoría</a></p>
+                </div>
             </div>
 
             <div>
@@ -2761,10 +3080,12 @@ adminRoutes.post("/products/:id/edit", async (c) => {
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
   const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
+  const rawCategory = formString(body.category_id);
+  const categoryId = rawCategory && rawCategory !== "" ? (Number.parseInt(rawCategory, 10) || null) : null;
 
   db.run(`
-    UPDATE products SET name = ?, description = ?, image_url = ?, makerworld_url = ?, filament_grams = ?, print_time_mins = ?, extra_costs = ?, use_default_pricing = ? WHERE id = ?
-  `, [formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, id]);
+    UPDATE products SET name = ?, description = ?, image_url = ?, makerworld_url = ?, filament_grams = ?, print_time_mins = ?, extra_costs = ?, use_default_pricing = ?, category_id = ? WHERE id = ?
+  `, [formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, id]);
 
   replaceProductPriceTiers(id, useDefaultPricing ? [] : parsePriceTiers(body));
 

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage } from "../db/schema";
+import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, type Category, type Product } from "../db/schema";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -203,6 +203,10 @@ const buildThemeCss = (config: Record<string, string>) => {
     .pricing-note { color: var(--muted-text); font-size: .92rem; margin-top: 1rem; }
 
     .products-section { background: var(--products-bg); }
+    .products-group { margin-top: 2.5rem; }
+    .products-group:first-of-type { margin-top: 0; }
+    .category-title { color: var(--heading-text); font-size: 1.6rem; margin: 0 0 1.5rem; padding-bottom: .55rem; border-bottom: 2px solid var(--brand-primary); display: inline-block; }
+    .category-title-orphan { color: var(--muted-text); border-bottom-color: var(--card-border); }
     .products-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--product-gap); }
     .theme-card { background: var(--card-bg); border: 1px solid transparent; border-radius: var(--radius); box-shadow: var(--card-shadow); overflow: hidden; transition: transform .2s ease, box-shadow .2s ease; }
     .theme-card:hover { transform: translateY(-3px); }
@@ -286,6 +290,8 @@ const buildThemeCss = (config: Record<string, string>) => {
       .page-section { min-height: 100vh; box-shadow: none !important; }
       .theme-card, .pricing-table-wrap, .product-table-wrap { box-shadow: none !important; }
       .theme-shapes { opacity: .18; }
+      .products-group-page-break { break-before: page; page-break-before: always; }
+      .category-title { break-after: avoid; page-break-after: avoid; }
     }
 
     ${customCss(config.custom_css)}
@@ -323,11 +329,40 @@ const getCatalogData = () => {
   const config = getConfig();
   const defaultPriceTiers = getDefaultPriceTiers();
   const products = getProducts();
+  const categories = getCategories();
   const productsWithTiers = products.map((product) => ({
     product,
     priceTiers: product.use_default_pricing ? defaultPriceTiers : getProductPriceTiers(product.id),
   }));
-  return { config, defaultPriceTiers, productsWithTiers };
+  return { config, defaultPriceTiers, productsWithTiers, categories };
+};
+
+// Agrupa productos por categoría (orden por sort_order). Productos sin
+// categoría caen en un grupo final con label "Sin categoría". Si no hay
+// categorías definidas, devuelve un único grupo plano sin label.
+type CatalogProduct = ReturnType<typeof getCatalogData>["productsWithTiers"][number];
+type CatalogGroup = { category: Category | null; products: CatalogProduct[] };
+const groupCatalog = (
+  productsWithTiers: CatalogProduct[],
+  categories: Category[],
+): CatalogGroup[] => {
+  if (categories.length === 0) return [{ category: null, products: productsWithTiers }];
+  const byId = new Map<number, CatalogProduct[]>();
+  const orphans: CatalogProduct[] = [];
+  for (const entry of productsWithTiers) {
+    if (entry.product.category_id == null) { orphans.push(entry); continue; }
+    const list = byId.get(entry.product.category_id) || [];
+    list.push(entry);
+    byId.set(entry.product.category_id, list);
+  }
+  const groups: CatalogGroup[] = [];
+  for (const category of categories) {
+    const list = byId.get(category.id) || [];
+    // Saltamos categorías sin productos para no mostrar secciones vacías al público.
+    if (list.length > 0) groups.push({ category, products: list });
+  }
+  if (orphans.length > 0) groups.push({ category: null, products: orphans });
+  return groups;
 };
 
 type QuoteLine = {
@@ -454,19 +489,39 @@ const renderProductCard = (
 const renderProductsSection = (
   config: Record<string, string>,
   productsWithTiers: ReturnType<typeof getCatalogData>["productsWithTiers"],
+  categories: Category[],
   interactive = false,
-) => `
+) => {
+  const groups = groupCatalog(productsWithTiers, categories);
+  const groupedRender = (group: CatalogGroup, isFirst: boolean) => {
+    // Solo el primer grupo lleva el título global de la sección. Los demás
+    // grupos abren con su propio título de categoría dentro del shell.
+    const categoryTitle = group.category
+      ? `<h3 class="category-title">${escapeHtml(group.category.name)}</h3>`
+      : (categories.length > 0
+          ? `<h3 class="category-title category-title-orphan">Sin categoría</h3>`
+          : "");
+    return `
+      <div class="products-group${isFirst ? "" : " products-group-page-break"}">
+          ${categoryTitle}
+          <div class="products-grid">
+              ${group.products.map(({ product, priceTiers }) => renderProductCard(product, priceTiers, interactive)).join("")}
+          </div>
+      </div>
+    `;
+  };
+  return `
   <section class="page-section products-section">
       ${renderShapes(config)}
       <div class="page-shell">
           <h2 class="section-title">${escapeHtml(config.products_title || "Nuestros Productos")}</h2>
-          <div class="products-grid">
-              ${productsWithTiers.map(({ product, priceTiers }) => renderProductCard(product, priceTiers, interactive)).join("")}
-              ${productsWithTiers.length === 0 ? '<p class="empty-products">No hay productos en el catálogo aún.</p>' : ''}
-          </div>
+          ${productsWithTiers.length === 0
+            ? '<p class="empty-products">No hay productos en el catálogo aún.</p>'
+            : groups.map((g, i) => groupedRender(g, i === 0)).join("")}
       </div>
   </section>
 `;
+};
 
 const renderContactSection = (config: Record<string, string>) => `
   <section class="page-section contact-section page-break">
@@ -478,7 +533,7 @@ const renderContactSection = (config: Record<string, string>) => `
 `;
 
 const renderPrintableCatalog = (showActions: boolean) => {
-  const { config, defaultPriceTiers, productsWithTiers } = getCatalogData();
+  const { config, defaultPriceTiers, productsWithTiers, categories } = getCatalogData();
   const content = `
     ${showActions ? `<div class="action-bar no-print">
         <button onclick="window.print()" class="theme-button" type="button">Imprimir / PDF</button>
@@ -486,7 +541,7 @@ const renderPrintableCatalog = (showActions: boolean) => {
     </div>` : ""}
     ${renderCoverSection(config)}
     ${renderWelcomeSection(config, defaultPriceTiers)}
-    ${renderProductsSection(config, productsWithTiers)}
+    ${renderProductsSection(config, productsWithTiers, categories)}
     ${renderContactSection(config)}
   `;
   return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo imprimible`, content, config);
@@ -804,11 +859,11 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
 };
 
 const renderInteractiveCatalog = () => {
-  const { config, defaultPriceTiers, productsWithTiers } = getCatalogData();
+  const { config, defaultPriceTiers, productsWithTiers, categories } = getCatalogData();
   const content = `
     ${renderCoverSection(config)}
     ${renderWelcomeSection(config, defaultPriceTiers)}
-    ${renderProductsSection(config, productsWithTiers, true)}
+    ${renderProductsSection(config, productsWithTiers, categories, true)}
     ${renderCartSection(config, productsWithTiers)}
     ${renderContactSection(config)}
   `;
