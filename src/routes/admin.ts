@@ -176,8 +176,10 @@ const isCloudflareChallenge = (html: string) => {
   return false;
 };
 
+const flaresolverrUrl = () => settingValue("flaresolverr_url", "FLARESOLVERR_URL", "");
+
 const fetchViaFlareSolverr = async (targetUrl: string): Promise<string> => {
-  const base = (process.env.FLARESOLVERR_URL || "").trim();
+  const base = flaresolverrUrl();
   if (!base) throw new Error("FLARESOLVERR_URL no está configurada");
   console.log("[MakerWorld/FlareSolverr] POST", base, "→", targetUrl);
   const res = await fetch(base, {
@@ -220,7 +222,7 @@ const fetchViaPublicProxy = async (targetUrl: string): Promise<string> => {
 
 const fetchMakerWorldHtml = async (targetUrl: string): Promise<string> => {
   const errors: string[] = [];
-  if ((process.env.FLARESOLVERR_URL || "").trim()) {
+  if (flaresolverrUrl()) {
     try {
       const html = await fetchViaFlareSolverr(targetUrl);
       if (!isCloudflareChallenge(html)) return html;
@@ -275,13 +277,60 @@ const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<Ma
   return { sourceUrl, name: title || "Producto MakerWorld", description, images };
 };
 
-const llmConfig = () => ({
-  baseUrl: (process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
-  apiKey: process.env.LLM_API_KEY || "",
-  model: process.env.LLM_MODEL || "gpt-4o-mini",
-  temperature: Number.parseFloat(process.env.LLM_TEMPERATURE || "0.7"),
-  maxWords: Number.parseInt(process.env.LLM_DESCRIPTION_MAX_WORDS || "45", 10),
-});
+// Lee primero la DB y cae al .env como fallback. Permite editar el setting
+// desde /admin/config sin tocar el .env ni reiniciar el container.
+const settingValue = (key: string, envKey: string, fallback = "") => {
+  const dbValue = (db.query<{ value: string }, [string]>(`SELECT value FROM config WHERE key = ?`).get(key)?.value || "").trim();
+  if (dbValue) return dbValue;
+  const envValue = (process.env[envKey] || "").trim();
+  if (envValue) return envValue;
+  return fallback;
+};
+
+// Parsea una lista de modelos de fallback (separados por newline o coma).
+// Trim, dedup conservando orden, sin vacíos.
+const parseFallbackModels = (raw: string): string[] => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const piece of raw.split(/[\r\n,]+/)) {
+    const m = piece.trim();
+    if (!m || seen.has(m)) continue;
+    seen.add(m);
+    out.push(m);
+  }
+  return out;
+};
+
+// Combina modelo primario + fallbacks en un solo array ordenado para que el
+// runner intente cada uno. Si el primario está vacío, devuelve solo fallbacks.
+const buildModelChain = (primary: string, fallbackRaw: string): string[] => {
+  const fallbacks = parseFallbackModels(fallbackRaw);
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  const push = (m: string) => {
+    const v = m.trim();
+    if (!v || seen.has(v)) return;
+    seen.add(v);
+    chain.push(v);
+  };
+  push(primary);
+  for (const f of fallbacks) push(f);
+  return chain;
+};
+
+const llmConfig = () => {
+  const primary = settingValue("llm_model", "LLM_MODEL", "gpt-4o-mini");
+  const fallbackRaw = settingValue("llm_fallback_models", "LLM_FALLBACK_MODELS", "");
+  const models = buildModelChain(primary, fallbackRaw);
+  return {
+    baseUrl: settingValue("llm_base_url", "LLM_BASE_URL", "https://api.openai.com/v1").replace(/\/+$/, ""),
+    apiKey: settingValue("llm_api_key", "LLM_API_KEY", ""),
+    model: models[0] || primary,
+    models,
+    temperature: Number.parseFloat(settingValue("llm_temperature", "LLM_TEMPERATURE", "0.7")),
+    maxWords: Number.parseInt(settingValue("llm_description_max_words", "LLM_DESCRIPTION_MAX_WORDS", "45"), 10),
+  };
+};
 
 const trimToWordLimit = (value: string, maxWords: number) => {
   const words = value.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
@@ -352,11 +401,12 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
   const config = llmConfig();
   if (!config.apiKey) throw new Error("LLM_API_KEY no está configurada en el entorno.");
   if (!description.trim()) throw new Error("Primero necesitas una descripción base para adaptarla.");
+  if (config.models.length === 0) throw new Error("LLM_MODEL no está configurado (no hay modelo primario ni fallbacks).");
   const hasImage = /^https?:\/\//i.test(imageUrl) || imageUrl.startsWith("data:image/");
 
   console.log("[LLM description/adapt] request", {
     baseUrl: config.baseUrl,
-    model: config.model,
+    models: config.models,
     temperature: Number.isFinite(config.temperature) ? config.temperature : 0.7,
     hasApiKey: Boolean(config.apiKey),
     maxWords: config.maxWords,
@@ -368,53 +418,89 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
 
   const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}\n\nReescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Máximo ${config.maxWords} palabras. Usa un solo párrafo corto, comercial y descriptivo. Invita a comprar sin sonar exagerado. Mantente fiel a la información original. ${hasImage ? "Usa la imagen solo para complementar detalles visuales evidentes, como forma, estilo o apariencia; no inventes medidas, materiales ni funciones que no se puedan confirmar." : ""} Devuelve solo el texto final.`;
 
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "authorization": `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: Number.isFinite(config.temperature) ? config.temperature : 0.7,
-      messages: [
-        {
-          role: "system",
-          content: "Eres un copywriter experto en catálogos de productos de impresión 3D. Escribes en español claro, comercial y profesional. Tu trabajo es convertir descripciones técnicas o informales en microdescripciones de catálogo atractivas y orientadas a venta. No inventes materiales, medidas, licencias, compatibilidades ni usos no presentes en el texto original. No uses markdown.",
-        },
-        {
-          role: "user",
-          content: hasImage ? [
-            { type: "text", text: userText },
-            { type: "image_url", image_url: { url: imageUrl } },
-          ] : userText,
-        },
-      ],
-    }),
-  });
+  const attempts: { model: string; error: string }[] = [];
 
-  const rawPayload = await response.text();
-  console.log("[LLM description/adapt] response", {
-    status: response.status,
-    ok: response.ok,
-    body: rawPayload,
-  });
+  for (const model of config.models) {
+    try {
+      const response = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "authorization": `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: Number.isFinite(config.temperature) ? config.temperature : 0.7,
+          messages: [
+            {
+              role: "system",
+              content: "Eres un copywriter experto en catálogos de productos de impresión 3D. Escribes en español claro, comercial y profesional. Tu trabajo es convertir descripciones técnicas o informales en microdescripciones de catálogo atractivas y orientadas a venta. No inventes materiales, medidas, licencias, compatibilidades ni usos no presentes en el texto original. No uses markdown.",
+            },
+            {
+              role: "user",
+              content: hasImage ? [
+                { type: "text", text: userText },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ] : userText,
+            },
+          ],
+        }),
+      });
 
-  if (!response.ok) throw new Error(parseLlmError(rawPayload) || `El LLM respondió con HTTP ${response.status}`);
-  const content = parseLlmContent(rawPayload);
-  if (!content) throw new Error("El LLM no devolvió una descripción válida.");
-  return trimToWordLimit(content, config.maxWords);
+      const rawPayload = await response.text();
+      console.log("[LLM description/adapt] response", {
+        model,
+        status: response.status,
+        ok: response.ok,
+        bodyPreview: rawPayload.slice(0, 400),
+      });
+
+      if (!response.ok) {
+        const errMsg = parseLlmError(rawPayload) || `HTTP ${response.status}`;
+        attempts.push({ model, error: errMsg });
+        console.warn(`[LLM description/adapt] modelo "${model}" falló: ${errMsg}. Intentando siguiente.`);
+        continue;
+      }
+      const content = parseLlmContent(rawPayload);
+      if (!content) {
+        attempts.push({ model, error: "respuesta vacía" });
+        console.warn(`[LLM description/adapt] modelo "${model}" devolvió contenido vacío. Intentando siguiente.`);
+        continue;
+      }
+      if (attempts.length > 0) {
+        console.log(`[LLM description/adapt] modelo "${model}" tuvo éxito tras ${attempts.length} fallback(s)`);
+      }
+      return trimToWordLimit(content, config.maxWords);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      attempts.push({ model, error: errMsg });
+      console.warn(`[LLM description/adapt] modelo "${model}" lanzó excepción: ${errMsg}. Intentando siguiente.`);
+    }
+  }
+
+  const summary = attempts.map((a) => `${a.model}: ${a.error}`).join(" | ");
+  throw new Error(`Todos los modelos fallaron. ${summary}`);
 };
 
-const imageEnhanceConfig = () => ({
-  baseUrl: (process.env.QWEN_IMAGE_BASE_URL || process.env.IMAGE_ENHANCE_BASE_URL || "").trim(),
-  endpoint: (process.env.QWEN_IMAGE_ENDPOINT || process.env.IMAGE_ENHANCE_ENDPOINT || "").trim(),
-  route: (process.env.QWEN_IMAGE_ROUTE || process.env.IMAGE_ENHANCE_ROUTE || "").trim(),
-  apiKey: process.env.QWEN_IMAGE_API_KEY || process.env.IMAGE_ENHANCE_API_KEY || "",
-  model: (process.env.QWEN_IMAGE_MODEL || process.env.IMAGE_ENHANCE_MODEL || "").trim(),
-  prompt: (process.env.QWEN_IMAGE_PROMPT || "").trim() || "Transforma esta imagen en una fotografía profesional para catálogo ecommerce: producto centrado y completo, fondo blanco puro, iluminación de estudio suave, sombras naturales discretas, alta nitidez, colores fieles al producto, sin texto, sin marcas de agua, sin manos, sin props y sin elementos extra. Conserva la forma y detalles reales del objeto. Resultado limpio, realista y listo para catálogo.",
-  timeoutMs: Number.parseInt(process.env.QWEN_IMAGE_TIMEOUT_MS || "120000", 10),
-});
+const imageEnhanceConfig = () => {
+  // image_* en DB es el override moderno. Si está vacío caemos a las dos
+  // variantes históricas en .env (QWEN_IMAGE_* y luego IMAGE_ENHANCE_*).
+  const dbOrEnv = (key: string, envKey1: string, envKey2 = "") =>
+    settingValue(key, envKey1, "") || (envKey2 ? (process.env[envKey2] || "").trim() : "");
+  const primaryModel = dbOrEnv("image_model", "QWEN_IMAGE_MODEL", "IMAGE_ENHANCE_MODEL");
+  const fallbackRaw = dbOrEnv("image_fallback_models", "QWEN_IMAGE_FALLBACK_MODELS", "IMAGE_ENHANCE_FALLBACK_MODELS");
+  const models = buildModelChain(primaryModel, fallbackRaw);
+  return {
+    baseUrl: dbOrEnv("image_base_url", "QWEN_IMAGE_BASE_URL", "IMAGE_ENHANCE_BASE_URL"),
+    endpoint: dbOrEnv("image_endpoint", "QWEN_IMAGE_ENDPOINT", "IMAGE_ENHANCE_ENDPOINT"),
+    route: dbOrEnv("image_route", "QWEN_IMAGE_ROUTE", "IMAGE_ENHANCE_ROUTE"),
+    apiKey: dbOrEnv("image_api_key", "QWEN_IMAGE_API_KEY", "IMAGE_ENHANCE_API_KEY"),
+    model: models[0] || primaryModel,
+    models,
+    prompt: settingValue("catalog_image_prompt", "QWEN_IMAGE_PROMPT", "Transforma esta imagen en una fotografía profesional para catálogo ecommerce: producto centrado y completo, fondo blanco puro, iluminación de estudio suave, sombras naturales discretas, alta nitidez, colores fieles al producto, sin texto, sin marcas de agua, sin manos, sin props y sin elementos extra. Conserva la forma y detalles reales del objeto. Resultado limpio, realista y listo para catálogo."),
+    timeoutMs: Number.parseInt(settingValue("image_timeout_ms", "QWEN_IMAGE_TIMEOUT_MS", "120000"), 10),
+  };
+};
 
 const joinUrl = (base: string, path: string) => `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 
@@ -547,69 +633,84 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
     }
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
+  // Cadena de modelos. Si el array está vacío usamos [""] para mantener el
+  // comportamiento histórico (provider-default).
+  const modelChain = config.models.length > 0 ? config.models : [""];
+  const attempts: { model: string; error: string }[] = [];
 
-  try {
-    console.log("[Qwen image/enhance] request", {
-      endpoint,
-      model: config.model || "provider-default",
-      hasApiKey: Boolean(config.apiKey),
-      imageSource: resolvedImage.startsWith("data:image/") ? "uploaded-file" : "url",
-    });
-
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: config.model || undefined,
-        prompt,
-        image: resolvedImage,
-        imageUrl: resolvedImage,
-        image_url: resolvedImage,
-        response_format: "url",
-        source: "pixkey3d-makerworld",
-        intent: "catalog-product-photo-white-background",
-        options: {
-          background: "white",
-          noText: true,
-          style: "studio product photography",
-          preserveProduct: true,
-        },
-      }),
-    });
-
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.startsWith("image/")) {
-      if (!response.ok) throw new Error(`El endpoint de mejora respondió con HTTP ${response.status}`);
-      return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "enhanced"), prompt };
-    }
-
-    const rawPayload = await response.text();
-    console.log("[Qwen image/enhance] response", { status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
-    if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `El endpoint de mejora respondió con HTTP ${response.status}`);
-    if (/text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(rawPayload) || /^\s*<html/i.test(rawPayload)) {
-      throw new Error(`El endpoint respondió HTML, no una imagen. Estás llamando una ruta de UI o base URL. Usa QWEN_IMAGE_BASE_URL=https://aiapibun.duckdns.org con QWEN_IMAGE_ROUTE=/v1/images/edits, o QWEN_IMAGE_ENDPOINT=${joinUrl(endpoint, endpoint.endsWith("/v1") ? "/images/edits" : "")}.`);
-    }
-
-    let candidate = "";
+  for (const model of modelChain) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
     try {
-      candidate = extractImageCandidate(JSON.parse(rawPayload));
-    } catch {
-      candidate = extractImageCandidate(rawPayload);
-    }
+      console.log("[Qwen image/enhance] request", {
+        endpoint,
+        model: model || "provider-default",
+        hasApiKey: Boolean(config.apiKey),
+        imageSource: resolvedImage.startsWith("data:image/") ? "uploaded-file" : "url",
+      });
 
-    return { imageUrl: await persistImageReference(candidate), prompt };
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw new Error("El endpoint de mejora tardó demasiado en responder.");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: model || undefined,
+          prompt,
+          image: resolvedImage,
+          imageUrl: resolvedImage,
+          image_url: resolvedImage,
+          response_format: "url",
+          source: "pixkey3d-makerworld",
+          intent: "catalog-product-photo-white-background",
+          options: {
+            background: "white",
+            noText: true,
+            style: "studio product photography",
+            preserveProduct: true,
+          },
+        }),
+      });
+
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.startsWith("image/")) {
+        if (!response.ok) throw new Error(`El endpoint de mejora respondió con HTTP ${response.status}`);
+        if (attempts.length > 0) console.log(`[Qwen image/enhance] modelo "${model}" tuvo éxito tras ${attempts.length} fallback(s)`);
+        return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "enhanced"), prompt };
+      }
+
+      const rawPayload = await response.text();
+      console.log("[Qwen image/enhance] response", { model, status: response.status, ok: response.ok, contentType, bodyLength: rawPayload.length, bodyPreview: rawPayload.slice(0, 180) });
+      if (!response.ok) throw new Error(parseLlmError(rawPayload) || rawPayload.slice(0, 240) || `HTTP ${response.status}`);
+      if (/text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(rawPayload) || /^\s*<html/i.test(rawPayload)) {
+        throw new Error(`El endpoint respondió HTML, no una imagen. Estás llamando una ruta de UI o base URL. Usa QWEN_IMAGE_BASE_URL=https://aiapibun.duckdns.org con QWEN_IMAGE_ROUTE=/v1/images/edits, o QWEN_IMAGE_ENDPOINT=${joinUrl(endpoint, endpoint.endsWith("/v1") ? "/images/edits" : "")}.`);
+      }
+
+      let candidate = "";
+      try {
+        candidate = extractImageCandidate(JSON.parse(rawPayload));
+      } catch {
+        candidate = extractImageCandidate(rawPayload);
+      }
+      if (!candidate) throw new Error("El proveedor respondió 200 pero sin URL de imagen.");
+
+      if (attempts.length > 0) console.log(`[Qwen image/enhance] modelo "${model}" tuvo éxito tras ${attempts.length} fallback(s)`);
+      return { imageUrl: await persistImageReference(candidate), prompt };
+    } catch (error) {
+      let errMsg: string;
+      if (error instanceof DOMException && error.name === "AbortError") errMsg = "timeout";
+      else errMsg = error instanceof Error ? error.message : String(error);
+      attempts.push({ model: model || "provider-default", error: errMsg });
+      console.warn(`[Qwen image/enhance] modelo "${model || "provider-default"}" falló: ${errMsg}. Intentando siguiente.`);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+
+  const summary = attempts.map((a) => `${a.model}: ${a.error}`).join(" | ");
+  throw new Error(`Todos los modelos fallaron. ${summary}`);
 };
 
 const buildDesignPrompt = (template: string, userPrompt: string) => {
@@ -684,116 +785,142 @@ const callImageEditProvider = async (args: {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
-  const requestBody: Record<string, unknown> = {
-    model: config.model || undefined,
-    prompt: args.prompt,
-    image: args.image,
-    imageUrl: args.image,
-    image_url: args.image,
-    response_format: "url",
-    source: args.source,
-  };
-  if (args.intent) requestBody.intent = args.intent;
-  if (args.options) requestBody.options = args.options;
-  const body = JSON.stringify(requestBody);
-
-  // Diagnóstico que el usuario puede usar para verificar que NADA se está
-  // truncando antes de salir al proveedor.
-  const imageSizeKb = Math.round(args.image.length / 1024);
-  console.log(`[${args.logTag}] preparing`, {
-    endpoint,
-    model: config.model || "provider-default",
-    hasApiKey: Boolean(config.apiKey),
-    promptLength: args.prompt.length,
-    promptHead: args.prompt.slice(0, 120),
-    promptTail: args.prompt.length > 120 ? "…" + args.prompt.slice(-120) : "",
-    imageSizeKb,
-    imageSource: args.image.startsWith("data:image/") ? "uploaded-file" : "url",
-    totalBodyKb: Math.round(body.length / 1024),
-    intent: args.intent || null,
-  });
-
+  // Cadena de modelos a probar: el primario + los fallbacks configurados.
+  // Si no hay ningún modelo configurado, usamos [""] para mantener el
+  // comportamiento "provider-default" (no se envía campo model).
+  const modelChain = config.models.length > 0 ? config.models : [""];
   const totalAttempts = DESIGN_RETRY_DELAYS_MS.length + 1;
-  let lastReason = "";
-  let lastRawPayload = "";
+  const imageSizeKb = Math.round(args.image.length / 1024);
 
-  for (let attempt = 1; attempt <= totalAttempts; attempt++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
-    let retriable = false;
-    let attemptError: Error | null = null;
+  // Intenta UN modelo, con el retry interno que tolera la flakiness del
+  // wrapper. Devuelve resultado en éxito; tira en último fracaso para que
+  // el loop exterior pase al siguiente modelo del fallback.
+  const tryOneModel = async (model: string): Promise<ImageEnhanceResult> => {
+    const requestBody: Record<string, unknown> = {
+      model: model || undefined,
+      prompt: args.prompt,
+      image: args.image,
+      imageUrl: args.image,
+      image_url: args.image,
+      response_format: "url",
+      source: args.source,
+    };
+    if (args.intent) requestBody.intent = args.intent;
+    if (args.options) requestBody.options = args.options;
+    const body = JSON.stringify(requestBody);
 
-    try {
-      console.log(`[${args.logTag}] request (attempt ${attempt}/${totalAttempts})`);
+    // Diagnóstico que el usuario puede usar para verificar que NADA se está
+    // truncando antes de salir al proveedor.
+    console.log(`[${args.logTag}] preparing`, {
+      endpoint,
+      model: model || "provider-default",
+      hasApiKey: Boolean(config.apiKey),
+      promptLength: args.prompt.length,
+      promptHead: args.prompt.slice(0, 120),
+      promptTail: args.prompt.length > 120 ? "…" + args.prompt.slice(-120) : "",
+      imageSizeKb,
+      imageSource: args.image.startsWith("data:image/") ? "uploaded-file" : "url",
+      totalBodyKb: Math.round(body.length / 1024),
+      intent: args.intent || null,
+    });
 
-      const response = await fetch(endpoint, { method: "POST", headers, signal: controller.signal, body });
-      const contentType = response.headers.get("content-type") || "";
+    let lastReason = "";
 
-      if (contentType.startsWith("image/")) {
-        if (!response.ok) {
-          retriable = response.status >= 500;
-          attemptError = new Error(`El proveedor respondió HTTP ${response.status} con un binario de imagen.`);
-        } else {
-          return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, args.filePrefix), prompt: args.prompt };
-        }
-      } else {
-        const rawPayload = await response.text();
-        lastRawPayload = rawPayload;
-        console.log(`[${args.logTag}] response`, {
-          attempt,
-          status: response.status,
-          ok: response.ok,
-          contentType,
-          bodyLength: rawPayload.length,
-          // Cuando falla mostramos el body COMPLETO (hasta 1500 chars)
-          // para poder diagnosticar; en éxito solo el preview.
-          body: response.ok ? rawPayload.slice(0, 200) : rawPayload.slice(0, 1500),
-        });
+    for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), Number.isFinite(config.timeoutMs) ? config.timeoutMs : 120000);
+      let retriable = false;
+      let attemptError: Error | null = null;
 
-        if (!response.ok) {
-          retriable = response.status >= 500;
-          attemptError = new Error(unwrapProviderError(rawPayload) || `HTTP ${response.status}`);
-        } else {
-          let candidate = "";
-          try { candidate = extractImageCandidate(JSON.parse(rawPayload)); }
-          catch { candidate = extractImageCandidate(rawPayload); }
+      try {
+        console.log(`[${args.logTag}] request (model="${model || "provider-default"}", attempt ${attempt}/${totalAttempts})`);
 
-          if (candidate) {
-            return { imageUrl: await persistImageReference(candidate), prompt: args.prompt };
+        const response = await fetch(endpoint, { method: "POST", headers, signal: controller.signal, body });
+        const contentType = response.headers.get("content-type") || "";
+
+        if (contentType.startsWith("image/")) {
+          if (!response.ok) {
+            retriable = response.status >= 500;
+            attemptError = new Error(`HTTP ${response.status} con un binario de imagen.`);
+          } else {
+            return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, args.filePrefix), prompt: args.prompt };
           }
-          // 200 OK pero sin URL de imagen → flakiness del wrapper, vale la
-          // pena reintentar.
-          retriable = true;
-          attemptError = new Error("El proveedor respondió 200 pero sin URL de imagen.");
+        } else {
+          const rawPayload = await response.text();
+          console.log(`[${args.logTag}] response`, {
+            model: model || "provider-default",
+            attempt,
+            status: response.status,
+            ok: response.ok,
+            contentType,
+            bodyLength: rawPayload.length,
+            body: response.ok ? rawPayload.slice(0, 200) : rawPayload.slice(0, 1500),
+          });
+
+          if (!response.ok) {
+            retriable = response.status >= 500;
+            attemptError = new Error(unwrapProviderError(rawPayload) || `HTTP ${response.status}`);
+          } else {
+            let candidate = "";
+            try { candidate = extractImageCandidate(JSON.parse(rawPayload)); }
+            catch { candidate = extractImageCandidate(rawPayload); }
+
+            if (candidate) {
+              return { imageUrl: await persistImageReference(candidate), prompt: args.prompt };
+            }
+            // 200 OK pero sin URL de imagen → flakiness del wrapper, vale la
+            // pena reintentar.
+            retriable = true;
+            attemptError = new Error("El proveedor respondió 200 pero sin URL de imagen.");
+          }
         }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          // Timeout: agotamos retries en este modelo y pasamos al siguiente.
+          throw new Error("timeout");
+        }
+        retriable = true; // errores de red son siempre reintentables
+        attemptError = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        clearTimeout(timeout);
       }
+
+      lastReason = attemptError?.message || "Error desconocido";
+
+      if (!retriable || attempt === totalAttempts) {
+        const exhaustedSuffix = attempt > 1 ? ` tras ${attempt} intentos` : "";
+        throw new Error(`${lastReason}${exhaustedSuffix}`);
+      }
+
+      console.log(`[${args.logTag}] retrying`, { model: model || "provider-default", attempt, nextDelayMs: DESIGN_RETRY_DELAYS_MS[attempt - 1], reason: lastReason });
+      await new Promise(resolve => setTimeout(resolve, DESIGN_RETRY_DELAYS_MS[attempt - 1]));
+    }
+
+    // Inalcanzable por la lógica del loop, pero el compilador no lo sabe.
+    throw new Error(`No respondió tras ${totalAttempts} intentos: ${lastReason}`);
+  };
+
+  // Loop exterior: cada modelo de la cadena con sus propios retries.
+  const allAttempts: { model: string; error: string }[] = [];
+  for (const model of modelChain) {
+    try {
+      const result = await tryOneModel(model);
+      if (allAttempts.length > 0) console.log(`[${args.logTag}] modelo "${model || "provider-default"}" tuvo éxito tras ${allAttempts.length} fallback(s)`);
+      return result;
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new Error("El proveedor tardó demasiado en responder.");
-      }
-      retriable = true; // errores de red son siempre reintentables
-      attemptError = error instanceof Error ? error : new Error(String(error));
-    } finally {
-      clearTimeout(timeout);
+      const msg = error instanceof Error ? error.message : String(error);
+      allAttempts.push({ model: model || "provider-default", error: msg });
+      console.warn(`[${args.logTag}] modelo "${model || "provider-default"}" agotó retries: ${msg}. Intentando siguiente.`);
     }
-
-    lastReason = attemptError?.message || "Error desconocido";
-
-    if (!retriable || attempt === totalAttempts) {
-      const exhaustedSuffix = attempt > 1 ? ` tras ${attempt} intentos` : "";
-      // Sugerencia accionable según el patrón del error
-      const hint = looksLikeTextOutputError(lastReason)
-        ? " El modelo probablemente devolvió texto/código en vez de imagen. Quita palabras como \"svg\", \"código\", \"html\" del prompt y pídele explícitamente una imagen rasterizada (PNG)."
-        : " Intenta de nuevo en unos segundos o prueba con otra imagen.";
-      throw new Error(`El proveedor de IA falló${exhaustedSuffix}: ${lastReason}.${hint}`);
-    }
-
-    console.log(`[${args.logTag}] retrying`, { attempt, nextDelayMs: DESIGN_RETRY_DELAYS_MS[attempt - 1], reason: lastReason });
-    await new Promise(resolve => setTimeout(resolve, DESIGN_RETRY_DELAYS_MS[attempt - 1]));
   }
 
-  // Inalcanzable por la lógica del loop, pero el compilador no lo sabe.
-  throw new Error(`El proveedor de IA no respondió tras ${totalAttempts} intentos: ${lastReason}`);
+  // Todos los modelos fallaron. Hint basado en el primer error.
+  const summary = allAttempts.map((a) => `${a.model}: ${a.error}`).join(" | ");
+  const firstReason = allAttempts[0]?.error || "";
+  const hint = looksLikeTextOutputError(firstReason)
+    ? " El modelo probablemente devolvió texto/código en vez de imagen. Quita palabras como \"svg\", \"código\", \"html\" del prompt y pídele explícitamente una imagen rasterizada (PNG)."
+    : " Intenta de nuevo en unos segundos o prueba con otra imagen.";
+  throw new Error(`El proveedor de IA falló en ${modelChain.length} modelo(s): ${summary}.${hint}`);
 };
 
 const generateDesign = async (
@@ -1216,15 +1343,7 @@ const AdminLayout = (title: string, content: string) => {
                             <a href="/admin/production-settings">Impresoras y Filamentos</a>
                         </div>
                     </div>
-                    <div class="nav-dropdown">
-                        <button class="nav-dropdown-btn" type="button">Configuración
-                          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
-                        </button>
-                        <div class="nav-dropdown-menu">
-                            <a href="/admin/config">Marca y Catálogo</a>
-                            <a href="/admin/production-settings">Impresoras y Filamentos</a>
-                        </div>
-                    </div>
+                    <a href="/admin/config" class="nav-direct-link">Configuración</a>
                 </div>
                 <div>
                     <form action="/admin/logout" method="post" class="inline">
@@ -1298,11 +1417,11 @@ adminRoutes.get("/login", (c) => {
 
 adminRoutes.post("/login", async (c) => {
   const body = await c.req.parseBody();
-  const validUsername = process.env.ADMIN_USERNAME || "Frxn5J";
-  const validPassword = process.env.ADMIN_PASSWORD;
+  const validUsername = settingValue("admin_username", "ADMIN_USERNAME", "Frxn5J");
+  const validPassword = settingValue("admin_password", "ADMIN_PASSWORD", "");
 
   if (!validPassword) {
-    return c.text("ADMIN_PASSWORD no está configurado en el entorno.", 500);
+    return c.text("ADMIN_PASSWORD no está configurado (ni en /admin/config ni en .env).", 500);
   }
 
   if (body.username === validUsername && body.password === validPassword) {
@@ -1680,301 +1799,542 @@ adminRoutes.get("/config", (c) => {
   const config = getConfig();
   const tiers = getDefaultPriceTiers();
 
+  // Indica de dónde proviene el valor actual de cada setting "env-style".
+  const sourceLabel = (key: string, envKey: string, envKeyLegacy = "") => {
+    if ((config[key] || "").trim()) return '<span class="ml-2 inline-flex items-center text-[10px] font-semibold uppercase tracking-wide text-green-700 bg-green-100 px-1.5 py-0.5 rounded">guardado</span>';
+    if ((process.env[envKey] || "").trim()) return '<span class="ml-2 inline-flex items-center text-[10px] font-semibold uppercase tracking-wide text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded">usando .env</span>';
+    if (envKeyLegacy && (process.env[envKeyLegacy] || "").trim()) return '<span class="ml-2 inline-flex items-center text-[10px] font-semibold uppercase tracking-wide text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded">usando .env</span>';
+    return '<span class="ml-2 inline-flex items-center text-[10px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">sin valor</span>';
+  };
+
+  // Pre-llena los inputs con el mismo valor que el server usa en runtime:
+  // DB → .env → fallback. Si la DB está vacía y .env trae el valor, el input
+  // muestra el valor del .env (no en blanco). Al guardar sin tocar, el valor
+  // efectivo se persiste en DB (override consciente del .env).
+  const effective = (key: string, envKey: string, envKeyLegacy = "", fallback = "") => {
+    const dbValue = (config[key] || "").trim();
+    if (dbValue) return dbValue;
+    const envValue = (process.env[envKey] || "").trim();
+    if (envValue) return envValue;
+    if (envKeyLegacy) {
+      const envValueLegacy = (process.env[envKeyLegacy] || "").trim();
+      if (envValueLegacy) return envValueLegacy;
+    }
+    return fallback;
+  };
+  const eff = (key: string, envKey: string, envKeyLegacy = "", fallback = "") => escapeHtml(effective(key, envKey, envKeyLegacy, fallback));
+
   return c.html(AdminLayout("Configuración", `
     <div class="bg-white shadow rounded-lg p-6 mb-6">
-        <h2 class="text-xl font-bold mb-4">Configuración General</h2>
-        <p class="text-sm text-gray-500 mb-6">Edita los datos del catálogo y usa la vista previa para probar CSS personalizado antes de guardar.</p>
+        <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-4">
+            <div>
+                <h2 class="text-xl font-bold">Configuración</h2>
+                <p class="text-sm text-gray-500">Todo lo que afecta a la marca, los modelos de IA y los accesos vive aquí. Las settings de IA y de servidor <strong>sobrescriben al <code>.env</code></strong> y se aplican al instante, sin reiniciar el contenedor.</p>
+            </div>
+            <p class="text-xs text-gray-500">Un solo botón "Guardar Configuración" persiste todas las pestañas a la vez.</p>
+        </div>
+
         <form action="/admin/config" method="post" enctype="multipart/form-data" class="space-y-6">
             <input type="hidden" name="__config_form" value="1">
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start mb-8">
-                <div class="border border-gray-200 rounded-lg bg-gray-50 p-4">
-                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+
+            <!-- Tab navigation -->
+            <div class="border-b border-gray-200">
+                <nav class="-mb-px flex flex-wrap gap-1 sm:gap-2" id="config-tabs" role="tablist">
+                    <button type="button" data-config-tab="marca" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-blue-600 text-blue-700 text-sm font-medium" aria-selected="true">Marca y Catálogo</button>
+                    <button type="button" data-config-tab="tema" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Tema Visual</button>
+                    <button type="button" data-config-tab="precios" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Precios</button>
+                    <button type="button" data-config-tab="ia-modelos" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">IA · Modelos</button>
+                    <button type="button" data-config-tab="ia-prompts" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">IA · Prompts</button>
+                    <button type="button" data-config-tab="integraciones" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Integraciones</button>
+                    <button type="button" data-config-tab="acceso" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Acceso & Servidor</button>
+                </nav>
+            </div>
+
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: MARCA Y CATÁLOGO                                          -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="marca" class="space-y-6">
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Nombre de la Empresa</label>
+                        <input type="text" name="company_name" value="${configValue(config, "company_name")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Subtítulo de Portada</label>
+                        <input type="text" name="cover_subtitle" value="${configValue(config, "cover_subtitle", "Catálogo de Productos")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Título de Sección Productos</label>
+                        <input type="text" name="products_title" value="${configValue(config, "products_title", "Nuestros Productos")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">WhatsApp para Cotizaciones</label>
+                        <input type="text" name="quote_whatsapp_number" value="${configValue(config, "quote_whatsapp_number", "4961266304")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 4961266304">
+                        <p class="text-xs text-gray-500 mt-1">Usa solo números. Si son 10 dígitos de México, el sistema agrega 52 para el link de WhatsApp.</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Paquetería para Cotización</label>
+                        <input type="text" name="shipping_provider" value="${configValue(config, "shipping_provider", "Estafeta")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: Estafeta">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Costo de Envío Estimado</label>
+                        <input type="number" name="shipping_price" min="0" step="0.01" value="${configValue(config, "shipping_price", "150")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="150">
+                        <p class="text-xs text-gray-500 mt-1">Se suma al total cuando no aplica envío gratis.</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Envío Gratis desde Piezas</label>
+                        <input type="number" name="free_shipping_min_pieces" min="0" step="1" value="${configValue(config, "free_shipping_min_pieces", "501")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="501">
+                        <p class="text-xs text-gray-500 mt-1">Con 0 o vacío se desactiva. Con 501, el envío es gratis desde 501 piezas.</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Logo (URL o subir archivo)</label>
+                        <input type="text" name="company_logo_url" value="${configValue(config, "company_logo")}" placeholder="URL de imagen..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
+                        <input type="file" name="company_logo_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Texto de Bienvenida (acepta HTML)</label>
+                    <textarea name="welcome_text" rows="8" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "welcome_text")}</textarea>
+                    <p class="text-xs text-gray-500 mt-1">Puedes usar etiquetas como &lt;h2&gt;, &lt;p&gt;, &lt;strong&gt;, &lt;ul&gt;, &lt;li&gt;, &lt;a&gt;, &lt;table&gt; e &lt;img&gt;. Si escribes texto plano, se conservan los saltos de línea.</p>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Texto de Contacto / Pie de página (acepta HTML)</label>
+                    <textarea name="contact_text" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "contact_text")}</textarea>
+                    <p class="text-xs text-gray-500 mt-1">Este contenido se inserta como HTML en la última página del catálogo.</p>
+                </div>
+            </section>
+
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: TEMA VISUAL                                              -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="tema" class="space-y-6 hidden">
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+                    <div class="border border-gray-200 rounded-lg bg-gray-50 p-4">
+                        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                            <div>
+                                <h3 class="text-lg font-semibold text-gray-900">Vista previa del documento</h3>
+                                <p class="text-xs text-gray-500">Muestra el catálogo guardado. El CSS personalizado se aplica en vivo mientras escribes.</p>
+                            </div>
+                            <div class="flex flex-wrap gap-2">
+                                <button type="button" id="preview-desktop" class="px-3 py-2 text-xs font-medium rounded-md bg-white border border-gray-300 hover:bg-gray-100">Desktop</button>
+                                <button type="button" id="preview-mobile" class="px-3 py-2 text-xs font-medium rounded-md bg-white border border-gray-300 hover:bg-gray-100">Móvil</button>
+                                <button type="button" id="preview-refresh" class="px-3 py-2 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">Recargar</button>
+                            </div>
+                        </div>
+                        <div id="preview-frame-shell" class="mx-auto w-full overflow-hidden rounded-lg border border-gray-300 bg-white shadow-inner" style="height: 720px; max-width: 100%;">
+                            <iframe id="catalog-preview" src="/imprimir?embed=1" class="h-full w-full bg-white" title="Vista previa del catálogo"></iframe>
+                        </div>
+                    </div>
+
+                    <div class="border border-gray-200 rounded-lg bg-gray-50 p-4 xl:sticky xl:top-6">
+                        <label for="custom-css-editor" class="block text-sm font-semibold text-gray-900">CSS Personalizado de la Vista Previa</label>
+                        <p class="text-xs text-gray-500 mt-1 mb-3">Este CSS se aplica en vivo al documento de la izquierda y se guarda como parte del tema.</p>
+                        <textarea id="custom-css-editor" name="custom_css" rows="26" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm leading-5" placeholder="/* Escribe aquí tus estilos para el catálogo */">${configValue(config, "custom_css")}</textarea>
+                        <p class="text-xs text-gray-500 mt-3">Ejemplo: <code>.cover-section { background: #fff; }</code> o <code>.theme-card { border-radius: 32px; }</code></p>
+                    </div>
+                </div>
+
+                <h4 class="text-md font-semibold mt-2">Colores Base</h4>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Color Primario</label>
+                        <input type="color" name="color_primary" value="${configValue(config, "color_primary", "#ef4444")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Color Secundario</label>
+                        <input type="color" name="color_secondary" value="${configValue(config, "color_secondary", "#1f2937")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Color Acento</label>
+                        <input type="color" name="color_accent" value="${configValue(config, "color_accent", "#f87171")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                </div>
+
+                <h4 class="text-md font-semibold mt-2">Fondos y Textos de Secciones</h4>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Portada</label>
+                        <input type="color" name="bg_cover" value="${configValue(config, "bg_cover", "#1f2937")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Portada</label>
+                        <input type="color" name="color_cover_text" value="${configValue(config, "color_cover_text", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Bienvenida</label>
+                        <input type="color" name="bg_welcome" value="${configValue(config, "bg_welcome", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Productos</label>
+                        <input type="color" name="bg_products" value="${configValue(config, "bg_products", "#f9fafb")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Contacto</label>
+                        <input type="color" name="bg_contact" value="${configValue(config, "bg_contact", "#1f2937")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Contacto</label>
+                        <input type="color" name="color_contact_text" value="${configValue(config, "color_contact_text", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Tarjetas</label>
+                        <input type="color" name="bg_card" value="${configValue(config, "bg_card", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Borde Tarjetas</label>
+                        <input type="color" name="color_card_border" value="${configValue(config, "color_card_border", "#e5e7eb")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Encabezado Tabla</label>
+                        <input type="color" name="bg_table_header" value="${configValue(config, "bg_table_header", "#f3f4f6")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Encabezado Tabla</label>
+                        <input type="color" name="color_table_header_text" value="${configValue(config, "color_table_header_text", "#4b5563")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                </div>
+
+                <h4 class="text-md font-semibold mt-2">Tipografía y Colores Generales</h4>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Principal</label>
+                        <input type="color" name="color_body_text" value="${configValue(config, "color_body_text", "#374151")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Encabezados</label>
+                        <input type="color" name="color_heading_text" value="${configValue(config, "color_heading_text", "#111827")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Secundario (Muted)</label>
+                        <input type="color" name="color_muted_text" value="${configValue(config, "color_muted_text", "#6b7280")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 mt-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fuente Principal (Body)</label>
+                        <input type="text" name="font_body" value="${configValue(config, "font_body", defaultFontFamily)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 'Central Bold', Arial, sans-serif">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fuente Encabezados</label>
+                        <input type="text" name="font_heading" value="${configValue(config, "font_heading", defaultFontFamily)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 'Central Bold', Arial, sans-serif">
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 mt-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Archivo de Fuente Principal</label>
+                        ${config.font_body_file ? `<p class="text-xs text-gray-500 mt-1">Actual: <a href="${configValue(config, "font_body_file")}" target="_blank" class="text-blue-600 underline">${configValue(config, "font_body_file")}</a></p>` : '<p class="text-xs text-gray-500 mt-1">Sin archivo subido. Se usará el nombre de fuente escrito arriba.</p>'}
+                        <input type="file" name="font_body_file" accept=".woff,.woff2,.ttf,.otf,font/woff,font/woff2,font/ttf,font/otf" class="mt-2 block w-full text-sm text-gray-500">
+                        <label class="mt-2 flex items-center gap-2 text-xs text-gray-600">
+                            <input type="checkbox" name="remove_font_body_file" value="1" class="rounded border-gray-300">
+                            Quitar fuente subida del texto principal
+                        </label>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Archivo de Fuente Encabezados</label>
+                        ${config.font_heading_file ? `<p class="text-xs text-gray-500 mt-1">Actual: <a href="${configValue(config, "font_heading_file")}" target="_blank" class="text-blue-600 underline">${configValue(config, "font_heading_file")}</a></p>` : '<p class="text-xs text-gray-500 mt-1">Sin archivo subido. Se usará el nombre de fuente escrito arriba.</p>'}
+                        <input type="file" name="font_heading_file" accept=".woff,.woff2,.ttf,.otf,font/woff,font/woff2,font/ttf,font/otf" class="mt-2 block w-full text-sm text-gray-500">
+                        <label class="mt-2 flex items-center gap-2 text-xs text-gray-600">
+                            <input type="checkbox" name="remove_font_heading_file" value="1" class="rounded border-gray-300">
+                            Quitar fuente subida de encabezados
+                        </label>
+                    </div>
+                </div>
+                <p class="text-xs text-gray-500">Formatos permitidos: .woff, .woff2, .ttf y .otf. Si subes un archivo, se usa primero; el campo de texto queda como respaldo.</p>
+
+                <h4 class="text-md font-semibold mt-2">Estilos Visuales</h4>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-3 lg:grid-cols-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Redondeo General (Bordes)</label>
+                        <input type="text" name="border_radius" value="${configValue(config, "border_radius", "0.5rem")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 0.5rem o 8px">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Redondeo de Botones</label>
+                        <input type="text" name="button_radius" value="${configValue(config, "button_radius", "0.5rem")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 9999px para píldora">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Sombra de Tarjetas</label>
+                        <input type="text" name="card_shadow" value="${configValue(config, "card_shadow", "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Estilo de Tarjeta</label>
+                        <select name="card_style" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                            <option value="flat" ${config.card_style === 'flat' ? 'selected' : ''}>Plana (Sombra)</option>
+                            <option value="bordered" ${config.card_style === 'bordered' ? 'selected' : ''}>Con Borde</option>
+                            <option value="minimal" ${config.card_style === 'minimal' ? 'selected' : ''}>Minimalista</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Densidad del Diseño</label>
+                        <select name="layout_density" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                            <option value="comfortable" ${config.layout_density === 'comfortable' ? 'selected' : ''}>Cómoda</option>
+                            <option value="compact" ${config.layout_density === 'compact' ? 'selected' : ''}>Compacta</option>
+                            <option value="spacious" ${config.layout_density === 'spacious' ? 'selected' : ''}>Amplia</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Ajuste de Imagen Producto</label>
+                        <select name="product_image_fit" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                            <option value="cover" ${config.product_image_fit === 'cover' ? 'selected' : ''}>Cubrir</option>
+                            <option value="contain" ${config.product_image_fit === 'contain' ? 'selected' : ''}>Contener</option>
+                        </select>
+                    </div>
+                </div>
+
+                <h4 class="text-md font-semibold mt-2">Formas Decorativas (Portadas y Secciones)</h4>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+                    <div class="flex items-center">
+                        <input type="checkbox" name="decorative_shapes_enabled" id="decorative_shapes_enabled" value="1" ${config.decorative_shapes_enabled === '1' ? 'checked' : ''} class="h-4 w-4 text-blue-600 border-gray-300 rounded">
+                        <label for="decorative_shapes_enabled" class="ml-2 block text-sm font-medium text-gray-700">Habilitar formas decorativas de fondo</label>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Tipo de Formas</label>
+                        <select name="decorative_shape_style" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                            <option value="organic" ${config.decorative_shape_style === 'organic' ? 'selected' : ''}>Orgánicas</option>
+                            <option value="circles" ${config.decorative_shape_style === 'circles' ? 'selected' : ''}>Círculos</option>
+                            <option value="diagonal" ${config.decorative_shape_style === 'diagonal' ? 'selected' : ''}>Diagonales</option>
+                            <option value="dots" ${config.decorative_shape_style === 'dots' ? 'selected' : ''}>Puntos</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Color de Formas (soporta rgba)</label>
+                        <input type="text" name="decorative_shape_color" value="${configValue(config, "decorative_shape_color", "rgba(239, 68, 68, 0.1)")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: rgba(255,255,255,0.05)">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Opacidad de Formas</label>
+                        <input type="text" name="decorative_shape_opacity" value="${configValue(config, "decorative_shape_opacity", "0.45")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="0 a 1">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Blur de Formas</label>
+                        <input type="text" name="decorative_shape_blur" value="${configValue(config, "decorative_shape_blur", "0px")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 16px o 0px">
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: PRECIOS                                                  -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="precios" class="space-y-6 hidden">
+                <div>
+                    <h3 class="text-lg font-semibold mb-1">Tabla Global de Precios por Volumen</h3>
+                    <p class="text-sm text-gray-500 mb-3">Estos rangos se usan en productos que tengan marcada la opción de precios globales. Si dejas la tabla vacía al guardar, no se sobrescribe (anti-wipe).</p>
+                    ${renderPricingEditor(tiers)}
+                </div>
+            </section>
+
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: IA · MODELOS                                             -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="ia-modelos" class="space-y-8 hidden">
+                <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                    <div class="flex items-start justify-between gap-3 mb-3">
                         <div>
-                            <h3 class="text-lg font-semibold text-gray-900">Vista previa del documento</h3>
-                            <p class="text-xs text-gray-500">Muestra el catálogo guardado. El CSS personalizado se aplica en vivo mientras escribes.</p>
-                        </div>
-                        <div class="flex flex-wrap gap-2">
-                            <button type="button" id="preview-desktop" class="px-3 py-2 text-xs font-medium rounded-md bg-white border border-gray-300 hover:bg-gray-100">Desktop</button>
-                            <button type="button" id="preview-mobile" class="px-3 py-2 text-xs font-medium rounded-md bg-white border border-gray-300 hover:bg-gray-100">Móvil</button>
-                            <button type="button" id="preview-refresh" class="px-3 py-2 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700">Recargar</button>
+                            <h3 class="text-lg font-semibold text-gray-900">Modelo de Texto (Descripciones para catálogo)</h3>
+                            <p class="text-xs text-gray-500">Endpoint OpenAI-compatible. Se usa al adaptar descripciones de productos al estilo del catálogo.</p>
                         </div>
                     </div>
-                    <div id="preview-frame-shell" class="mx-auto w-full overflow-hidden rounded-lg border border-gray-300 bg-white shadow-inner" style="height: 720px; max-width: 100%;">
-                        <iframe id="catalog-preview" src="/imprimir?embed=1" class="h-full w-full bg-white" title="Vista previa del catálogo"></iframe>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Base URL ${sourceLabel("llm_base_url", "LLM_BASE_URL")}</label>
+                            <input type="text" name="llm_base_url" value="${eff("llm_base_url", "LLM_BASE_URL", "", "https://api.openai.com/v1")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="https://api.openai.com/v1">
+                            <p class="text-xs text-gray-500 mt-1">Default: <code>https://api.openai.com/v1</code></p>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Modelo primario ${sourceLabel("llm_model", "LLM_MODEL")}</label>
+                            <input type="text" name="llm_model" value="${eff("llm_model", "LLM_MODEL", "", "gpt-4o-mini")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="gpt-4o-mini">
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700">Modelos de fallback ${sourceLabel("llm_fallback_models", "LLM_FALLBACK_MODELS")}</label>
+                            <textarea name="llm_fallback_models" rows="3" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="Uno por línea o separado por comas. Ej:&#10;gpt-4o&#10;claude-3-5-sonnet">${eff("llm_fallback_models", "LLM_FALLBACK_MODELS")}</textarea>
+                            <p class="text-xs text-gray-500 mt-1">Si el modelo primario falla (HTTP no-2xx, timeout o respuesta vacía), el sistema intenta cada modelo de esta lista en orden. Usa la misma Base URL y API Key.</p>
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700">API Key ${sourceLabel("llm_api_key", "LLM_API_KEY")}</label>
+                            <div class="mt-1 flex gap-2">
+                                <input type="password" name="llm_api_key" value="${eff("llm_api_key", "LLM_API_KEY")}" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="sk-... (vacío = no cambiar)" autocomplete="new-password" data-secret>
+                                <button type="button" class="px-3 py-2 border border-gray-300 rounded-md text-xs text-gray-700 bg-white hover:bg-gray-50" data-toggle-secret>Mostrar</button>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Anti-wipe: si dejas el campo vacío al guardar, el valor actual se conserva.</p>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Temperature ${sourceLabel("llm_temperature", "LLM_TEMPERATURE")}</label>
+                            <input type="number" step="0.05" min="0" max="2" name="llm_temperature" value="${eff("llm_temperature", "LLM_TEMPERATURE", "", "0.7")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="0.7">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Máx. palabras descripción ${sourceLabel("llm_description_max_words", "LLM_DESCRIPTION_MAX_WORDS")}</label>
+                            <input type="number" step="1" min="10" max="200" name="llm_description_max_words" value="${eff("llm_description_max_words", "LLM_DESCRIPTION_MAX_WORDS", "", "45")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="45">
+                        </div>
                     </div>
                 </div>
 
-                <div class="border border-gray-200 rounded-lg bg-gray-50 p-4 xl:sticky xl:top-6">
-                    <label for="custom-css-editor" class="block text-sm font-semibold text-gray-900">CSS Personalizado de la Vista Previa</label>
-                    <p class="text-xs text-gray-500 mt-1 mb-3">Este CSS se aplica en vivo al documento de la izquierda y se guarda como parte del tema.</p>
-                    <textarea id="custom-css-editor" name="custom_css" rows="26" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm leading-5" placeholder="/* Escribe aquí tus estilos para el catálogo */">${configValue(config, "custom_css")}</textarea>
-                    <p class="text-xs text-gray-500 mt-3">Ejemplo: <code>.cover-section { background: #fff; }</code> o <code>.theme-card { border-radius: 32px; }</code></p>
+                <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                    <div class="flex items-start justify-between gap-3 mb-3">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-900">Modelo de Imagen (Creador de diseños y mejoras de catálogo)</h3>
+                            <p class="text-xs text-gray-500">Endpoint OpenAI-compatible <code>/v1/images/edits</code>. Se puede dar <strong>Base URL</strong> (recomendado, el sistema completa la ruta) o <strong>Endpoint</strong> completo, y opcionalmente una <strong>Route</strong> override.</p>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Base URL ${sourceLabel("image_base_url", "QWEN_IMAGE_BASE_URL", "IMAGE_ENHANCE_BASE_URL")}</label>
+                            <input type="text" name="image_base_url" value="${eff("image_base_url", "QWEN_IMAGE_BASE_URL", "IMAGE_ENHANCE_BASE_URL")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="https://api.openai.com">
+                            <p class="text-xs text-gray-500 mt-1">Si está, se ignora <em>Endpoint</em>. Default de ruta: <code>/v1/images/edits</code>.</p>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Endpoint completo ${sourceLabel("image_endpoint", "QWEN_IMAGE_ENDPOINT", "IMAGE_ENHANCE_ENDPOINT")}</label>
+                            <input type="text" name="image_endpoint" value="${eff("image_endpoint", "QWEN_IMAGE_ENDPOINT", "IMAGE_ENHANCE_ENDPOINT")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="https://provider/v1/images/edits">
+                            <p class="text-xs text-gray-500 mt-1">Solo se usa si <em>Base URL</em> está vacío.</p>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Route override ${sourceLabel("image_route", "QWEN_IMAGE_ROUTE", "IMAGE_ENHANCE_ROUTE")}</label>
+                            <input type="text" name="image_route" value="${eff("image_route", "QWEN_IMAGE_ROUTE", "IMAGE_ENHANCE_ROUTE")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="/v1/images/edits">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Modelo primario ${sourceLabel("image_model", "QWEN_IMAGE_MODEL", "IMAGE_ENHANCE_MODEL")}</label>
+                            <input type="text" name="image_model" value="${eff("image_model", "QWEN_IMAGE_MODEL", "IMAGE_ENHANCE_MODEL")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="qwen-image">
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700">Modelos de fallback ${sourceLabel("image_fallback_models", "QWEN_IMAGE_FALLBACK_MODELS", "IMAGE_ENHANCE_FALLBACK_MODELS")}</label>
+                            <textarea name="image_fallback_models" rows="3" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="Uno por línea o separado por comas. Ej:&#10;seedream-3&#10;dall-e-3">${eff("image_fallback_models", "QWEN_IMAGE_FALLBACK_MODELS", "IMAGE_ENHANCE_FALLBACK_MODELS")}</textarea>
+                            <p class="text-xs text-gray-500 mt-1">Si el modelo primario falla, el sistema reintenta con cada modelo de esta lista. Cada modelo conserva el retry interno por flakiness (3 intentos cada uno) antes de pasar al siguiente.</p>
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700">API Key ${sourceLabel("image_api_key", "QWEN_IMAGE_API_KEY", "IMAGE_ENHANCE_API_KEY")}</label>
+                            <div class="mt-1 flex gap-2">
+                                <input type="password" name="image_api_key" value="${eff("image_api_key", "QWEN_IMAGE_API_KEY", "IMAGE_ENHANCE_API_KEY")}" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="sk-... (vacío = no cambiar)" autocomplete="new-password" data-secret>
+                                <button type="button" class="px-3 py-2 border border-gray-300 rounded-md text-xs text-gray-700 bg-white hover:bg-gray-50" data-toggle-secret>Mostrar</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Timeout (ms) ${sourceLabel("image_timeout_ms", "QWEN_IMAGE_TIMEOUT_MS")}</label>
+                            <input type="number" step="1000" min="5000" name="image_timeout_ms" value="${eff("image_timeout_ms", "QWEN_IMAGE_TIMEOUT_MS", "", "120000")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="120000">
+                        </div>
+                    </div>
                 </div>
-            </div>
+            </section>
 
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: IA · PROMPTS                                             -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="ia-prompts" class="space-y-6 hidden">
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Nombre de la Empresa</label>
-                    <input type="text" name="company_name" value="${configValue(config, "company_name")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Subtítulo de Portada</label>
-                    <input type="text" name="cover_subtitle" value="${configValue(config, "cover_subtitle", "Catálogo de Productos")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Título de Sección Productos</label>
-                    <input type="text" name="products_title" value="${configValue(config, "products_title", "Nuestros Productos")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">WhatsApp para Cotizaciones</label>
-                    <input type="text" name="quote_whatsapp_number" value="${configValue(config, "quote_whatsapp_number", "4961266304")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 4961266304">
-                    <p class="text-xs text-gray-500 mt-1">Usa solo números. Si son 10 dígitos de México, el sistema agrega 52 para el link de WhatsApp.</p>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Paquetería para Cotización</label>
-                    <input type="text" name="shipping_provider" value="${configValue(config, "shipping_provider", "Estafeta")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: Estafeta">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Costo de Envío Estimado</label>
-                    <input type="number" name="shipping_price" min="0" step="0.01" value="${configValue(config, "shipping_price", "150")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="150">
-                    <p class="text-xs text-gray-500 mt-1">Se suma al total cuando no aplica envío gratis.</p>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Envío Gratis desde Piezas</label>
-                    <input type="number" name="free_shipping_min_pieces" min="0" step="1" value="${configValue(config, "free_shipping_min_pieces", "501")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="501">
-                    <p class="text-xs text-gray-500 mt-1">Con 0 o vacío se desactiva. Con 501, el envío es gratis desde 501 piezas.</p>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Logo (URL o subir archivo)</label>
-                    <input type="text" name="company_logo_url" value="${configValue(config, "company_logo")}" placeholder="URL de imagen..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
-                    <input type="file" name="company_logo_file" accept="image/*" class="block w-full text-sm text-gray-500">
-                </div>
-            </div>
+                    <h3 class="text-lg font-semibold mb-1 flex items-center gap-2">
+                        <svg class="h-5 w-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                        Prompts de IA
+                    </h3>
+                    <p class="text-sm text-gray-500 mb-4">Estos prompts se envían junto con la imagen al provider configurado. Edítalos para ajustar el resultado al estilo de tu marca.</p>
 
-            <div>
-                <label class="block text-sm font-medium text-gray-700">Texto de Bienvenida (acepta HTML)</label>
-                <textarea name="welcome_text" rows="8" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "welcome_text")}</textarea>
-                <p class="text-xs text-gray-500 mt-1">Puedes usar etiquetas como &lt;h2&gt;, &lt;p&gt;, &lt;strong&gt;, &lt;ul&gt;, &lt;li&gt;, &lt;a&gt;, &lt;table&gt; e &lt;img&gt;. Si escribes texto plano, se conservan los saltos de línea.</p>
-            </div>
+                    <div class="space-y-5">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Prompt: Creador de Diseños (Herramientas)</label>
+                            <textarea name="design_creator_prompt" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "design_creator_prompt")}</textarea>
+                            <p class="text-xs text-gray-500 mt-1">Usado por <code class="bg-gray-100 px-1 rounded">Herramientas → Creador de Diseños</code> y por el botón "Crear diseño con IA" dentro de cotizaciones manuales. Incluye <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> donde quieras inyectar la descripción adicional del usuario; si no incluyes el placeholder y el usuario escribe algo, se concatena al final. Si el usuario no escribe nada, se manda solo este prompt.</p>
+                        </div>
 
-            <div>
-                <label class="block text-sm font-medium text-gray-700">Texto de Contacto / Pie de página (acepta HTML)</label>
-                <textarea name="contact_text" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "contact_text")}</textarea>
-                <p class="text-xs text-gray-500 mt-1">Este contenido se inserta como HTML en la última página del catálogo.</p>
-            </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Prompt: Imagen para Catálogo / MakerWorld</label>
+                            <textarea name="catalog_image_prompt" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "catalog_image_prompt")}</textarea>
+                            <p class="text-xs text-gray-500 mt-1">Usado al hacer clic en "Mejorar imagen con IA" al importar productos desde MakerWorld o al editar un producto del catálogo. Aquí no aplica <code class="bg-gray-100 px-1 rounded">{userPrompt}</code>: el prompt se envía tal cual junto con la imagen seleccionada.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-            <div class="border-t pt-6 mt-4">
-                <h3 class="text-lg font-semibold mb-1 flex items-center gap-2">
-                  <svg class="h-5 w-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
-                  Prompts de IA
-                </h3>
-                <p class="text-sm text-gray-500 mb-4">Estos prompts se envían junto con la imagen al provider configurado. Edítalos para ajustar el resultado al estilo de tu marca.</p>
-
-                <div class="space-y-5">
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: INTEGRACIONES                                            -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="integraciones" class="space-y-6 hidden">
+                <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-1">FlareSolverr (scraper de MakerWorld)</h3>
+                    <p class="text-xs text-gray-500 mb-3">URL de un FlareSolverr corriendo (típicamente <code>http://flaresolverr:8191/v1</code>). Se usa para esquivar el desafío de Cloudflare al importar productos desde MakerWorld. Si lo dejas vacío, el sistema intenta fetch directo + proxies públicos.</p>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700">Prompt: Creador de Diseños (Herramientas)</label>
-                        <textarea name="design_creator_prompt" rows="5" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "design_creator_prompt")}</textarea>
-                        <p class="text-xs text-gray-500 mt-1">Usado por <code class="bg-gray-100 px-1 rounded">Herramientas → Creador de Diseños</code> y por el botón "Crear diseño con IA" dentro de cotizaciones manuales. Incluye <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> donde quieras inyectar la descripción adicional del usuario; si no incluyes el placeholder y el usuario escribe algo, se concatena al final. Si el usuario no escribe nada, se manda solo este prompt.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">Prompt: Imagen para Catálogo / MakerWorld</label>
-                        <textarea name="catalog_image_prompt" rows="5" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "catalog_image_prompt")}</textarea>
-                        <p class="text-xs text-gray-500 mt-1">Usado al hacer clic en "Mejorar imagen con IA" al importar productos desde MakerWorld o al editar un producto del catálogo. Aquí no aplica <code class="bg-gray-100 px-1 rounded">{userPrompt}</code>: el prompt se envía tal cual junto con la imagen seleccionada.</p>
+                        <label class="block text-sm font-medium text-gray-700">URL ${sourceLabel("flaresolverr_url", "FLARESOLVERR_URL")}</label>
+                        <input type="text" name="flaresolverr_url" value="${eff("flaresolverr_url", "FLARESOLVERR_URL")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="http://flaresolverr:8191/v1">
                     </div>
                 </div>
-            </div>
+            </section>
 
-            <div>
-                <h3 class="text-lg font-semibold mb-3">Tabla Global de Precios por Volumen</h3>
-                <p class="text-sm text-gray-500 mb-3">Estos rangos se usan en productos que tengan marcada la opción de precios globales.</p>
-                ${renderPricingEditor(tiers)}
-            </div>
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: ACCESO Y SERVIDOR                                        -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="acceso" class="space-y-6 hidden">
+                <div class="border border-amber-200 rounded-lg p-4 bg-amber-50">
+                    <h3 class="text-lg font-semibold text-amber-900 mb-1">⚠ Credenciales de Administrador</h3>
+                    <p class="text-xs text-amber-800 mb-3">Cambiar estos valores afecta inmediatamente al próximo login. La sesión actual sigue activa hasta que cierres sesión o expire la cookie.</p>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Usuario ${sourceLabel("admin_username", "ADMIN_USERNAME")}</label>
+                            <input type="text" name="admin_username" value="${eff("admin_username", "ADMIN_USERNAME", "", "Frxn5J")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Frxn5J" autocomplete="off">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Password ${sourceLabel("admin_password", "ADMIN_PASSWORD")}</label>
+                            <div class="mt-1 flex gap-2">
+                                <input type="password" name="admin_password" value="${eff("admin_password", "ADMIN_PASSWORD")}" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="(vacío = no cambiar)" autocomplete="new-password" data-secret>
+                                <button type="button" class="px-3 py-2 border border-gray-300 rounded-md text-xs text-gray-700 bg-white hover:bg-gray-50" data-toggle-secret>Mostrar</button>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Anti-wipe: si dejas el campo vacío al guardar, el valor actual se conserva.</p>
+                        </div>
+                    </div>
+                </div>
 
-            <hr class="my-6">
-            <h3 class="text-lg font-semibold mb-4">Personalización Visual (Tema)</h3>
+                <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-1">Puerto del servidor</h3>
+                    <p class="text-xs text-gray-500 mb-3">El puerto se lee del <code>.env</code> al iniciar el contenedor. Cambiarlo desde la UI no surte efecto sin reiniciar — edita el <code>.env</code> y reinicia el container si necesitas cambiarlo.</p>
+                    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">PORT (informativo)</label>
+                            <input type="text" value="${escapeHtml(process.env.PORT || "3000")}" disabled class="mt-1 block w-full px-3 py-2 border border-gray-200 rounded-md bg-gray-100 text-gray-500 font-mono text-xs">
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-3">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Color Primario</label>
-                    <input type="color" name="color_primary" value="${configValue(config, "color_primary", "#ef4444")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Color Secundario</label>
-                    <input type="color" name="color_secondary" value="${configValue(config, "color_secondary", "#1f2937")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Color Acento</label>
-                    <input type="color" name="color_accent" value="${configValue(config, "color_accent", "#f87171")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-            </div>
-
-            <h4 class="text-md font-semibold mt-6 mb-2">Fondos y Textos de Secciones</h4>
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fondo Portada</label>
-                    <input type="color" name="bg_cover" value="${configValue(config, "bg_cover", "#1f2937")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Texto Portada</label>
-                    <input type="color" name="color_cover_text" value="${configValue(config, "color_cover_text", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fondo Bienvenida</label>
-                    <input type="color" name="bg_welcome" value="${configValue(config, "bg_welcome", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fondo Productos</label>
-                    <input type="color" name="bg_products" value="${configValue(config, "bg_products", "#f9fafb")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fondo Contacto</label>
-                    <input type="color" name="bg_contact" value="${configValue(config, "bg_contact", "#1f2937")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Texto Contacto</label>
-                    <input type="color" name="color_contact_text" value="${configValue(config, "color_contact_text", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fondo Tarjetas</label>
-                    <input type="color" name="bg_card" value="${configValue(config, "bg_card", "#ffffff")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Borde Tarjetas</label>
-                    <input type="color" name="color_card_border" value="${configValue(config, "color_card_border", "#e5e7eb")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fondo Encabezado Tabla</label>
-                    <input type="color" name="bg_table_header" value="${configValue(config, "bg_table_header", "#f3f4f6")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Texto Encabezado Tabla</label>
-                    <input type="color" name="color_table_header_text" value="${configValue(config, "color_table_header_text", "#4b5563")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-            </div>
-
-            <h4 class="text-md font-semibold mt-6 mb-2">Tipografía y Colores Generales</h4>
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-3">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Texto Principal</label>
-                    <input type="color" name="color_body_text" value="${configValue(config, "color_body_text", "#374151")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Texto Encabezados</label>
-                    <input type="color" name="color_heading_text" value="${configValue(config, "color_heading_text", "#111827")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Texto Secundario (Muted)</label>
-                    <input type="color" name="color_muted_text" value="${configValue(config, "color_muted_text", "#6b7280")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
-                </div>
-            </div>
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 mt-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fuente Principal (Body)</label>
-                    <input type="text" name="font_body" value="${configValue(config, "font_body", defaultFontFamily)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 'Central Bold', Arial, sans-serif">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Fuente Encabezados</label>
-                    <input type="text" name="font_heading" value="${configValue(config, "font_heading", defaultFontFamily)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 'Central Bold', Arial, sans-serif">
-                </div>
-            </div>
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 mt-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Archivo de Fuente Principal</label>
-                    ${config.font_body_file ? `<p class="text-xs text-gray-500 mt-1">Actual: <a href="${configValue(config, "font_body_file")}" target="_blank" class="text-blue-600 underline">${configValue(config, "font_body_file")}</a></p>` : '<p class="text-xs text-gray-500 mt-1">Sin archivo subido. Se usará el nombre de fuente escrito arriba.</p>'}
-                    <input type="file" name="font_body_file" accept=".woff,.woff2,.ttf,.otf,font/woff,font/woff2,font/ttf,font/otf" class="mt-2 block w-full text-sm text-gray-500">
-                    <label class="mt-2 flex items-center gap-2 text-xs text-gray-600">
-                        <input type="checkbox" name="remove_font_body_file" value="1" class="rounded border-gray-300">
-                        Quitar fuente subida del texto principal
-                    </label>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Archivo de Fuente Encabezados</label>
-                    ${config.font_heading_file ? `<p class="text-xs text-gray-500 mt-1">Actual: <a href="${configValue(config, "font_heading_file")}" target="_blank" class="text-blue-600 underline">${configValue(config, "font_heading_file")}</a></p>` : '<p class="text-xs text-gray-500 mt-1">Sin archivo subido. Se usará el nombre de fuente escrito arriba.</p>'}
-                    <input type="file" name="font_heading_file" accept=".woff,.woff2,.ttf,.otf,font/woff,font/woff2,font/ttf,font/otf" class="mt-2 block w-full text-sm text-gray-500">
-                    <label class="mt-2 flex items-center gap-2 text-xs text-gray-600">
-                        <input type="checkbox" name="remove_font_heading_file" value="1" class="rounded border-gray-300">
-                        Quitar fuente subida de encabezados
-                    </label>
-                </div>
-            </div>
-            <p class="text-xs text-gray-500 mt-2">Formatos permitidos: .woff, .woff2, .ttf y .otf. Si subes un archivo, se usa primero; el campo de texto queda como respaldo.</p>
-
-            <h4 class="text-md font-semibold mt-6 mb-2">Estilos Visuales</h4>
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-3 lg:grid-cols-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Redondeo General (Bordes)</label>
-                    <input type="text" name="border_radius" value="${configValue(config, "border_radius", "0.5rem")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 0.5rem o 8px">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Redondeo de Botones</label>
-                    <input type="text" name="button_radius" value="${configValue(config, "button_radius", "0.5rem")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 9999px para píldora">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Sombra de Tarjetas</label>
-                    <input type="text" name="card_shadow" value="${configValue(config, "card_shadow", "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Estilo de Tarjeta</label>
-                    <select name="card_style" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                        <option value="flat" ${config.card_style === 'flat' ? 'selected' : ''}>Plana (Sombra)</option>
-                        <option value="bordered" ${config.card_style === 'bordered' ? 'selected' : ''}>Con Borde</option>
-                        <option value="minimal" ${config.card_style === 'minimal' ? 'selected' : ''}>Minimalista</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Densidad del Diseño</label>
-                    <select name="layout_density" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                        <option value="comfortable" ${config.layout_density === 'comfortable' ? 'selected' : ''}>Cómoda</option>
-                        <option value="compact" ${config.layout_density === 'compact' ? 'selected' : ''}>Compacta</option>
-                        <option value="spacious" ${config.layout_density === 'spacious' ? 'selected' : ''}>Amplia</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Ajuste de Imagen Producto</label>
-                    <select name="product_image_fit" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                        <option value="cover" ${config.product_image_fit === 'cover' ? 'selected' : ''}>Cubrir</option>
-                        <option value="contain" ${config.product_image_fit === 'contain' ? 'selected' : ''}>Contener</option>
-                    </select>
-                </div>
-            </div>
-
-            <h4 class="text-md font-semibold mt-6 mb-2">Formas Decorativas (Portadas y Secciones)</h4>
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-                <div class="flex items-center">
-                    <input type="checkbox" name="decorative_shapes_enabled" id="decorative_shapes_enabled" value="1" ${config.decorative_shapes_enabled === '1' ? 'checked' : ''} class="h-4 w-4 text-blue-600 border-gray-300 rounded">
-                    <label for="decorative_shapes_enabled" class="ml-2 block text-sm font-medium text-gray-700">Habilitar formas decorativas de fondo</label>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Tipo de Formas</label>
-                    <select name="decorative_shape_style" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                        <option value="organic" ${config.decorative_shape_style === 'organic' ? 'selected' : ''}>Orgánicas</option>
-                        <option value="circles" ${config.decorative_shape_style === 'circles' ? 'selected' : ''}>Círculos</option>
-                        <option value="diagonal" ${config.decorative_shape_style === 'diagonal' ? 'selected' : ''}>Diagonales</option>
-                        <option value="dots" ${config.decorative_shape_style === 'dots' ? 'selected' : ''}>Puntos</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Color de Formas (soporta rgba)</label>
-                    <input type="text" name="decorative_shape_color" value="${configValue(config, "decorative_shape_color", "rgba(239, 68, 68, 0.1)")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: rgba(255,255,255,0.05)">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Opacidad de Formas</label>
-                    <input type="text" name="decorative_shape_opacity" value="${configValue(config, "decorative_shape_opacity", "0.45")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="0 a 1">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Blur de Formas</label>
-                    <input type="text" name="decorative_shape_blur" value="${configValue(config, "decorative_shape_blur", "0px")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: 16px o 0px">
-                </div>
-            </div>
-
-            <div class="pt-4 border-t">
+            <!-- Save button -->
+            <div class="pt-4 border-t flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <p class="text-xs text-gray-500">Un solo "Guardar" persiste los valores de <strong>todas</strong> las pestañas a la vez.</p>
                 <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Guardar Configuración</button>
             </div>
         </form>
     </div>
     <script>
       (() => {
+        // ── Tabs ─────────────────────────────────────────────────────────
+        const tabs = Array.from(document.querySelectorAll('[data-config-tab]'));
+        const panes = Array.from(document.querySelectorAll('[data-config-pane]'));
+        const activateTab = (name) => {
+          tabs.forEach((tab) => {
+            const active = tab.dataset.configTab === name;
+            tab.setAttribute('aria-selected', active ? 'true' : 'false');
+            if (active) {
+              tab.classList.add('border-blue-600', 'text-blue-700');
+              tab.classList.remove('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
+            } else {
+              tab.classList.remove('border-blue-600', 'text-blue-700');
+              tab.classList.add('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
+            }
+          });
+          panes.forEach((pane) => {
+            pane.classList.toggle('hidden', pane.dataset.configPane !== name);
+          });
+          try { history.replaceState(null, '', '#tab=' + name); } catch (_) {}
+        };
+        tabs.forEach((tab) => tab.addEventListener('click', () => activateTab(tab.dataset.configTab)));
+        const initial = (location.hash.match(/tab=([\\w-]+)/) || [])[1];
+        if (initial && tabs.some((t) => t.dataset.configTab === initial)) activateTab(initial);
+
+        // ── Secret reveal ────────────────────────────────────────────────
+        document.querySelectorAll('[data-toggle-secret]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const input = btn.parentElement && btn.parentElement.querySelector('input[data-secret]');
+            if (!input) return;
+            const isPwd = input.type === 'password';
+            input.type = isPwd ? 'text' : 'password';
+            btn.textContent = isPwd ? 'Ocultar' : 'Mostrar';
+          });
+        });
+
+        // ── Live CSS preview ─────────────────────────────────────────────
         const editor = document.getElementById('custom-css-editor');
         const frame = document.getElementById('catalog-preview');
         const shell = document.getElementById('preview-frame-shell');
@@ -1994,17 +2354,17 @@ adminRoutes.get("/config", (c) => {
           style.textContent = editor.value || '';
         };
 
-        frame?.addEventListener('load', applyCss);
-        editor?.addEventListener('input', applyCss);
-        refresh?.addEventListener('click', () => {
-          if (frame?.contentWindow) frame.contentWindow.location.reload();
+        frame && frame.addEventListener('load', applyCss);
+        editor && editor.addEventListener('input', applyCss);
+        refresh && refresh.addEventListener('click', () => {
+          if (frame && frame.contentWindow) frame.contentWindow.location.reload();
         });
-        desktop?.addEventListener('click', () => {
+        desktop && desktop.addEventListener('click', () => {
           if (!shell) return;
           shell.style.maxWidth = '100%';
           shell.style.height = '720px';
         });
-        mobile?.addEventListener('click', () => {
+        mobile && mobile.addEventListener('click', () => {
           if (!shell) return;
           shell.style.maxWidth = '390px';
           shell.style.height = '720px';
@@ -2027,6 +2387,15 @@ adminRoutes.post("/config", async (c) => {
   const updates: Record<string, string> = {};
   const put = (key: string) => {
     if (key in body) updates[key] = formString(body[key]);
+  };
+  // Para los secretos: si vienen vacíos, no se escribe la clave, así el valor
+  // anterior (sea DB o .env) se conserva. Evita wipes accidentales cuando el
+  // usuario guarda la config solo para cambiar otra pestaña.
+  const putSecret = (key: string) => {
+    if (!(key in body)) return;
+    const value = formString(body[key]);
+    if (value.length === 0) return;
+    updates[key] = value;
   };
 
   // Campos simples: solo se escriben si vinieron en el body.
@@ -2068,8 +2437,29 @@ adminRoutes.post("/config", async (c) => {
     "decorative_shape_opacity",
     "decorative_shape_blur",
     "custom_css",
+    // ── Settings que sobrescriben al .env ─────────────────────────────
+    // Texto plano (URL, modelo, número): si vienen vacíos sí se borra el
+    // override de DB y el sistema cae al .env como fallback.
+    "llm_base_url",
+    "llm_model",
+    "llm_fallback_models",
+    "llm_temperature",
+    "llm_description_max_words",
+    "image_base_url",
+    "image_endpoint",
+    "image_route",
+    "image_model",
+    "image_fallback_models",
+    "image_timeout_ms",
+    "flaresolverr_url",
+    "admin_username",
   ];
   for (const key of simpleFields) put(key);
+
+  // Secretos: anti-wipe explícito. Vacío = no tocar.
+  putSecret("llm_api_key");
+  putSecret("image_api_key");
+  putSecret("admin_password");
 
   // Campos con default cuando llegan vacíos.
   if ("shipping_provider" in body) updates.shipping_provider = formString(body.shipping_provider) || "Estafeta";

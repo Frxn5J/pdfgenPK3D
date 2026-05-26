@@ -330,6 +330,27 @@ export function initDb() {
   seedConfig("decorative_shape_blur", "0px");
   seedConfig("custom_css", "");
 
+  // ── Settings que históricamente vivían en .env ────────────────────────
+  // Se siembran vacías. Los helpers leen DB primero y caen al .env como
+  // fallback, así un cambio guardado desde /admin/config se aplica al
+  // instante sin reiniciar el container.
+  seedConfig("llm_base_url", "");
+  seedConfig("llm_api_key", "");
+  seedConfig("llm_model", "");
+  seedConfig("llm_fallback_models", "");
+  seedConfig("llm_temperature", "");
+  seedConfig("llm_description_max_words", "");
+  seedConfig("image_base_url", "");
+  seedConfig("image_endpoint", "");
+  seedConfig("image_route", "");
+  seedConfig("image_api_key", "");
+  seedConfig("image_model", "");
+  seedConfig("image_fallback_models", "");
+  seedConfig("image_timeout_ms", "");
+  seedConfig("flaresolverr_url", "");
+  seedConfig("admin_username", "");
+  seedConfig("admin_password", "");
+
   // Existing databases created before theme customization kept this old default.
   db.run(`
     UPDATE config
