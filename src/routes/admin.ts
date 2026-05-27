@@ -735,18 +735,38 @@ const urlToDataUrl = async (url: string): Promise<string> => {
   return `data:${mime};base64,${buf.toString("base64")}`;
 };
 
-// The OpenAI-compatible /v1/images/edits endpoint requires the image as an
-// uploaded file (multipart/form-data), so we need the raw bytes — not a URL.
+const mimeFromExtension = (path: string) => {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  return "image/png";
+};
+
+// Materializa cualquier imagen entrante a BYTES, siempre resueltos por el
+// server, para no depender de que el proveedor pueda alcanzar el origen
+// (p.ej. el CDN de MakerWorld). El endpoint /v1/images/edits es
+// multipart/form-data y necesita el archivo, no una URL.
+//   - data URL   -> decodifica base64
+//   - /uploads/  -> lee el archivo local del disco (data/uploads/...)
+//   - http(s)    -> descarga en el server
+//   - base64     -> decodifica
 const resolveImageBytes = async (value: string): Promise<{ bytes: Buffer; mime: string }> => {
-  const dataImage = dataImageToBuffer(value);
+  const trimmed = value.trim();
+  const dataImage = dataImageToBuffer(trimmed);
   if (dataImage) return { bytes: dataImage.buffer, mime: dataImage.mime };
-  if (/^https?:\/\//i.test(value)) {
-    const res = await fetch(value, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
-    if (!res.ok) throw new Error(`No se pudo descargar la imagen: HTTP ${res.status}`);
-    return { bytes: Buffer.from(await res.arrayBuffer()), mime: res.headers.get("content-type") || "image/png" };
+  if (/^\/uploads\//.test(trimmed)) {
+    const localPath = join(process.cwd(), "data", trimmed.replace(/^\/+/, ""));
+    if (!fs.existsSync(localPath)) throw new Error(`No se encontró el archivo local de la imagen: ${trimmed}`);
+    return { bytes: fs.readFileSync(localPath), mime: mimeFromExtension(trimmed) };
   }
-  if (looksLikeBase64Image(value)) {
-    return { bytes: Buffer.from(value.replace(/\s+/g, ""), "base64"), mime: "image/png" };
+  if (/^https?:\/\//i.test(trimmed)) {
+    const res = await fetch(trimmed, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
+    if (!res.ok) throw new Error(`No se pudo descargar la imagen: HTTP ${res.status}`);
+    return { bytes: Buffer.from(await res.arrayBuffer()), mime: res.headers.get("content-type") || mimeFromExtension(trimmed) };
+  }
+  if (looksLikeBase64Image(trimmed)) {
+    return { bytes: Buffer.from(trimmed.replace(/\s+/g, ""), "base64"), mime: "image/png" };
   }
   throw new Error("No se pudo preparar la imagen para enviar al proveedor.");
 };
@@ -762,20 +782,10 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
   const dbConfig = getConfig();
   const prompt = (dbConfig.catalog_image_prompt || "").trim() || config.prompt;
 
-  // Convert HTTP URLs to base64 data URLs to avoid filename-related OSS signature issues on the provider side
-  let resolvedImage = imageUrl;
-  if (/^https?:\/\//i.test(imageUrl)) {
-    try {
-      resolvedImage = await urlToDataUrl(imageUrl);
-    } catch (e) {
-      console.warn("[Qwen image/enhance] Could not convert URL to data URL, sending raw URL:", e);
-    }
-  }
-
-  // El endpoint /v1/images/edits es multipart/form-data: necesitamos los bytes
-  // de la imagen una sola vez y reconstruimos el FormData por intento (el body
+  // El endpoint /v1/images/edits es multipart/form-data: resolvemos los bytes
+  // en el server una sola vez y reconstruimos el FormData por intento (el body
   // de un fetch se consume y no se puede reutilizar).
-  const { bytes: imageBytes, mime: imageMime } = await resolveImageBytes(resolvedImage);
+  const { bytes: imageBytes, mime: imageMime } = await resolveImageBytes(imageUrl);
   const imageFilename = `product.${imageExtensionFromMime(imageMime)}`;
 
   // Cadena de modelos. Si el array está vacío usamos [""] para mantener el
