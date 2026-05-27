@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
@@ -407,9 +408,18 @@ type CategorySuggestion =
   | { match: "new"; name: string }
   | null;
 
+// Sugerencia de subcategoría: igual que la de categoría, pero siempre vive
+// DENTRO de la categoría sugerida. "existing" solo es válida si la subcategoría
+// pertenece a esa categoría; si no, se trata como "new".
+type SubcategorySuggestion =
+  | { match: "existing"; id: number; name: string }
+  | { match: "new"; name: string }
+  | null;
+
 type AdaptedDescriptionResult = {
   description: string;
   category: CategorySuggestion;
+  subcategory: SubcategorySuggestion;
 };
 
 // Encuentra el primer objeto JSON BALANCEADO dentro de un texto. Útil cuando
@@ -471,16 +481,16 @@ const tryExtractJsonObject = (raw: string): any | null => {
 // Intenta parsear un JSON con la forma esperada. Tolera respuestas malformadas:
 // si no se puede parsear, devuelve {description: raw, category: null} para que
 // la UI por lo menos rellene la descripción.
-const parseAdaptedJson = (raw: string, categories: Category[]): AdaptedDescriptionResult => {
+const parseAdaptedJson = (raw: string, categories: Category[], subcategories: Subcategory[] = []): AdaptedDescriptionResult => {
   const parsed = tryExtractJsonObject(raw);
   if (!parsed || typeof parsed !== "object") {
     console.warn("[LLM description/adapt] No se pudo extraer JSON del raw. Cae al fallback (raw como descripción).", { rawPreview: raw.slice(0, 300) });
-    return { description: raw.trim(), category: null };
+    return { description: raw.trim(), category: null, subcategory: null };
   }
   const desc = typeof parsed.description === "string" ? parsed.description.trim() : "";
   if (!desc) {
     console.warn("[LLM description/adapt] JSON parseado pero sin 'description' string. Cae al fallback.", { parsedKeys: Object.keys(parsed), rawPreview: raw.slice(0, 300) });
-    return { description: raw.trim(), category: null };
+    return { description: raw.trim(), category: null, subcategory: null };
   }
   const catRaw = parsed.category;
   let category: CategorySuggestion = null;
@@ -505,10 +515,43 @@ const parseAdaptedJson = (raw: string, categories: Category[]): AdaptedDescripti
       }
     }
   }
-  return { description: desc, category };
+
+  // La subcategoría siempre vive dentro de la categoría sugerida. Si la
+  // categoría es "existing" podemos validar contra las subcategorías de esa
+  // categoría; si es "new" (o null) no hay id de categoría todavía, así que
+  // solo aceptamos una subcategoría "new" por nombre.
+  const subRaw = parsed.subcategory;
+  let subcategory: SubcategorySuggestion = null;
+  if (category && subRaw && typeof subRaw === "object") {
+    const categorySubs = category.match === "existing"
+      ? subcategories.filter((s) => s.category_id === category.id)
+      : [];
+    const match = subRaw.match;
+    if (match === "existing" && category.match === "existing") {
+      const id = Number.parseInt(String(subRaw.id), 10);
+      if (Number.isFinite(id)) {
+        const found = categorySubs.find((s) => s.id === id);
+        if (found) subcategory = { match: "existing", id: found.id, name: found.name };
+        else console.warn("[LLM description/adapt] subcategoría match=existing pero id no pertenece a la categoría; descartada", { id, categoryId: category.id });
+      }
+    }
+    if (!subcategory) {
+      const name = typeof subRaw.name === "string" ? subRaw.name.trim() : "";
+      if (name) {
+        const existing = categorySubs.find((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+        if (existing) subcategory = { match: "existing", id: existing.id, name: existing.name };
+        else subcategory = { match: "new", name };
+      }
+    }
+  }
+  return { description: desc, category, subcategory };
 };
 
-const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "", categories: Category[] = []): Promise<AdaptedDescriptionResult> => {
+// Default de la instrucción de reescritura (tarea 1) del botón "Adaptar a
+// catálogo con IA". Editable desde /admin/config → Prompts (catalog_description_prompt).
+const DEFAULT_CATALOG_DESCRIPTION_PROMPT = "Reescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Un solo párrafo corto, comercial, descriptivo, que invite a comprar sin exagerar. Mantente fiel a la información original.";
+
+const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "", categories: Category[] = [], subcategories: Subcategory[] = []): Promise<AdaptedDescriptionResult> => {
   const config = llmConfig();
   if (!config.apiKey) throw new Error("LLM_API_KEY no está configurada en el entorno.");
   if (!description.trim()) throw new Error("Primero necesitas una descripción base para adaptarla.");
@@ -528,14 +571,27 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
     availableCategories: categories.length,
   });
 
-  // Contrato JSON: el modelo debe devolver descripción + sugerencia de categoría.
-  // Cuando hay categorías disponibles las inyectamos en el prompt; cuando no,
-  // el modelo siempre debe proponer una nueva.
+  // Contrato JSON: el modelo debe devolver descripción + sugerencia de categoría
+  // y subcategoría. Inyectamos las categorías con sus subcategorías anidadas
+  // para que el modelo pueda reutilizar una existente dentro de la categoría.
+  const subsByCategory = (categoryId: number) => subcategories.filter((s) => s.category_id === categoryId);
   const categoryList = categories.length > 0
-    ? `\n\nCategorías disponibles:\n${categories.map((c) => `- id=${c.id} → ${c.name}`).join("\n")}`
+    ? `\n\nCategorías disponibles (con sus subcategorías):\n${categories.map((c) => {
+        const subs = subsByCategory(c.id);
+        const subText = subs.length > 0
+          ? `\n    subcategorías: ${subs.map((s) => `id=${s.id}→${s.name}`).join(", ")}`
+          : `\n    (sin subcategorías todavía)`;
+        return `- id=${c.id} → ${c.name}${subText}`;
+      }).join("\n")}`
     : "\n\nNo hay categorías creadas todavía.";
 
-  const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}${categoryList}\n\nTareas:\n1) Reescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Máximo ${config.maxWords} palabras. Un solo párrafo corto, comercial, descriptivo, que invite a comprar sin exagerar. Mantente fiel a la información original.\n2) Asigna una categoría:\n   - Si el producto encaja claramente en alguna de las categorías disponibles, devuelve {"match":"existing","id":<id>}.\n   - Si NO encaja en ninguna existente (o si no hay ninguna), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado), devuelve {"match":"new","name":"<nombre>"}.\n   - Prefiere reutilizar una existente antes que crear una nueva si dudas.\n${hasImage ? "3) Si la imagen aporta información clara sobre forma, estilo o apariencia, úsala como contexto adicional, sin inventar medidas/materiales/funciones." : ""}\n\nDevuelve SOLO un objeto JSON válido con esta forma exacta, sin texto extra ni cercas de markdown:\n{"description":"...","category":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"}}`;
+  // Instrucción de reescritura (tarea 1) configurable desde /admin/config →
+  // Prompts. Las tareas 2-3 (categoría/subcategoría) y el contrato JSON quedan
+  // fijos para no romper el parser. El límite de palabras se inyecta aparte
+  // (campo dedicado) para que siempre mande, escriba lo que escriba el usuario.
+  const descPrompt = settingValue("catalog_description_prompt", "LLM_DESCRIPTION_PROMPT", DEFAULT_CATALOG_DESCRIPTION_PROMPT);
+  const imageTaskNum = hasImage ? "4" : "";
+  const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}${categoryList}\n\nTareas:\n1) ${descPrompt} Máximo ${config.maxWords} palabras.\n2) Asigna una categoría:\n   - Si el producto encaja claramente en alguna de las categorías disponibles, devuelve {"match":"existing","id":<id>}.\n   - Si NO encaja en ninguna existente (o si no hay ninguna), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado), devuelve {"match":"new","name":"<nombre>"}.\n   - Prefiere reutilizar una existente antes que crear una nueva si dudas.\n3) Asigna una subcategoría DENTRO de la categoría elegida (más específica que la categoría; ej. categoría "Llaveros" → subcategoría "Motos", "Fidget toy", "Clicker"; categoría "Figuras" → nombre de la serie):\n   - Si la categoría elegida ya tiene una subcategoría que encaja, devuelve {"match":"existing","id":<id>} (usando un id de la lista de subcategorías de ESA categoría).\n   - Si no encaja ninguna (o la categoría es nueva), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado): {"match":"new","name":"<nombre>"}.\n   - Si el producto no amerita subcategoría, devuelve null.\n${hasImage ? `${imageTaskNum}) Si la imagen aporta información clara sobre forma, estilo, serie o apariencia, úsala como contexto adicional, sin inventar medidas/materiales/funciones.` : ""}\n\nDevuelve SOLO un objeto JSON válido con esta forma exacta, sin texto extra ni cercas de markdown:\n{"description":"...","category":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"},"subcategory":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"}|null}`;
 
   const attempts: { model: string; error: string }[] = [];
 
@@ -590,10 +646,11 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
       if (attempts.length > 0) {
         console.log(`[LLM description/adapt] modelo "${model}" tuvo éxito tras ${attempts.length} fallback(s)`);
       }
-      const parsed = parseAdaptedJson(content, categories);
+      const parsed = parseAdaptedJson(content, categories, subcategories);
       return {
         description: trimToWordLimit(parsed.description, config.maxWords),
         category: parsed.category,
+        subcategory: parsed.subcategory,
       };
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
@@ -736,6 +793,42 @@ const urlToDataUrl = async (url: string): Promise<string> => {
   return `data:${mime};base64,${buf.toString("base64")}`;
 };
 
+const mimeFromExtension = (path: string) => {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  return "image/png";
+};
+
+// Materializa cualquier imagen entrante a BYTES, siempre resueltos por el
+// server, para no depender de que el proveedor pueda alcanzar el origen
+// (p.ej. el CDN de MakerWorld). El endpoint /v1/images/edits es
+// multipart/form-data y necesita el archivo, no una URL.
+//   - data URL   -> decodifica base64
+//   - /uploads/  -> lee el archivo local del disco (data/uploads/...)
+//   - http(s)    -> descarga en el server
+//   - base64     -> decodifica
+const resolveImageBytes = async (value: string): Promise<{ bytes: Buffer; mime: string }> => {
+  const trimmed = value.trim();
+  const dataImage = dataImageToBuffer(trimmed);
+  if (dataImage) return { bytes: dataImage.buffer, mime: dataImage.mime };
+  if (/^\/uploads\//.test(trimmed)) {
+    const localPath = join(process.cwd(), "data", trimmed.replace(/^\/+/, ""));
+    if (!fs.existsSync(localPath)) throw new Error(`No se encontró el archivo local de la imagen: ${trimmed}`);
+    return { bytes: fs.readFileSync(localPath), mime: mimeFromExtension(trimmed) };
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    const res = await fetch(trimmed, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
+    if (!res.ok) throw new Error(`No se pudo descargar la imagen: HTTP ${res.status}`);
+    return { bytes: Buffer.from(await res.arrayBuffer()), mime: res.headers.get("content-type") || mimeFromExtension(trimmed) };
+  }
+  if (looksLikeBase64Image(trimmed)) {
+    return { bytes: Buffer.from(trimmed.replace(/\s+/g, ""), "base64"), mime: "image/png" };
+  }
+  throw new Error("No se pudo preparar la imagen para enviar al proveedor.");
+};
+
 const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceResult> => {
   const config = imageEnhanceConfig();
   const endpoint = resolveImageEnhanceEndpoint(config);
@@ -747,15 +840,11 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
   const dbConfig = getConfig();
   const prompt = (dbConfig.catalog_image_prompt || "").trim() || config.prompt;
 
-  // Convert HTTP URLs to base64 data URLs to avoid filename-related OSS signature issues on the provider side
-  let resolvedImage = imageUrl;
-  if (/^https?:\/\//i.test(imageUrl)) {
-    try {
-      resolvedImage = await urlToDataUrl(imageUrl);
-    } catch (e) {
-      console.warn("[Qwen image/enhance] Could not convert URL to data URL, sending raw URL:", e);
-    }
-  }
+  // El endpoint /v1/images/edits es multipart/form-data: resolvemos los bytes
+  // en el server una sola vez y reconstruimos el FormData por intento (el body
+  // de un fetch se consume y no se puede reutilizar).
+  const { bytes: imageBytes, mime: imageMime } = await resolveImageBytes(imageUrl);
+  const imageFilename = `product.${imageExtensionFromMime(imageMime)}`;
 
   // Cadena de modelos. Si el array está vacío usamos [""] para mantener el
   // comportamiento histórico (provider-default).
@@ -770,32 +859,25 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
         endpoint,
         model: model || "provider-default",
         hasApiKey: Boolean(config.apiKey),
-        imageSource: resolvedImage.startsWith("data:image/") ? "uploaded-file" : "url",
+        imageBytes: imageBytes.length,
+        imageMime,
       });
 
-      const headers: Record<string, string> = { "content-type": "application/json" };
+      // multipart/form-data según el contrato de OpenAI /v1/images/edits.
+      // No fijamos content-type a mano: fetch deriva el boundary del FormData.
+      const form = new FormData();
+      form.append("image", new Blob([imageBytes], { type: imageMime }), imageFilename);
+      form.append("prompt", prompt);
+      if (model) form.append("model", model);
+
+      const headers: Record<string, string> = {};
       if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
       const response = await fetch(endpoint, {
         method: "POST",
         headers,
         signal: controller.signal,
-        body: JSON.stringify({
-          model: model || undefined,
-          prompt,
-          image: resolvedImage,
-          imageUrl: resolvedImage,
-          image_url: resolvedImage,
-          response_format: "url",
-          source: "pixkey3d-makerworld",
-          intent: "catalog-product-photo-white-background",
-          options: {
-            background: "white",
-            noText: true,
-            style: "studio product photography",
-            preserveProduct: true,
-          },
-        }),
+        body: form,
       });
 
       const contentType = response.headers.get("content-type") || "";
@@ -1199,6 +1281,50 @@ const renderDescriptionField = (value = "", rows = 3) => `
   </div>
 `;
 
+// Renderiza los selects de Categoría + Subcategoría (en cascada). La lista
+// completa de subcategorías viaja en data-all-subcategories del select para que
+// el JS pueda repoblar al cambiar la categoría sin recargar. El select de
+// subcategoría solo muestra las de la categoría seleccionada.
+const renderCategoryFields = (categories: Category[], subcategories: Subcategory[], selectedCategoryId: number | null = null, selectedSubId: number | null = null) => {
+  const allSubs = subcategories.map((s) => ({ id: s.id, category_id: s.category_id, name: s.name }));
+  const dataAttr = escapeHtml(JSON.stringify(allSubs));
+  const visibleSubs = selectedCategoryId != null ? subcategories.filter((s) => s.category_id === selectedCategoryId) : [];
+  return `
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700">Categoría</label>
+        <select name="category_id" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+          <option value="" ${selectedCategoryId == null ? 'selected' : ''}>— Sin categoría —</option>
+          ${categories.map((cat) => `<option value="${cat.id}" ${selectedCategoryId === cat.id ? 'selected' : ''}>${escapeHtml(cat.name)}</option>`).join("")}
+        </select>
+        <p class="text-xs text-gray-500 mt-1">¿Falta una? <a href="/admin/categorias" target="_blank" class="text-blue-600 underline">Gestionar categorías</a></p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700">Subcategoría</label>
+        <select name="subcategory_id" data-all-subcategories="${dataAttr}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+          <option value="">— Sin subcategoría —</option>
+          ${visibleSubs.map((s) => `<option value="${s.id}" ${s.id === selectedSubId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join("")}
+        </select>
+        <p class="text-xs text-gray-500 mt-1">Se filtra según la categoría. La IA puede sugerirla al adaptar.</p>
+      </div>
+    </div>
+  `;
+};
+
+// Lee category_id/subcategory_id de un form y valida la jerarquía: la
+// subcategoría solo se conserva si existe y pertenece a la categoría elegida.
+const parseCategoryAndSub = (body: Record<string, unknown>): { categoryId: number | null; subcategoryId: number | null } => {
+  const rawCategory = formString(body.category_id);
+  const categoryId = rawCategory && rawCategory !== "" ? (Number.parseInt(rawCategory, 10) || null) : null;
+  const rawSub = formString(body.subcategory_id);
+  let subcategoryId = rawSub && rawSub !== "" ? (Number.parseInt(rawSub, 10) || null) : null;
+  if (subcategoryId != null) {
+    const sub = getSubcategory(subcategoryId);
+    if (!sub || categoryId == null || sub.category_id !== categoryId) subcategoryId = null;
+  }
+  return { categoryId, subcategoryId };
+};
+
 const descriptionAiScript = `
   <script>
     (() => {
@@ -1291,6 +1417,85 @@ const descriptionAiScript = `
         return '';
       };
 
+      // Lista completa de subcategorías embebida en el select. La usamos para
+      // repoblar el dropdown al cambiar la categoría (cascada) sin recargar.
+      const subcatData = (select) => {
+        try { return JSON.parse(select.dataset.allSubcategories || '[]'); } catch { return []; }
+      };
+
+      // Repuebla select[name=subcategory_id] con las subcategorías de la
+      // categoría dada. Siempre deja la opción "— Sin subcategoría —".
+      const populateSubcategorySelect = (form, categoryId, selectedSubId) => {
+        const sub = form?.querySelector('select[name="subcategory_id"]');
+        if (!(sub instanceof HTMLSelectElement)) return;
+        const catId = categoryId !== '' && categoryId != null ? Number(categoryId) : null;
+        const matches = catId != null ? subcatData(sub).filter((s) => Number(s.category_id) === catId) : [];
+        sub.innerHTML = '';
+        sub.appendChild(new Option('— Sin subcategoría —', ''));
+        for (const s of matches) {
+          const option = new Option(s.name, String(s.id));
+          if (selectedSubId != null && String(s.id) === String(selectedSubId)) option.selected = true;
+          sub.appendChild(option);
+        }
+      };
+
+      // Cascada: al cambiar la categoría manualmente, refresca la subcategoría.
+      document.addEventListener('change', (event) => {
+        const target = event.target;
+        if (target instanceof HTMLSelectElement && target.name === 'category_id') {
+          populateSubcategorySelect(target.closest('form'), target.value, null);
+        }
+      });
+
+      // Aplica la sugerencia de subcategoría DENTRO de la categoría ya resuelta
+      // (categoryId es el value del select de categoría tras aplicar su propia
+      // sugerencia). Sin categoría no hay dónde colgar la subcategoría.
+      const applySubcategorySuggestion = async (form, suggestion, categoryId, status) => {
+        if (!suggestion || !form) return '';
+        const sub = form.querySelector('select[name="subcategory_id"]');
+        if (!(sub instanceof HTMLSelectElement)) return '';
+        if (!categoryId) return ' (La subcategoría sugerida necesita una categoría asignada.)';
+        populateSubcategorySelect(form, categoryId, null);
+
+        if (suggestion.match === 'existing') {
+          const id = String(suggestion.id);
+          let option = Array.from(sub.options).find((o) => o.value === id);
+          if (!option) { option = new Option(suggestion.name, id); sub.appendChild(option); }
+          sub.value = id;
+          return ' Subcategoría asignada: ' + suggestion.name + '.';
+        }
+
+        if (suggestion.match === 'new') {
+          const accept = window.confirm('La IA sugiere crear una nueva subcategoría: "' + suggestion.name + '".\\n\\n¿Quieres crearla y asignarla a este producto?');
+          if (!accept) return ' Sugerencia de subcategoría "' + suggestion.name + '" descartada.';
+          if (status) status.textContent = 'Creando subcategoría "' + suggestion.name + '"...';
+          try {
+            const res = await fetch('/admin/subcategorias/quick-create', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ category_id: categoryId, name: suggestion.name }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.subcategory) throw new Error(data.error || 'No se pudo crear la subcategoría.');
+            const s = data.subcategory;
+            const all = subcatData(sub);
+            if (!all.some((x) => String(x.id) === String(s.id))) {
+              all.push({ id: s.id, category_id: s.category_id, name: s.name });
+              sub.dataset.allSubcategories = JSON.stringify(all);
+            }
+            let option = Array.from(sub.options).find((o) => o.value === String(s.id));
+            if (!option) { option = new Option(s.name, String(s.id)); sub.appendChild(option); }
+            sub.value = String(s.id);
+            return data.created
+              ? ' Nueva subcategoría "' + s.name + '" creada y asignada.'
+              : ' Reutilizada subcategoría existente "' + s.name + '".';
+          } catch (e) {
+            return ' No se pudo crear la subcategoría: ' + (e instanceof Error ? e.message : String(e));
+          }
+        }
+        return '';
+      };
+
       document.addEventListener('click', async (event) => {
         const button = event.target instanceof HTMLElement ? event.target.closest('[data-ai-description]') : null;
         if (!(button instanceof HTMLButtonElement)) return;
@@ -1317,7 +1522,10 @@ const descriptionAiScript = `
           if (!response.ok) throw new Error(payload.error || 'No se pudo adaptar la descripción.');
           description.value = payload.description || description.value;
           const catNote = await applyCategorySuggestion(form, payload.category, status);
-          if (status) status.textContent = 'Descripción adaptada. Revisa el texto antes de guardar.' + catNote;
+          const catSelect = form?.querySelector('select[name="category_id"]');
+          const resolvedCatId = catSelect instanceof HTMLSelectElement ? catSelect.value : '';
+          const subNote = await applySubcategorySuggestion(form, payload.subcategory, resolvedCatId, status);
+          if (status) status.textContent = 'Descripción adaptada. Revisa el texto antes de guardar.' + catNote + subNote;
         } catch (error) {
           if (status) status.textContent = error instanceof Error ? error.message : 'No se pudo adaptar la descripción.';
         } finally {
@@ -1959,11 +2167,13 @@ adminRoutes.post("/description/adapt", async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const categories = getCategories();
+    const subcategories = getSubcategories();
     const result = await adaptDescriptionForCatalog(
       formString(body.name),
       formString(body.description),
       formString(body.imageUrl),
       categories,
+      subcategories,
     );
     return c.json(result);
   } catch (error) {
@@ -2012,6 +2222,8 @@ adminRoutes.post("/image/enhance", async (c) => {
 
 const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
   const defaultTiers = getDefaultPriceTiers();
+  const categories = getCategories();
+  const subcategories = getSubcategories();
   return AdminLayout("Importar MakerWorld", `
     <div class="bg-white shadow rounded-lg p-6 space-y-6">
       <div>
@@ -2045,6 +2257,7 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
           <label class="block text-sm font-medium text-gray-700">Nombre del llavero / producto *</label>
           <input type="text" name="name" required value="${escapeHtml(draft.name)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
         </div>
+        ${renderCategoryFields(categories, subcategories)}
         ${renderDescriptionField(draft.description, 5)}
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-2">Elige imagen de MakerWorld</label>
@@ -2146,10 +2359,11 @@ adminRoutes.post("/makerworld/save", async (c) => {
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
   const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
+  const { categoryId, subcategoryId } = parseCategoryAndSub(body);
   const result = db.query(`
-    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0) RETURNING id
-  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.source_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing) as {id: number};
+    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order, category_id, subcategory_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) RETURNING id
+  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.source_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, subcategoryId) as {id: number};
   if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
   return c.redirect(`/admin/products/${result.id}/edit`);
 });
@@ -2587,6 +2801,12 @@ adminRoutes.get("/config", (c) => {
 
                     <div class="space-y-5">
                         <div>
+                            <label class="block text-sm font-medium text-gray-700">Prompt: Adaptar Descripción a Catálogo (botón "Adaptar a catálogo con IA")</label>
+                            <textarea name="catalog_description_prompt" rows="4" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="${escapeHtml(DEFAULT_CATALOG_DESCRIPTION_PROMPT)}">${configValue(config, "catalog_description_prompt")}</textarea>
+                            <p class="text-xs text-gray-500 mt-1">Instrucción de reescritura del botón "Adaptar a catálogo con IA" (en producto nuevo/editar y MakerWorld). Solo controla <strong>cómo se reescribe el texto</strong>; la asignación de categoría/subcategoría y el formato de salida quedan fijos. El <strong>límite de palabras</strong> se controla aparte (pestaña IA · Modelos). Déjalo vacío para usar el prompt por defecto.</p>
+                        </div>
+
+                        <div>
                             <label class="block text-sm font-medium text-gray-700">Prompt: Creador de Diseños (Herramientas)</label>
                             <textarea name="design_creator_prompt" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "design_creator_prompt")}</textarea>
                             <p class="text-xs text-gray-500 mt-1">Usado por <code class="bg-gray-100 px-1 rounded">Herramientas → Creador de Diseños</code> y por el botón "Crear diseño con IA" dentro de cotizaciones manuales. Incluye <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> donde quieras inyectar la descripción adicional del usuario; si no incluyes el placeholder y el usuario escribe algo, se concatena al final. Si el usuario no escribe nada, se manda solo este prompt.</p>
@@ -2768,6 +2988,7 @@ adminRoutes.post("/config", async (c) => {
     "contact_text",
     "design_creator_prompt",
     "catalog_image_prompt",
+    "catalog_description_prompt",
     "color_primary",
     "color_secondary",
     "color_accent",
@@ -2886,12 +3107,25 @@ adminRoutes.get("/categorias", (c) => {
   for (const row of productCounts) countByCat.set(row.category_id, row.count);
   const orphanCount = countByCat.get(null) || 0;
 
+  const subcategories = getSubcategories();
+  const subsByCat = new Map<number, Subcategory[]>();
+  for (const s of subcategories) {
+    const list = subsByCat.get(s.category_id) || [];
+    list.push(s);
+    subsByCat.set(s.category_id, list);
+  }
+  const subCounts = db.query<{ subcategory_id: number | null; count: number }, []>(
+    `SELECT subcategory_id, COUNT(*) as count FROM products GROUP BY subcategory_id`
+  ).all();
+  const countBySub = new Map<number, number>();
+  for (const row of subCounts) if (row.subcategory_id != null) countBySub.set(row.subcategory_id, row.count);
+
   return c.html(AdminLayout("Categorías", `
     <div class="space-y-6">
       <div class="flex items-center justify-between border-b pb-4">
         <div>
           <h1 class="text-2xl font-bold text-gray-800">Categorías de Productos</h1>
-          <p class="text-sm text-gray-500">Agrupan productos en el catálogo público y en el PDF. Los productos sin categoría aparecen al final como "Sin categoría".</p>
+          <p class="text-sm text-gray-500">Agrupan productos en el catálogo público y en el PDF. Cada categoría puede tener subcategorías (ej. Llaveros → Motos, Clicker), que se muestran como subsecciones. Los productos sin categoría aparecen al final como "Sin categoría".</p>
         </div>
         <a href="/admin/products" class="text-sm text-blue-600 hover:underline">← Volver a productos</a>
       </div>
@@ -2914,44 +3148,60 @@ adminRoutes.get("/categorias", (c) => {
         </form>
         <p class="text-[11px] text-gray-400">Orden vacío = se asigna automáticamente al final. Cambia el número y guarda para reordenar.</p>
 
-        <div class="overflow-x-auto border rounded-lg">
-          <table class="min-w-full divide-y divide-gray-200 text-sm">
-            <thead class="bg-gray-50">
-              <tr>
-                <th class="px-3 py-2 text-left font-semibold text-gray-500 w-20">Orden</th>
-                <th class="px-3 py-2 text-left font-semibold text-gray-500">Nombre</th>
-                <th class="px-3 py-2 text-left font-semibold text-gray-500 w-32">Productos</th>
-                <th class="px-3 py-2 text-right font-semibold text-gray-500 w-40">Acciones</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-200">
-              ${categories.map((cat) => {
-                const productCount = countByCat.get(cat.id) || 0;
-                return `
-                <tr>
-                  <td class="px-3 py-2">
-                    <form action="/admin/categorias/${cat.id}/edit" method="post" class="contents">
-                      <input type="number" name="sort_order" value="${cat.sort_order}" step="1" class="w-16 px-2 py-1 border border-gray-300 rounded text-xs">
-                  </td>
-                  <td class="px-3 py-2">
-                      <input type="text" name="name" value="${escapeHtml(cat.name)}" required class="block w-full px-2 py-1 border border-gray-300 rounded text-sm">
-                  </td>
-                  <td class="px-3 py-2 text-xs text-gray-600">
-                      <a href="/admin/products?category=${cat.id}" class="text-blue-600 hover:underline">${productCount} producto${productCount === 1 ? '' : 's'}</a>
-                  </td>
-                  <td class="px-3 py-2 text-right space-x-2">
+        <div class="space-y-4">
+          ${categories.map((cat) => {
+            const productCount = countByCat.get(cat.id) || 0;
+            const subs = subsByCat.get(cat.id) || [];
+            return `
+            <div class="border rounded-lg p-4">
+              <div class="flex flex-col sm:flex-row sm:items-end gap-3">
+                <form action="/admin/categorias/${cat.id}/edit" method="post" class="flex flex-1 flex-wrap items-end gap-3">
+                  <div class="w-20">
+                    <label class="block text-[11px] font-bold text-gray-500">Orden</label>
+                    <input type="number" name="sort_order" value="${cat.sort_order}" step="1" class="w-full px-2 py-1 border border-gray-300 rounded text-xs">
+                  </div>
+                  <div class="flex-1 min-w-[180px]">
+                    <label class="block text-[11px] font-bold text-gray-500">Categoría</label>
+                    <input type="text" name="name" value="${escapeHtml(cat.name)}" required class="block w-full px-2 py-1 border border-gray-300 rounded text-sm">
+                  </div>
+                  <button type="submit" class="text-blue-600 hover:underline text-xs font-semibold py-1">Guardar</button>
+                </form>
+                <div class="flex items-center gap-3 text-xs whitespace-nowrap">
+                  <a href="/admin/products?category=${cat.id}" class="text-blue-600 hover:underline">${productCount} producto${productCount === 1 ? '' : 's'}</a>
+                  <form action="/admin/categorias/${cat.id}/delete" method="post" onsubmit="return confirm('¿Eliminar la categoría &quot;${escapeHtml(cat.name).replace(/'/g, "\\'")}&quot;? Sus subcategorías se borran y sus ${productCount} producto${productCount === 1 ? '' : 's'} quedan sin categoría.');" class="inline">
+                    <button type="submit" class="text-red-600 hover:underline font-semibold">Eliminar</button>
+                  </form>
+                </div>
+              </div>
+
+              <div class="mt-3 border-l-2 border-gray-100 pl-4 space-y-2">
+                <p class="text-[11px] font-bold uppercase tracking-wide text-gray-400">Subcategorías</p>
+                ${subs.map((s) => {
+                  const subCount = countBySub.get(s.id) || 0;
+                  return `
+                  <div class="flex flex-wrap items-end gap-2">
+                    <form action="/admin/subcategorias/${s.id}/edit" method="post" class="flex flex-1 flex-wrap items-end gap-2">
+                      <input type="number" name="sort_order" value="${s.sort_order}" step="1" title="Orden" class="w-14 px-2 py-1 border border-gray-300 rounded text-xs">
+                      <input type="text" name="name" value="${escapeHtml(s.name)}" required class="flex-1 min-w-[140px] px-2 py-1 border border-gray-300 rounded text-sm">
                       <button type="submit" class="text-blue-600 hover:underline text-xs font-semibold">Guardar</button>
                     </form>
-                    <form action="/admin/categorias/${cat.id}/delete" method="post" onsubmit="return confirm('¿Eliminar la categoría &quot;${escapeHtml(cat.name).replace(/'/g, "\\'")}&quot;? Los ${productCount} producto${productCount === 1 ? '' : 's'} de esta categoría quedarán sin categoría.');" class="inline">
+                    <span class="text-[11px] text-gray-500 whitespace-nowrap">${subCount} prod.</span>
+                    <form action="/admin/subcategorias/${s.id}/delete" method="post" onsubmit="return confirm('¿Eliminar la subcategoría &quot;${escapeHtml(s.name).replace(/'/g, "\\'")}&quot;? Sus productos quedan sin subcategoría.');" class="inline">
                       <button type="submit" class="text-red-600 hover:underline text-xs font-semibold">Eliminar</button>
                     </form>
-                  </td>
-                </tr>
-              `;}).join("")}
-              ${categories.length === 0 ? '<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">No hay categorías todavía. Crea la primera arriba.</td></tr>' : ""}
-              ${orphanCount > 0 ? `<tr class="bg-amber-50"><td class="px-3 py-2 text-amber-700 text-xs">—</td><td class="px-3 py-2 text-amber-800 italic">Sin categoría</td><td class="px-3 py-2 text-xs text-amber-700"><a href="/admin/products?category=none" class="hover:underline">${orphanCount} producto${orphanCount === 1 ? '' : 's'}</a></td><td class="px-3 py-2 text-right text-[11px] text-amber-700">Asigna una categoría desde cada producto</td></tr>` : ""}
-            </tbody>
-          </table>
+                  </div>`;
+                }).join("")}
+                ${subs.length === 0 ? '<p class="text-xs text-gray-400 italic">Sin subcategorías todavía.</p>' : ''}
+                <form action="/admin/categorias/${cat.id}/subcategorias" method="post" class="flex flex-wrap items-end gap-2 pt-1">
+                  <input type="text" name="name" required placeholder="Nueva subcategoría (ej: Motos, Clicker)" class="flex-1 min-w-[160px] px-2 py-1 border border-gray-300 rounded text-sm bg-gray-50">
+                  <input type="number" name="sort_order" step="1" placeholder="orden" class="w-16 px-2 py-1 border border-gray-300 rounded text-xs bg-gray-50">
+                  <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-3 py-1.5 rounded">+ Subcategoría</button>
+                </form>
+              </div>
+            </div>`;
+          }).join("")}
+          ${categories.length === 0 ? '<p class="text-center text-gray-400 py-6">No hay categorías todavía. Crea la primera arriba.</p>' : ""}
+          ${orphanCount > 0 ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">Hay <a href="/admin/products?category=none" class="underline">${orphanCount} producto${orphanCount === 1 ? '' : 's'}</a> sin categoría. Asígnales una desde cada producto.</div>` : ""}
         </div>
       </div>
     </div>
@@ -3002,6 +3252,56 @@ adminRoutes.post("/categorias/quick-create", async (c) => {
     return c.json({ category: created, created: true });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "No se pudo crear la categoría." }, 400);
+  }
+});
+
+// ── Subcategorías (gestión dentro de /admin/categorias) ──────────────────
+adminRoutes.post("/categorias/:id/subcategorias", async (c) => {
+  const categoryId = Number.parseInt(c.req.param("id"), 10);
+  if (!Number.isFinite(categoryId) || !getCategory(categoryId)) return c.text("Categoría inválida.", 400);
+  const body = await c.req.parseBody();
+  const name = formString(body.name).trim();
+  if (!name) return c.text("El nombre es obligatorio.", 400);
+  const rawOrder = formString(body.sort_order).trim();
+  const sortOrder = rawOrder === "" ? undefined : Number.parseInt(rawOrder, 10);
+  createSubcategory(categoryId, name, Number.isFinite(sortOrder) ? sortOrder : undefined);
+  return c.redirect("/admin/categorias");
+});
+
+adminRoutes.post("/subcategorias/:id/edit", async (c) => {
+  const id = Number.parseInt(c.req.param("id"), 10);
+  if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
+  const body = await c.req.parseBody();
+  const name = formString(body.name).trim();
+  if (!name) return c.text("El nombre es obligatorio.", 400);
+  const sortOrder = Number.parseInt(formString(body.sort_order) || "0", 10) || 0;
+  updateSubcategory(id, name, sortOrder);
+  return c.redirect("/admin/categorias");
+});
+
+adminRoutes.post("/subcategorias/:id/delete", (c) => {
+  const id = Number.parseInt(c.req.param("id"), 10);
+  if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
+  deleteSubcategory(id);
+  return c.redirect("/admin/categorias");
+});
+
+// Crea una subcategoría desde JS (sugerencia del LLM aceptada). Vive dentro de
+// una categoría (category_id). Devuelve la subcategoría completa para inyectarla
+// al <select> sin recargar.
+adminRoutes.post("/subcategorias/quick-create", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const categoryId = Number.parseInt(String(body.category_id ?? ""), 10);
+    const name = formString(body.name).trim();
+    if (!Number.isFinite(categoryId) || !getCategory(categoryId)) return c.json({ error: "Categoría inválida." }, 400);
+    if (!name) return c.json({ error: "El nombre es obligatorio." }, 400);
+    const existing = getSubcategoriesByCategory(categoryId).find((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+    if (existing) return c.json({ subcategory: existing, created: false });
+    const created = createSubcategory(categoryId, name);
+    return c.json({ subcategory: created, created: true });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo crear la subcategoría." }, 400);
   }
 });
 
@@ -3099,24 +3399,17 @@ adminRoutes.get("/products", (c) => {
 adminRoutes.get("/products/new", (c) => {
   const defaultTiers = getDefaultPriceTiers();
   const categories = getCategories();
+  const subcategories = getSubcategories();
   return c.html(AdminLayout("Nuevo Producto", `
     <div class="bg-white shadow rounded-lg p-6">
         <h2 class="text-xl font-bold mb-6">Agregar Nuevo Producto</h2>
         <form action="/admin/products/new" method="post" enctype="multipart/form-data" class="space-y-6">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
-                    <input type="text" name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Categoría</label>
-                    <select name="category_id" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                        <option value="">— Sin categoría —</option>
-                        ${categories.map((cat) => `<option value="${cat.id}">${escapeHtml(cat.name)}</option>`).join("")}
-                    </select>
-                    <p class="text-xs text-gray-500 mt-1">¿Falta una? <a href="/admin/categorias" target="_blank" class="text-blue-600 underline">Crear categoría</a></p>
-                </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
+                <input type="text" name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
+
+            ${renderCategoryFields(categories, subcategories)}
 
             <div>
                 <label class="block text-sm font-medium text-gray-700">Link de MakerWorld (Opcional)</label>
@@ -3192,13 +3485,12 @@ adminRoutes.post("/products/new", async (c) => {
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
   const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
-  const rawCategory = formString(body.category_id);
-  const categoryId = rawCategory && rawCategory !== "" ? (Number.parseInt(rawCategory, 10) || null) : null;
+  const { categoryId, subcategoryId } = parseCategoryAndSub(body);
 
   const result = db.query(`
-    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order, category_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?) RETURNING id
-  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId) as {id: number};
+    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order, category_id, subcategory_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) RETURNING id
+  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, subcategoryId) as {id: number};
 
   if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
 
@@ -3219,25 +3511,18 @@ adminRoutes.get("/products/:id/edit", (c) => {
   const productTiers = getProductPriceTiers(id);
   const tiers = productTiers.length ? productTiers : getDefaultPriceTiers();
   const categories = getCategories();
+  const subcategories = getSubcategories();
 
   return c.html(AdminLayout("Editar Producto", `
     <div class="bg-white shadow rounded-lg p-6">
         <h2 class="text-xl font-bold mb-6">Editar Producto: ${escapeHtml(product.name)}</h2>
         <form action="/admin/products/${id}/edit" method="post" enctype="multipart/form-data" class="space-y-6">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
-                    <input type="text" name="name" value="${escapeHtml(product.name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Categoría</label>
-                    <select name="category_id" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-                        <option value="" ${product.category_id == null ? 'selected' : ''}>— Sin categoría —</option>
-                        ${categories.map((cat) => `<option value="${cat.id}" ${product.category_id === cat.id ? 'selected' : ''}>${escapeHtml(cat.name)}</option>`).join("")}
-                    </select>
-                    <p class="text-xs text-gray-500 mt-1">¿Falta una? <a href="/admin/categorias" target="_blank" class="text-blue-600 underline">Crear categoría</a></p>
-                </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Nombre del Producto *</label>
+                <input type="text" name="name" value="${escapeHtml(product.name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
+
+            ${renderCategoryFields(categories, subcategories, product.category_id, product.subcategory_id)}
 
             <div>
                 <label class="block text-sm font-medium text-gray-700">Link de MakerWorld (Opcional)</label>
@@ -3315,12 +3600,11 @@ adminRoutes.post("/products/:id/edit", async (c) => {
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
   const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
-  const rawCategory = formString(body.category_id);
-  const categoryId = rawCategory && rawCategory !== "" ? (Number.parseInt(rawCategory, 10) || null) : null;
+  const { categoryId, subcategoryId } = parseCategoryAndSub(body);
 
   db.run(`
-    UPDATE products SET name = ?, description = ?, image_url = ?, makerworld_url = ?, filament_grams = ?, print_time_mins = ?, extra_costs = ?, use_default_pricing = ?, category_id = ? WHERE id = ?
-  `, [formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, id]);
+    UPDATE products SET name = ?, description = ?, image_url = ?, makerworld_url = ?, filament_grams = ?, print_time_mins = ?, extra_costs = ?, use_default_pricing = ?, category_id = ?, subcategory_id = ? WHERE id = ?
+  `, [formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, subcategoryId, id]);
 
   replaceProductPriceTiers(id, useDefaultPricing ? [] : parsePriceTiers(body));
 

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, type Category, type Product } from "../db/schema";
 import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegisterScript, sendPushToAll } from "../pwa";
+import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, getSubcategories, type Category, type Subcategory, type Product } from "../db/schema";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -208,6 +209,8 @@ const buildThemeCss = (config: Record<string, string>) => {
     .products-group:first-of-type { margin-top: 0; }
     .category-title { color: var(--heading-text); font-size: 1.6rem; margin: 0 0 1.5rem; padding-bottom: .55rem; border-bottom: 2px solid var(--brand-primary); display: inline-block; }
     .category-title-orphan { color: var(--muted-text); border-bottom-color: var(--card-border); }
+    .subcategory-title { color: var(--heading-text); font-size: 1.15rem; font-weight: 600; margin: 1.75rem 0 1rem; padding-left: .6rem; border-left: 3px solid var(--brand-primary); opacity: .85; }
+    .products-grid + .subcategory-title { margin-top: 2rem; }
     .products-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--product-gap); }
     .theme-card { background: var(--card-bg); border: 1px solid transparent; border-radius: var(--radius); box-shadow: var(--card-shadow); overflow: hidden; transition: transform .2s ease, box-shadow .2s ease; }
     .theme-card:hover { transform: translateY(-3px); }
@@ -293,6 +296,7 @@ const buildThemeCss = (config: Record<string, string>) => {
       .theme-shapes { opacity: .18; }
       .products-group-page-break { break-before: page; page-break-before: always; }
       .category-title { break-after: avoid; page-break-after: avoid; }
+      .subcategory-title { break-after: avoid; page-break-after: avoid; break-inside: avoid; }
     }
 
     ${customCss(config.custom_css)}
@@ -333,38 +337,68 @@ const getCatalogData = () => {
   const defaultPriceTiers = getDefaultPriceTiers();
   const products = getProducts();
   const categories = getCategories();
+  const subcategories = getSubcategories();
   const productsWithTiers = products.map((product) => ({
     product,
     priceTiers: product.use_default_pricing ? defaultPriceTiers : getProductPriceTiers(product.id),
   }));
-  return { config, defaultPriceTiers, productsWithTiers, categories };
+  return { config, defaultPriceTiers, productsWithTiers, categories, subcategories };
 };
 
 // Agrupa productos por categoría (orden por sort_order). Productos sin
 // categoría caen en un grupo final con label "Sin categoría". Si no hay
 // categorías definidas, devuelve un único grupo plano sin label.
 type CatalogProduct = ReturnType<typeof getCatalogData>["productsWithTiers"][number];
-type CatalogGroup = { category: Category | null; products: CatalogProduct[] };
+type CatalogSubgroup = { subcategory: Subcategory | null; products: CatalogProduct[] };
+type CatalogGroup = { category: Category | null; subgroups: CatalogSubgroup[] };
 const groupCatalog = (
   productsWithTiers: CatalogProduct[],
   categories: Category[],
+  subcategories: Subcategory[],
 ): CatalogGroup[] => {
-  if (categories.length === 0) return [{ category: null, products: productsWithTiers }];
-  const byId = new Map<number, CatalogProduct[]>();
+  if (categories.length === 0) return [{ category: null, subgroups: [{ subcategory: null, products: productsWithTiers }] }];
+  const byCat = new Map<number, CatalogProduct[]>();
   const orphans: CatalogProduct[] = [];
   for (const entry of productsWithTiers) {
     if (entry.product.category_id == null) { orphans.push(entry); continue; }
-    const list = byId.get(entry.product.category_id) || [];
+    const list = byCat.get(entry.product.category_id) || [];
     list.push(entry);
-    byId.set(entry.product.category_id, list);
+    byCat.set(entry.product.category_id, list);
   }
+  const subsByCat = new Map<number, Subcategory[]>();
+  for (const s of subcategories) {
+    const list = subsByCat.get(s.category_id) || [];
+    list.push(s);
+    subsByCat.set(s.category_id, list);
+  }
+
   const groups: CatalogGroup[] = [];
   for (const category of categories) {
-    const list = byId.get(category.id) || [];
+    const list = byCat.get(category.id) || [];
     // Saltamos categorías sin productos para no mostrar secciones vacías al público.
-    if (list.length > 0) groups.push({ category, products: list });
+    if (list.length === 0) continue;
+    const categorySubs = subsByCat.get(category.id) || [];
+    const knownSubIds = new Set(categorySubs.map((s) => s.id));
+    const bySub = new Map<number, CatalogProduct[]>();
+    const noSub: CatalogProduct[] = [];
+    for (const entry of list) {
+      const sid = entry.product.subcategory_id;
+      // subcategory_id nulo, o que ya no pertenece a la categoría → bucket sin subcategoría.
+      if (sid == null || !knownSubIds.has(sid)) { noSub.push(entry); continue; }
+      const l = bySub.get(sid) || [];
+      l.push(entry);
+      bySub.set(sid, l);
+    }
+    const subgroups: CatalogSubgroup[] = [];
+    // Los productos sin subcategoría van primero, sin subtítulo.
+    if (noSub.length > 0) subgroups.push({ subcategory: null, products: noSub });
+    for (const sub of categorySubs) {
+      const l = bySub.get(sub.id) || [];
+      if (l.length > 0) subgroups.push({ subcategory: sub, products: l });
+    }
+    groups.push({ category, subgroups });
   }
-  if (orphans.length > 0) groups.push({ category: null, products: orphans });
+  if (orphans.length > 0) groups.push({ category: null, subgroups: [{ subcategory: null, products: orphans }] });
   return groups;
 };
 
@@ -493,9 +527,10 @@ const renderProductsSection = (
   config: Record<string, string>,
   productsWithTiers: ReturnType<typeof getCatalogData>["productsWithTiers"],
   categories: Category[],
+  subcategories: Subcategory[],
   interactive = false,
 ) => {
-  const groups = groupCatalog(productsWithTiers, categories);
+  const groups = groupCatalog(productsWithTiers, categories, subcategories);
   const groupedRender = (group: CatalogGroup, isFirst: boolean) => {
     // Solo el primer grupo lleva el título global de la sección. Los demás
     // grupos abren con su propio título de categoría dentro del shell.
@@ -504,12 +539,23 @@ const renderProductsSection = (
       : (categories.length > 0
           ? `<h3 class="category-title category-title-orphan">Sin categoría</h3>`
           : "");
+    // Dentro de cada categoría: subsecciones por subcategoría. Los productos sin
+    // subcategoría van primero, sin subtítulo.
+    const subgroupsHtml = group.subgroups.map((sg) => {
+      const subTitle = sg.subcategory
+        ? `<h4 class="subcategory-title">${escapeHtml(sg.subcategory.name)}</h4>`
+        : "";
+      return `
+          ${subTitle}
+          <div class="products-grid">
+              ${sg.products.map(({ product, priceTiers }) => renderProductCard(product, priceTiers, interactive)).join("")}
+          </div>
+      `;
+    }).join("");
     return `
       <div class="products-group${isFirst ? "" : " products-group-page-break"}">
           ${categoryTitle}
-          <div class="products-grid">
-              ${group.products.map(({ product, priceTiers }) => renderProductCard(product, priceTiers, interactive)).join("")}
-          </div>
+          ${subgroupsHtml}
       </div>
     `;
   };
@@ -536,7 +582,7 @@ const renderContactSection = (config: Record<string, string>) => `
 `;
 
 const renderPrintableCatalog = (showActions: boolean) => {
-  const { config, defaultPriceTiers, productsWithTiers, categories } = getCatalogData();
+  const { config, defaultPriceTiers, productsWithTiers, categories, subcategories } = getCatalogData();
   const content = `
     ${showActions ? `<div class="action-bar no-print">
         <button onclick="window.print()" class="theme-button" type="button">Imprimir / PDF</button>
@@ -544,7 +590,7 @@ const renderPrintableCatalog = (showActions: boolean) => {
     </div>` : ""}
     ${renderCoverSection(config)}
     ${renderWelcomeSection(config, defaultPriceTiers)}
-    ${renderProductsSection(config, productsWithTiers, categories)}
+    ${renderProductsSection(config, productsWithTiers, categories, subcategories)}
     ${renderContactSection(config)}
   `;
   return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo imprimible`, content, config);
@@ -862,11 +908,11 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
 };
 
 const renderInteractiveCatalog = () => {
-  const { config, defaultPriceTiers, productsWithTiers, categories } = getCatalogData();
+  const { config, defaultPriceTiers, productsWithTiers, categories, subcategories } = getCatalogData();
   const content = `
     ${renderCoverSection(config)}
     ${renderWelcomeSection(config, defaultPriceTiers)}
-    ${renderProductsSection(config, productsWithTiers, categories, true)}
+    ${renderProductsSection(config, productsWithTiers, categories, subcategories, true)}
     ${renderCartSection(config, productsWithTiers)}
     ${renderContactSection(config)}
   `;
