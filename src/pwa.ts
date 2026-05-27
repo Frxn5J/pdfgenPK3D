@@ -55,7 +55,8 @@ export async function sendPushToAll(payload: PushPayload): Promise<{ sent: numbe
   const results = await Promise.allSettled(
     subs.map(async (s) => {
       try {
-        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, data);
+        const toBase64url = (k: string) => k.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: toBase64url(s.p256dh), auth: toBase64url(s.auth) } }, data);
       } catch (err: any) {
         // Suscripción muerta: el navegador la revocó. La borramos.
         if (err?.statusCode === 404 || err?.statusCode === 410) deletePushSubscription(s.endpoint);

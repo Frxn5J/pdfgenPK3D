@@ -1841,8 +1841,12 @@ adminRoutes.post("/push/subscribe", async (c) => {
     const body = await c.req.json().catch(() => ({})) as Record<string, any>;
     const sub = body.subscription || body;
     const endpoint = String(sub?.endpoint || "").trim();
-    const p256dh = String(sub?.keys?.p256dh || "").trim();
-    const auth = String(sub?.keys?.auth || "").trim();
+    // Normalize to base64url (no padding, no standard base64 chars).
+    // Safari on iOS sends keys with '=' padding or '+'/'/'; Node's WebCrypto
+    // throws "The string did not match the expected pattern" on those inputs.
+    const toBase64url = (s: string) => s.trim().replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const p256dh = toBase64url(String(sub?.keys?.p256dh || ""));
+    const auth = toBase64url(String(sub?.keys?.auth || ""));
     if (!endpoint || !p256dh || !auth) return c.json({ error: "Suscripción inválida." }, 400);
     addPushSubscription(endpoint, p256dh, auth, c.req.header("user-agent") || null);
     return c.json({ ok: true, total: countPushSubscriptions() });
