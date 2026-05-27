@@ -12,6 +12,9 @@ export const requireAuth = async (c: any, next: any) => {
   if (session === "authenticated") {
     await next();
   } else {
+    // API requests (fetch) expect JSON, not an HTML redirect.
+    const isApiRequest = c.req.method !== "GET" || c.req.header("accept")?.includes("application/json");
+    if (isApiRequest) return c.json({ error: "No autorizado." }, 401);
     return c.redirect("/admin/login");
   }
 };
@@ -1998,6 +2001,7 @@ adminRoutes.get("/notificaciones", (c) => {
         testBtn.disabled = true; const prev = testBtn.textContent; testBtn.textContent = 'Enviando…';
         try {
           const res = await fetch('/admin/push/test', { method: 'POST' });
+          if (res.status === 401) throw new Error('Sesión expirada. Recargá la página.');
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || 'Error');
           statusEl.textContent = 'Prueba enviada a ' + data.sent + ' de ' + data.total + ' dispositivo(s).';
