@@ -735,6 +735,22 @@ const urlToDataUrl = async (url: string): Promise<string> => {
   return `data:${mime};base64,${buf.toString("base64")}`;
 };
 
+// The OpenAI-compatible /v1/images/edits endpoint requires the image as an
+// uploaded file (multipart/form-data), so we need the raw bytes — not a URL.
+const resolveImageBytes = async (value: string): Promise<{ bytes: Buffer; mime: string }> => {
+  const dataImage = dataImageToBuffer(value);
+  if (dataImage) return { bytes: dataImage.buffer, mime: dataImage.mime };
+  if (/^https?:\/\//i.test(value)) {
+    const res = await fetch(value, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
+    if (!res.ok) throw new Error(`No se pudo descargar la imagen: HTTP ${res.status}`);
+    return { bytes: Buffer.from(await res.arrayBuffer()), mime: res.headers.get("content-type") || "image/png" };
+  }
+  if (looksLikeBase64Image(value)) {
+    return { bytes: Buffer.from(value.replace(/\s+/g, ""), "base64"), mime: "image/png" };
+  }
+  throw new Error("No se pudo preparar la imagen para enviar al proveedor.");
+};
+
 const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceResult> => {
   const config = imageEnhanceConfig();
   const endpoint = resolveImageEnhanceEndpoint(config);
@@ -756,6 +772,12 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
     }
   }
 
+  // El endpoint /v1/images/edits es multipart/form-data: necesitamos los bytes
+  // de la imagen una sola vez y reconstruimos el FormData por intento (el body
+  // de un fetch se consume y no se puede reutilizar).
+  const { bytes: imageBytes, mime: imageMime } = await resolveImageBytes(resolvedImage);
+  const imageFilename = `product.${imageExtensionFromMime(imageMime)}`;
+
   // Cadena de modelos. Si el array está vacío usamos [""] para mantener el
   // comportamiento histórico (provider-default).
   const modelChain = config.models.length > 0 ? config.models : [""];
@@ -769,32 +791,25 @@ const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnhanceRes
         endpoint,
         model: model || "provider-default",
         hasApiKey: Boolean(config.apiKey),
-        imageSource: resolvedImage.startsWith("data:image/") ? "uploaded-file" : "url",
+        imageBytes: imageBytes.length,
+        imageMime,
       });
 
-      const headers: Record<string, string> = { "content-type": "application/json" };
+      // multipart/form-data según el contrato de OpenAI /v1/images/edits.
+      // No fijamos content-type a mano: fetch deriva el boundary del FormData.
+      const form = new FormData();
+      form.append("image", new Blob([imageBytes], { type: imageMime }), imageFilename);
+      form.append("prompt", prompt);
+      if (model) form.append("model", model);
+
+      const headers: Record<string, string> = {};
       if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
       const response = await fetch(endpoint, {
         method: "POST",
         headers,
         signal: controller.signal,
-        body: JSON.stringify({
-          model: model || undefined,
-          prompt,
-          image: resolvedImage,
-          imageUrl: resolvedImage,
-          image_url: resolvedImage,
-          response_format: "url",
-          source: "pixkey3d-makerworld",
-          intent: "catalog-product-photo-white-background",
-          options: {
-            background: "white",
-            noText: true,
-            style: "studio product photography",
-            preserveProduct: true,
-          },
-        }),
+        body: form,
       });
 
       const contentType = response.headers.get("content-type") || "";
