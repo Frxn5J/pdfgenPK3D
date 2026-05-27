@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
+import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
 
 // Middleware for admin auth (moved from app.ts to avoid circular dependency)
 export const requireAuth = async (c: any, next: any) => {
@@ -1428,6 +1429,7 @@ const AdminLayout = (title: string, content: string) => {
       }
     }
     </script>
+    ${pwaHeadTags(config)}
     <style>${buildAdminThemeCss(config)}</style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -1485,6 +1487,7 @@ const AdminLayout = (title: string, content: string) => {
                         <div class="nav-dropdown-menu">
                             <a href="/admin/quotes">Ver cotizaciones</a>
                             <a href="/admin/quotes/new">Nueva cotización</a>
+                            <a href="/admin/notificaciones">Notificaciones push</a>
                         </div>
                     </div>
                     <div class="nav-dropdown">
@@ -1546,6 +1549,7 @@ const AdminLayout = (title: string, content: string) => {
         ${content}
     </main>
 ${descriptionAiScript}
+${pwaRegisterScript()}
 </body>
 </html>
 `;
@@ -1620,6 +1624,183 @@ adminRoutes.use("/*", requireAuth);
 
 adminRoutes.get("/", (c) => {
   return c.redirect("/admin/products");
+});
+
+// ── Notificaciones push (admin) ──────────────────────────────────────────
+adminRoutes.get("/push/public-key", (c) => c.json({ publicKey: getVapidPublicKey() }));
+
+adminRoutes.post("/push/subscribe", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, any>;
+    const sub = body.subscription || body;
+    const endpoint = String(sub?.endpoint || "").trim();
+    const p256dh = String(sub?.keys?.p256dh || "").trim();
+    const auth = String(sub?.keys?.auth || "").trim();
+    if (!endpoint || !p256dh || !auth) return c.json({ error: "Suscripción inválida." }, 400);
+    addPushSubscription(endpoint, p256dh, auth, c.req.header("user-agent") || null);
+    return c.json({ ok: true, total: countPushSubscriptions() });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo guardar la suscripción." }, 400);
+  }
+});
+
+adminRoutes.post("/push/unsubscribe", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({})) as Record<string, any>;
+    const endpoint = String(body?.endpoint || body?.subscription?.endpoint || "").trim();
+    if (endpoint) deletePushSubscription(endpoint);
+    return c.json({ ok: true, total: countPushSubscriptions() });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo cancelar la suscripción." }, 400);
+  }
+});
+
+adminRoutes.post("/push/test", async (c) => {
+  try {
+    const result = await sendPushToAll({
+      title: "Prueba de notificación",
+      body: "Si ves esto, las notificaciones push funcionan ✅",
+      url: "/admin/quotes",
+      tag: "pixkey3d-test",
+    });
+    return c.json({ ok: true, ...result });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "No se pudo enviar la prueba." }, 500);
+  }
+});
+
+adminRoutes.get("/notificaciones", (c) => {
+  const total = countPushSubscriptions();
+  const publicKey = getVapidPublicKey();
+  return c.html(AdminLayout("Notificaciones", `
+    <div class="max-w-2xl mx-auto space-y-6">
+      <div class="border-b pb-4">
+        <h1 class="text-2xl font-bold text-gray-800">Notificaciones push</h1>
+        <p class="text-sm text-gray-500 mt-1">Instala la app en tu teléfono ("Agregar a pantalla de inicio") y activa las notificaciones para recibir un aviso cada vez que entre una <strong>cotización nueva</strong> desde el catálogo.</p>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-6 space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-semibold text-gray-800">Estado en este dispositivo</p>
+            <p data-push-status class="text-sm text-gray-500 mt-1">Comprobando…</p>
+          </div>
+          <span data-push-badge class="text-xs font-semibold px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">—</span>
+        </div>
+
+        <div class="flex flex-wrap gap-3 pt-2">
+          <button type="button" data-push-enable class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 text-sm font-medium">Activar notificaciones</button>
+          <button type="button" data-push-disable class="bg-gray-200 text-gray-800 px-4 py-2 rounded-md hover:bg-gray-300 text-sm font-medium hidden">Desactivar</button>
+          <button type="button" data-push-test class="border border-blue-600 text-blue-600 px-4 py-2 rounded-md hover:bg-blue-50 text-sm font-medium">Enviar prueba</button>
+        </div>
+
+        <p class="text-xs text-gray-400">Dispositivos suscritos actualmente: <strong data-push-count>${total}</strong>. Cada teléfono/navegador donde actives cuenta como uno.</p>
+      </div>
+
+      <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-xs text-amber-800 space-y-1">
+        <p><strong>iPhone/iPad:</strong> primero usa Safari → Compartir → "Agregar a pantalla de inicio", abre la app desde el ícono y luego activa las notificaciones (iOS solo permite push en apps instaladas).</p>
+        <p><strong>Android/Chrome:</strong> puedes activar desde el navegador o instalando la app. Requiere HTTPS (o localhost).</p>
+      </div>
+    </div>
+
+    <script>
+    (() => {
+      const VAPID_PUBLIC_KEY = ${JSON.stringify(publicKey)};
+      const statusEl = document.querySelector('[data-push-status]');
+      const badgeEl = document.querySelector('[data-push-badge]');
+      const countEl = document.querySelector('[data-push-count]');
+      const enableBtn = document.querySelector('[data-push-enable]');
+      const disableBtn = document.querySelector('[data-push-disable]');
+      const testBtn = document.querySelector('[data-push-test]');
+
+      const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+      const urlBase64ToUint8Array = (base64String) => {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const raw = atob(base64);
+        const out = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+        return out;
+      };
+
+      const setBadge = (text, ok) => {
+        if (!badgeEl) return;
+        badgeEl.textContent = text;
+        badgeEl.className = 'text-xs font-semibold px-2.5 py-1 rounded-full ' + (ok ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600');
+      };
+
+      const refresh = async () => {
+        if (!supported) { statusEl.textContent = 'Este navegador no soporta notificaciones push.'; setBadge('No soportado', false); enableBtn.disabled = true; return; }
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (Notification.permission === 'denied') {
+          statusEl.textContent = 'Bloqueaste las notificaciones para este sitio. Actívalas desde la configuración del navegador.';
+          setBadge('Bloqueado', false);
+        } else if (sub) {
+          statusEl.textContent = 'Activadas en este dispositivo. Recibirás avisos de cotizaciones nuevas.';
+          setBadge('Activadas', true);
+        } else {
+          statusEl.textContent = 'No estás recibiendo notificaciones en este dispositivo.';
+          setBadge('Inactivas', false);
+        }
+        enableBtn.classList.toggle('hidden', !!sub);
+        disableBtn.classList.toggle('hidden', !sub);
+      };
+
+      enableBtn?.addEventListener('click', async () => {
+        if (!supported) return;
+        enableBtn.disabled = true; enableBtn.textContent = 'Activando…';
+        try {
+          const permission = await Notification.requestPermission();
+          if (permission !== 'granted') { statusEl.textContent = 'Permiso no concedido.'; await refresh(); return; }
+          const reg = await navigator.serviceWorker.ready;
+          const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+          const res = await fetch('/admin/push/subscribe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: sub }) });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'No se pudo suscribir.');
+          if (countEl && typeof data.total === 'number') countEl.textContent = data.total;
+        } catch (e) {
+          statusEl.textContent = 'Error al activar: ' + (e instanceof Error ? e.message : String(e));
+        } finally {
+          enableBtn.disabled = false; enableBtn.textContent = 'Activar notificaciones';
+          await refresh();
+        }
+      });
+
+      disableBtn?.addEventListener('click', async () => {
+        disableBtn.disabled = true; disableBtn.textContent = 'Desactivando…';
+        try {
+          const reg = await navigator.serviceWorker.ready;
+          const sub = await reg.pushManager.getSubscription();
+          if (sub) {
+            await fetch('/admin/push/unsubscribe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {});
+            await sub.unsubscribe().catch(() => {});
+          }
+        } finally {
+          disableBtn.disabled = false; disableBtn.textContent = 'Desactivar';
+          await refresh();
+        }
+      });
+
+      testBtn?.addEventListener('click', async () => {
+        testBtn.disabled = true; const prev = testBtn.textContent; testBtn.textContent = 'Enviando…';
+        try {
+          const res = await fetch('/admin/push/test', { method: 'POST' });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Error');
+          statusEl.textContent = 'Prueba enviada a ' + data.sent + ' de ' + data.total + ' dispositivo(s).';
+        } catch (e) {
+          statusEl.textContent = 'No se pudo enviar la prueba: ' + (e instanceof Error ? e.message : String(e));
+        } finally {
+          testBtn.disabled = false; testBtn.textContent = prev;
+        }
+      });
+
+      refresh();
+    })();
+    </script>
+  `));
 });
 
 adminRoutes.get("/quotes", (c) => {
@@ -2068,6 +2249,7 @@ adminRoutes.get("/config", (c) => {
                         <label class="block text-sm font-medium text-gray-700">Logo (URL o subir archivo)</label>
                         <input type="text" name="company_logo_url" value="${configValue(config, "company_logo")}" placeholder="URL de imagen..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
                         <input type="file" name="company_logo_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                        <p class="text-xs text-gray-500 mt-1">Este logo también se usa como <strong>ícono de la app instalable (PWA)</strong>. Para que se vea bien como ícono, usa una imagen cuadrada con algo de margen. Idealmente PNG (mejor compatibilidad en iPhone).</p>
                     </div>
                 </div>
 

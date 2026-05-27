@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, type Category, type Product } from "../db/schema";
+import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegisterScript, sendPushToAll } from "../pwa";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -316,10 +317,12 @@ const Layout = (title: string, content: string, config: Record<string, string>) 
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${escapeHtml(title)}</title>
+    ${pwaHeadTags(config)}
     <style>${buildThemeCss(config)}</style>
 </head>
 <body class="catalog-body density-${density} card-style-${cardStyle} image-fit-${imageFit}">
     ${content}
+    ${pwaRegisterScript()}
 </body>
 </html>
 `;
@@ -974,6 +977,15 @@ publicRoutes.post("/api/quotes", async (c) => {
     });
     updateQuoteMessage(quoteId, message);
 
+    // Aviso push al admin. Fire-and-forget: nunca debe bloquear ni romper la
+    // respuesta al cliente que cotiza.
+    sendPushToAll({
+      title: `Nueva cotización #${quoteId}`,
+      body: `${customerName} · ${totalPieces} pza(s) · ${currency.format(grandTotal)}`,
+      url: "/admin/quotes",
+      tag: `quote-${quoteId}`,
+    }).catch((e) => console.warn("[push] quote notify failed", e));
+
     return c.json({
       id: quoteId,
       message,
@@ -993,5 +1005,22 @@ publicRoutes.post("/api/quotes", async (c) => {
 });
 publicRoutes.get("/catalogo", (c) => c.html(renderInteractiveCatalog()));
 publicRoutes.get("/imprimir", (c) => c.html(renderPrintableCatalog(c.req.query("embed") !== "1")));
+
+// ── PWA: assets en scope raíz ────────────────────────────────────────────
+publicRoutes.get("/manifest.webmanifest", (c) =>
+  c.body(JSON.stringify(buildManifest(getConfig())), 200, { "content-type": "application/manifest+json; charset=utf-8" })
+);
+publicRoutes.get("/sw.js", (c) =>
+  c.body(serviceWorkerJs(), 200, {
+    "content-type": "application/javascript; charset=utf-8",
+    "cache-control": "no-cache",
+    "service-worker-allowed": "/",
+  })
+);
+publicRoutes.get("/icons/app-icon.svg", async (c) =>
+  // no-cache para que al cambiar el logo el ícono se actualice de inmediato
+  // (antes max-age=3600 lo dejaba "pegado" hasta una hora en el navegador).
+  c.body(await renderAppIconSvg(getConfig()), 200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "no-cache" })
+);
 
 export { publicRoutes };
