@@ -1,0 +1,3 @@
+[test]
+# Aísla los tests: base de datos en memoria y mock global de web-push (sin red).
+preload = ["./tests/setup.ts"]

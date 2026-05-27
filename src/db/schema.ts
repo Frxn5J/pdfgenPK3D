@@ -8,7 +8,9 @@ if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-export const db = new Database(join(dataDir, "catalog.sqlite"), { create: true });
+// CATALOG_DB_PATH permite apuntar a otra base (p.ej. ":memory:" en tests) sin
+// tocar la base real. En producción queda sin definir y usa data/catalog.sqlite.
+export const db = new Database(process.env.CATALOG_DB_PATH || join(dataDir, "catalog.sqlite"), { create: true });
 
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
 
@@ -17,6 +19,17 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS config (
       key TEXT PRIMARY KEY,
       value TEXT
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      endpoint TEXT NOT NULL UNIQUE,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      user_agent TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -411,6 +424,37 @@ export function updateConfig(updates: Record<string, string>) {
     }
   });
   transaction(updates);
+}
+
+// ── Suscripciones Web Push ───────────────────────────────────────────────
+export interface PushSubscriptionRow {
+  id: number;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  user_agent: string | null;
+  created_at: string;
+}
+
+export function addPushSubscription(endpoint: string, p256dh: string, auth: string, userAgent: string | null) {
+  // ON CONFLICT por endpoint: refresca las llaves por si el navegador rotó la suscripción.
+  db.run(
+    `INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_agent) VALUES (?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent`,
+    [endpoint, p256dh, auth, userAgent]
+  );
+}
+
+export function getPushSubscriptions(): PushSubscriptionRow[] {
+  return db.query<PushSubscriptionRow, []>(`SELECT * FROM push_subscriptions ORDER BY created_at DESC`).all();
+}
+
+export function deletePushSubscription(endpoint: string) {
+  db.run(`DELETE FROM push_subscriptions WHERE endpoint = ?`, [endpoint]);
+}
+
+export function countPushSubscriptions(): number {
+  return db.query<{ c: number }, []>(`SELECT COUNT(*) c FROM push_subscriptions`).get()?.c || 0;
 }
 
 export interface PriceTier {
