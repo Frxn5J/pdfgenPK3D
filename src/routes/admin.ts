@@ -545,6 +545,10 @@ const parseAdaptedJson = (raw: string, categories: Category[], subcategories: Su
   return { description: desc, category, subcategory };
 };
 
+// Default de la instrucción de reescritura (tarea 1) del botón "Adaptar a
+// catálogo con IA". Editable desde /admin/config → Prompts (catalog_description_prompt).
+const DEFAULT_CATALOG_DESCRIPTION_PROMPT = "Reescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Un solo párrafo corto, comercial, descriptivo, que invite a comprar sin exagerar. Mantente fiel a la información original.";
+
 const adaptDescriptionForCatalog = async (name: string, description: string, imageUrl = "", categories: Category[] = [], subcategories: Subcategory[] = []): Promise<AdaptedDescriptionResult> => {
   const config = llmConfig();
   if (!config.apiKey) throw new Error("LLM_API_KEY no está configurada en el entorno.");
@@ -579,8 +583,13 @@ const adaptDescriptionForCatalog = async (name: string, description: string, ima
       }).join("\n")}`
     : "\n\nNo hay categorías creadas todavía.";
 
+  // Instrucción de reescritura (tarea 1) configurable desde /admin/config →
+  // Prompts. Las tareas 2-3 (categoría/subcategoría) y el contrato JSON quedan
+  // fijos para no romper el parser. El límite de palabras se inyecta aparte
+  // (campo dedicado) para que siempre mande, escriba lo que escriba el usuario.
+  const descPrompt = settingValue("catalog_description_prompt", "LLM_DESCRIPTION_PROMPT", DEFAULT_CATALOG_DESCRIPTION_PROMPT);
   const imageTaskNum = hasImage ? "4" : "";
-  const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}${categoryList}\n\nTareas:\n1) Reescribe la descripción para una tarjeta de producto de catálogo. Debe caber debajo de la imagen, antes de la tabla de precios. Máximo ${config.maxWords} palabras. Un solo párrafo corto, comercial, descriptivo, que invite a comprar sin exagerar. Mantente fiel a la información original.\n2) Asigna una categoría:\n   - Si el producto encaja claramente en alguna de las categorías disponibles, devuelve {"match":"existing","id":<id>}.\n   - Si NO encaja en ninguna existente (o si no hay ninguna), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado), devuelve {"match":"new","name":"<nombre>"}.\n   - Prefiere reutilizar una existente antes que crear una nueva si dudas.\n3) Asigna una subcategoría DENTRO de la categoría elegida (más específica que la categoría; ej. categoría "Llaveros" → subcategoría "Motos", "Fidget toy", "Clicker"; categoría "Figuras" → nombre de la serie):\n   - Si la categoría elegida ya tiene una subcategoría que encaja, devuelve {"match":"existing","id":<id>} (usando un id de la lista de subcategorías de ESA categoría).\n   - Si no encaja ninguna (o la categoría es nueva), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado): {"match":"new","name":"<nombre>"}.\n   - Si el producto no amerita subcategoría, devuelve null.\n${hasImage ? `${imageTaskNum}) Si la imagen aporta información clara sobre forma, estilo, serie o apariencia, úsala como contexto adicional, sin inventar medidas/materiales/funciones.` : ""}\n\nDevuelve SOLO un objeto JSON válido con esta forma exacta, sin texto extra ni cercas de markdown:\n{"description":"...","category":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"},"subcategory":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"}|null}`;
+  const userText = `Producto: ${name || "Producto de impresión 3D"}\n\nDescripción original:\n${description}${categoryList}\n\nTareas:\n1) ${descPrompt} Máximo ${config.maxWords} palabras.\n2) Asigna una categoría:\n   - Si el producto encaja claramente en alguna de las categorías disponibles, devuelve {"match":"existing","id":<id>}.\n   - Si NO encaja en ninguna existente (o si no hay ninguna), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado), devuelve {"match":"new","name":"<nombre>"}.\n   - Prefiere reutilizar una existente antes que crear una nueva si dudas.\n3) Asigna una subcategoría DENTRO de la categoría elegida (más específica que la categoría; ej. categoría "Llaveros" → subcategoría "Motos", "Fidget toy", "Clicker"; categoría "Figuras" → nombre de la serie):\n   - Si la categoría elegida ya tiene una subcategoría que encaja, devuelve {"match":"existing","id":<id>} (usando un id de la lista de subcategorías de ESA categoría).\n   - Si no encaja ninguna (o la categoría es nueva), sugiere una NUEVA con un nombre corto (1-3 palabras, en español, capitalizado): {"match":"new","name":"<nombre>"}.\n   - Si el producto no amerita subcategoría, devuelve null.\n${hasImage ? `${imageTaskNum}) Si la imagen aporta información clara sobre forma, estilo, serie o apariencia, úsala como contexto adicional, sin inventar medidas/materiales/funciones.` : ""}\n\nDevuelve SOLO un objeto JSON válido con esta forma exacta, sin texto extra ni cercas de markdown:\n{"description":"...","category":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"},"subcategory":{"match":"existing"|"new","id":<int opcional>,"name":"<string opcional>"}|null}`;
 
   const attempts: { model: string; error: string }[] = [];
 
@@ -2584,6 +2593,12 @@ adminRoutes.get("/config", (c) => {
 
                     <div class="space-y-5">
                         <div>
+                            <label class="block text-sm font-medium text-gray-700">Prompt: Adaptar Descripción a Catálogo (botón "Adaptar a catálogo con IA")</label>
+                            <textarea name="catalog_description_prompt" rows="4" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="${escapeHtml(DEFAULT_CATALOG_DESCRIPTION_PROMPT)}">${configValue(config, "catalog_description_prompt")}</textarea>
+                            <p class="text-xs text-gray-500 mt-1">Instrucción de reescritura del botón "Adaptar a catálogo con IA" (en producto nuevo/editar y MakerWorld). Solo controla <strong>cómo se reescribe el texto</strong>; la asignación de categoría/subcategoría y el formato de salida quedan fijos. El <strong>límite de palabras</strong> se controla aparte (pestaña IA · Modelos). Déjalo vacío para usar el prompt por defecto.</p>
+                        </div>
+
+                        <div>
                             <label class="block text-sm font-medium text-gray-700">Prompt: Creador de Diseños (Herramientas)</label>
                             <textarea name="design_creator_prompt" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs">${configValue(config, "design_creator_prompt")}</textarea>
                             <p class="text-xs text-gray-500 mt-1">Usado por <code class="bg-gray-100 px-1 rounded">Herramientas → Creador de Diseños</code> y por el botón "Crear diseño con IA" dentro de cotizaciones manuales. Incluye <code class="bg-gray-100 px-1 rounded">{userPrompt}</code> donde quieras inyectar la descripción adicional del usuario; si no incluyes el placeholder y el usuario escribe algo, se concatena al final. Si el usuario no escribe nada, se manda solo este prompt.</p>
@@ -2765,6 +2780,7 @@ adminRoutes.post("/config", async (c) => {
     "contact_text",
     "design_creator_prompt",
     "catalog_image_prompt",
+    "catalog_description_prompt",
     "color_primary",
     "color_secondary",
     "color_accent",
