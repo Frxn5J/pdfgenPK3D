@@ -1,7 +1,6 @@
 import { Hono } from "hono";
-import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, type Category, type Product } from "../db/schema";
-import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegisterScript, sendPushToAll } from "../pwa";
 import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, getSubcategories, type Category, type Subcategory, type Product } from "../db/schema";
+import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegisterScript, sendPushToAll } from "../pwa";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -441,13 +440,29 @@ const renderCoverSection = (config: Record<string, string>) => `
       ${renderShapes(config)}
       <div class="page-shell">
           ${config.company_logo
-            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image">`
-            : `<div class="logo-fallback">Logo</div>`
+            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image" data-admin-gate>`
+            : `<div class="logo-fallback" data-admin-gate>Logo</div>`
           }
-          <h1>${escapeHtml(config.company_name || "PIXKEY3D")}</h1>
+          <h1 data-admin-gate>${escapeHtml(config.company_name || "PIXKEY3D")}</h1>
           <p class="cover-subtitle">${escapeHtml(config.cover_subtitle || "Catálogo de Productos")}</p>
       </div>
   </section>
+  <script>
+  (function () {
+    // Acceso discreto al panel: 5 toques rápidos sobre el logo o el nombre.
+    // No hay enlace ni pista visual para el cliente.
+    var gates = document.querySelectorAll('[data-admin-gate]');
+    if (!gates.length) return;
+    var taps = 0, timer = null;
+    function onTap() {
+      taps++;
+      clearTimeout(timer);
+      timer = setTimeout(function () { taps = 0; }, 1500);
+      if (taps >= 5) { taps = 0; window.location.href = '/admin/login'; }
+    }
+    gates.forEach(function (g) { g.addEventListener('click', onTap); });
+  })();
+  </script>
 `;
 
 const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers: ReturnType<typeof getDefaultPriceTiers>) => `

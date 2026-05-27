@@ -1,0 +1,55 @@
+Server starting on port 3000...
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 5ms
+<-- GET /sw.js
+--> GET /sw.js [32m200[0m 0ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 2ms
+<-- GET /favicon.ico
+--> GET /favicon.ico [33m404[0m 0ms
+<-- GET /admin
+--> GET /admin [36m302[0m 0ms
+<-- GET /admin/login
+--> GET /admin/login [32m200[0m 1ms
+<-- GET /uploads/1779913840281-Captura_de_pantalla_2026-05-22_103018.png
+--> GET /uploads/1779913840281-Captura_de_pantalla_2026-05-22_103018.png [32m200[0m 13ms
+<-- GET /sw.js
+--> GET /sw.js [32m200[0m 0ms
+<-- POST /admin/login
+--> POST /admin/login [36m302[0m 3ms
+<-- GET /admin
+--> GET /admin [36m302[0m 1ms
+<-- GET /admin/products
+--> GET /admin/products [32m200[0m 1ms
+<-- GET /manifest.webmanifest
+--> GET /manifest.webmanifest [32m200[0m 1ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 1ms
+<-- GET /sw.js
+--> GET /sw.js [32m200[0m 0ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 2ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 1ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 1ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 0ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 2ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 1ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 1ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 1ms
+<-- GET /admin/notificaciones
+--> GET /admin/notificaciones [32m200[0m 1ms
+<-- GET /manifest.webmanifest
+--> GET /manifest.webmanifest [32m200[0m 0ms
+<-- GET /icons/app-icon.svg
+--> GET /icons/app-icon.svg [32m200[0m 1ms
+<-- POST /admin/push/test
+--> POST /admin/push/test [32m200[0m 478ms
+<-- GET /sw.js
+--> GET /sw.js [32m200[0m 1ms
