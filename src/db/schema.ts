@@ -39,6 +39,15 @@ export function initDb() {
   `);
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS subcategories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -58,6 +67,11 @@ export function initDb() {
   }
   try {
     db.run(`ALTER TABLE products ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL`);
+  } catch {
+    // Column already exists.
+  }
+  try {
+    db.run(`ALTER TABLE products ADD COLUMN subcategory_id INTEGER REFERENCES subcategories(id) ON DELETE SET NULL`);
   } catch {
     // Column already exists.
   }
@@ -428,6 +442,13 @@ export interface Category {
   sort_order: number;
 }
 
+export interface Subcategory {
+  id: number;
+  category_id: number;
+  name: string;
+  sort_order: number;
+}
+
 export interface Product {
   id: number;
   name: string;
@@ -440,6 +461,7 @@ export interface Product {
   use_default_pricing: boolean;
   sort_order: number;
   category_id: number | null;
+  subcategory_id: number | null;
 }
 
 // ── Categorías ──────────────────────────────────────────────────────────
@@ -462,12 +484,43 @@ export function updateCategory(id: number, name: string, sortOrder: number) {
 }
 
 export function deleteCategory(id: number) {
-  // SQLite no tiene PRAGMA foreign_keys=ON, así que el FK ON DELETE SET NULL
-  // no es enforced. Nulificamos a mano los productos con esta categoría
-  // y luego borramos la fila — todo en una sola transacción.
+  // SQLite no tiene PRAGMA foreign_keys=ON, así que los FK ON DELETE no se
+  // enforzan. Limpiamos a mano: productos de la categoría quedan sin categoría
+  // ni subcategoría, se borran las subcategorías de la categoría, y la fila.
   db.transaction(() => {
-    db.run(`UPDATE products SET category_id = NULL WHERE category_id = ?`, [id]);
+    db.run(`UPDATE products SET category_id = NULL, subcategory_id = NULL WHERE category_id = ?`, [id]);
+    db.run(`DELETE FROM subcategories WHERE category_id = ?`, [id]);
     db.run(`DELETE FROM categories WHERE id = ?`, [id]);
+  })();
+}
+
+// ── Subcategorías ───────────────────────────────────────────────────────
+export function getSubcategories(): Subcategory[] {
+  return db.query<Subcategory, []>(`SELECT * FROM subcategories ORDER BY sort_order ASC, name ASC`).all();
+}
+
+export function getSubcategoriesByCategory(categoryId: number): Subcategory[] {
+  return db.query<Subcategory, [number]>(`SELECT * FROM subcategories WHERE category_id = ? ORDER BY sort_order ASC, name ASC`).all(categoryId);
+}
+
+export function getSubcategory(id: number): Subcategory | null {
+  return db.query<Subcategory, [number]>(`SELECT * FROM subcategories WHERE id = ?`).get(id) || null;
+}
+
+export function createSubcategory(categoryId: number, name: string, sortOrder?: number): Subcategory {
+  const order = Number.isFinite(sortOrder) ? sortOrder! : (db.query<{ m: number }, [number]>(`SELECT COALESCE(MAX(sort_order), 0) as m FROM subcategories WHERE category_id = ?`).get(categoryId)?.m || 0) + 10;
+  const row = db.query<{ id: number }, [number, string, number]>(`INSERT INTO subcategories (category_id, name, sort_order) VALUES (?, ?, ?) RETURNING id`).get(categoryId, name, order);
+  return { id: row!.id, category_id: categoryId, name, sort_order: order };
+}
+
+export function updateSubcategory(id: number, name: string, sortOrder: number) {
+  db.run(`UPDATE subcategories SET name = ?, sort_order = ? WHERE id = ?`, [name, sortOrder, id]);
+}
+
+export function deleteSubcategory(id: number) {
+  db.transaction(() => {
+    db.run(`UPDATE products SET subcategory_id = NULL WHERE subcategory_id = ?`, [id]);
+    db.run(`DELETE FROM subcategories WHERE id = ?`, [id]);
   })();
 }
 
