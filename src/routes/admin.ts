@@ -1,22 +1,79 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
 
+// ── Session helpers ──────────────────────────────────────────────────────
+
+export interface SessionData {
+  id: number;       // 0 for config superusuario
+  username: string;
+  role: UserRole;
+  exp: number;      // timestamp ms
+}
+
+const SESSION_SECRET = () => {
+  // settingValue is defined further down; we call it lazily so it's available.
+  const dbValue = (db.query<{ value: string }, [string]>(`SELECT value FROM config WHERE key = ?`).get("session_secret")?.value || "").trim();
+  if (dbValue) return dbValue;
+  const envValue = (process.env["SESSION_SECRET"] || "").trim();
+  if (envValue) return envValue;
+  return "pixkey3d-default-secret-change-me";
+};
+
+async function signSession(data: SessionData): Promise<string> {
+  const payload = JSON.stringify(data);
+  const keyMaterial = new TextEncoder().encode(SESSION_SECRET());
+  const key = await crypto.subtle.importKey("raw", keyMaterial, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return btoa(payload) + "." + sigB64;
+}
+
+async function verifySession(cookie: string): Promise<SessionData | null> {
+  try {
+    const [payloadB64, sigB64] = cookie.split(".");
+    if (!payloadB64 || !sigB64) return null;
+    const payload = atob(payloadB64);
+    const keyMaterial = new TextEncoder().encode(SESSION_SECRET());
+    const key = await crypto.subtle.importKey("raw", keyMaterial, { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const sigBytes = Uint8Array.from(atob(sigB64), (c) => c.charCodeAt(0));
+    const valid = await crypto.subtle.verify("HMAC", key, sigBytes, new TextEncoder().encode(payload));
+    if (!valid) return null;
+    const data: SessionData = JSON.parse(payload);
+    if (data.exp < Date.now()) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 // Middleware for admin auth (moved from app.ts to avoid circular dependency)
 export const requireAuth = async (c: any, next: any) => {
-  const session = getCookie(c, "admin_session");
-  // Very basic auth check for prototype
-  if (session === "authenticated") {
-    await next();
-  } else {
-    // API requests (fetch) expect JSON, not an HTML redirect.
-    const isApiRequest = c.req.method !== "GET" || c.req.header("accept")?.includes("application/json");
-    if (isApiRequest) return c.json({ error: "No autorizado." }, 401);
-    return c.redirect("/admin/login");
+  const cookie = getCookie(c, "admin_session");
+  if (cookie) {
+    const session = await verifySession(cookie);
+    if (session) {
+      c.set("session", session);
+      await next();
+      return;
+    }
   }
+  const isApiRequest = c.req.method !== "GET" || c.req.header("accept")?.includes("application/json");
+  if (isApiRequest) return c.json({ error: "No autorizado." }, 401);
+  return c.redirect("/admin/login");
+};
+
+export const requireRole = (roles: UserRole[]) => async (c: any, next: any) => {
+  const session: SessionData | undefined = c.get("session");
+  if (!session || !roles.includes(session.role)) {
+    const isApiRequest = c.req.method !== "GET" || c.req.header("accept")?.includes("application/json");
+    if (isApiRequest) return c.json({ error: "Acceso denegado." }, 403);
+    return c.html(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem"><h2>Acceso denegado</h2><p>Tu rol (<b>${session?.role ?? "desconocido"}</b>) no tiene permiso para acceder a esta sección.</p><a href="/admin">← Volver</a></body></html>`, 403);
+  }
+  await next();
 };
 
 const adminRoutes = new Hono();
@@ -1614,7 +1671,7 @@ const buildAdminThemeCss = (config: Record<string, string>) => {
   `;
 };
 
-const AdminLayout = (title: string, content: string) => {
+const AdminLayout = (title: string, content: string, session?: SessionData) => {
   const config = getConfig();
   return `
 <!DOCTYPE html>
@@ -1729,8 +1786,13 @@ const AdminLayout = (title: string, content: string) => {
                         </div>
                     </div>
                     <a href="/admin/config" class="nav-direct-link">Configuración</a>
+                    ${session?.role === "superusuario" ? `<a href="/admin/usuarios" class="nav-direct-link">Usuarios</a>` : ""}
                 </div>
-                <div>
+                <div class="flex items-center gap-3">
+                    ${session ? `<div class="flex items-center gap-2 text-sm">
+                      <span class="text-blue-100 font-medium">${escapeHtml(session.username)}</span>
+                      <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${session.role === "superusuario" ? "bg-purple-500 text-white" : session.role === "admin" ? "bg-red-500 text-white" : session.role === "editor" ? "bg-blue-400 text-white" : "bg-gray-400 text-white"}">${escapeHtml(session.role)}</span>
+                    </div>` : ""}
                     <form action="/admin/logout" method="post" class="inline">
                         <button type="submit" class="text-sm font-medium text-blue-200 hover:text-white">Cerrar Sesión</button>
                     </form>
@@ -1803,21 +1865,33 @@ adminRoutes.get("/login", (c) => {
 
 adminRoutes.post("/login", async (c) => {
   const body = await c.req.parseBody();
-  const validUsername = settingValue("admin_username", "ADMIN_USERNAME", "Frxn5J");
-  const validPassword = settingValue("admin_password", "ADMIN_PASSWORD", "");
+  const inputUsername = String(body.username || "").trim();
+  const inputPassword = String(body.password || "");
 
-  if (!validPassword) {
-    return c.text("ADMIN_PASSWORD no está configurado (ni en /admin/config ni en .env).", 500);
+  const superUsername = settingValue("admin_username", "ADMIN_USERNAME", "Frxn5J");
+  const superPassword = settingValue("admin_password", "ADMIN_PASSWORD", "");
+
+  let sessionData: SessionData | null = null;
+
+  // Check config superusuario first
+  if (inputUsername === superUsername && superPassword && inputPassword === superPassword) {
+    sessionData = { id: 0, username: superUsername, role: "superusuario", exp: Date.now() + 24 * 60 * 60 * 1000 };
   }
 
-  if (body.username === validUsername && body.password === validPassword) {
-    setCookie(c, "admin_session", "authenticated", {
-      path: "/",
-      httpOnly: true,
-      secure: false,
-      sameSite: "Lax",
-      maxAge: 60 * 60 * 24 // 1 day
-    });
+  // If not superusuario, check users table
+  if (!sessionData) {
+    const user = getUserByUsername(inputUsername);
+    if (user && user.active) {
+      const valid = await Bun.password.verify(inputPassword, user.password_hash);
+      if (valid) {
+        sessionData = { id: user.id, username: user.username, role: user.role, exp: Date.now() + 24 * 60 * 60 * 1000 };
+      }
+    }
+  }
+
+  if (sessionData) {
+    const token = await signSession(sessionData);
+    setCookie(c, "admin_session", token, { path: "/", httpOnly: true, sameSite: "Lax", maxAge: 86400 });
     return c.redirect("/admin");
   }
 
@@ -1834,6 +1908,195 @@ adminRoutes.use("/*", requireAuth);
 
 adminRoutes.get("/", (c) => {
   return c.redirect("/admin/products");
+});
+
+// ── Gestión de usuarios ──────────────────────────────────────────────────
+
+const roleBadge = (role: UserRole) => {
+  const classes: Record<UserRole, string> = {
+    superusuario: "bg-purple-100 text-purple-800",
+    admin: "bg-red-100 text-red-800",
+    editor: "bg-blue-100 text-blue-800",
+    visor: "bg-gray-100 text-gray-800",
+  };
+  return `<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${classes[role] || classes.visor}">${escapeHtml(role)}</span>`;
+};
+
+adminRoutes.get("/usuarios", requireRole(["superusuario"]), (c) => {
+  const session = c.get("session") as SessionData;
+  const users = getUsers();
+  const superUsername = settingValue("admin_username", "ADMIN_USERNAME", "Frxn5J");
+  const rows = users.map((u) => `
+    <tr class="hover:bg-gray-50">
+      <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${escapeHtml(u.username)}</td>
+      <td class="px-6 py-4 whitespace-nowrap text-sm">${roleBadge(u.role)}</td>
+      <td class="px-6 py-4 whitespace-nowrap text-sm">
+        ${u.active ? '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Activo</span>' : '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Inactivo</span>'}
+      </td>
+      <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${escapeHtml(u.created_at)}</td>
+      <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-3">
+        <a href="/admin/usuarios/${u.id}/editar" class="text-blue-600 hover:text-blue-900">Editar</a>
+        <form method="post" action="/admin/usuarios/${u.id}/eliminar" class="inline" onsubmit="return confirm('¿Eliminar usuario ${escapeHtml(u.username)}?')">
+          <button type="submit" class="text-red-600 hover:text-red-900">Eliminar</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+
+  return c.html(AdminLayout("Usuarios", `
+    <div class="bg-white shadow rounded-lg overflow-hidden">
+      <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+        <div>
+          <h2 class="text-xl font-bold text-gray-800">Gestión de Usuarios</h2>
+          <p class="text-sm text-gray-500 mt-1">Administra los usuarios que pueden acceder al panel.</p>
+        </div>
+        <a href="/admin/usuarios/nuevo" class="btn-primary inline-flex items-center px-4 py-2 rounded-md text-white text-sm font-medium">+ Nuevo usuario</a>
+      </div>
+      <div class="px-6 py-4 bg-yellow-50 border-b border-yellow-200">
+        <p class="text-sm text-yellow-800"><strong>Superusuario de config:</strong> <code class="bg-yellow-100 px-1 rounded">${escapeHtml(superUsername)}</code> — gestionado desde /admin/config o variables de entorno.</p>
+      </div>
+      <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Usuario</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rol</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Estado</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Creado</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th>
+          </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+          ${rows || '<tr><td colspan="5" class="px-6 py-8 text-center text-gray-500 text-sm">No hay usuarios adicionales. Crea uno con "+ Nuevo usuario".</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `, session));
+});
+
+adminRoutes.get("/usuarios/nuevo", requireRole(["superusuario"]), (c) => {
+  const session = c.get("session") as SessionData;
+  const error = c.req.query("error") || "";
+  const errorMsg = error === "username_taken" ? "El nombre de usuario ya existe." : error === "invalid" ? "Datos inválidos. Verifica el formulario." : "";
+  return c.html(AdminLayout("Nuevo Usuario", `
+    <div class="max-w-lg mx-auto bg-white shadow rounded-lg p-6">
+      <h2 class="text-xl font-bold text-gray-800 mb-6">Crear nuevo usuario</h2>
+      ${errorMsg ? `<div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm">${escapeHtml(errorMsg)}</div>` : ""}
+      <form method="post" action="/admin/usuarios/nuevo" class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Nombre de usuario</label>
+          <input type="text" name="username" required autocomplete="off" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Contraseña</label>
+          <input type="password" name="password" required autocomplete="new-password" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Rol</label>
+          <select name="role" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm">
+            <option value="admin">admin — gestión completa excepto usuarios</option>
+            <option value="editor">editor — puede crear/editar productos y categorías</option>
+            <option value="visor" selected>visor — solo lectura</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-3 pt-2">
+          <button type="submit" class="btn-primary px-5 py-2 rounded-md text-white text-sm font-medium">Crear usuario</button>
+          <a href="/admin/usuarios" class="text-sm text-gray-600 hover:underline">Cancelar</a>
+        </div>
+      </form>
+    </div>
+  `, session));
+});
+
+adminRoutes.post("/usuarios/nuevo", requireRole(["superusuario"]), async (c) => {
+  const body = await c.req.parseBody();
+  const username = formString(body.username).trim();
+  const password = formString(body.password);
+  const role = formString(body.role) as UserRole;
+  const validRoles: UserRole[] = ["admin", "editor", "visor"];
+  if (!username || !password || !validRoles.includes(role)) {
+    return c.redirect("/admin/usuarios/nuevo?error=invalid");
+  }
+  try {
+    const hash = await Bun.password.hash(password);
+    createUser(username, hash, role);
+    return c.redirect("/admin/usuarios");
+  } catch {
+    return c.redirect("/admin/usuarios/nuevo?error=username_taken");
+  }
+});
+
+adminRoutes.get("/usuarios/:id/editar", requireRole(["superusuario"]), (c) => {
+  const session = c.get("session") as SessionData;
+  const id = Number(c.req.param("id"));
+  const user = getUserById(id);
+  if (!user) return c.html("<p>Usuario no encontrado.</p>", 404);
+  const error = c.req.query("error") || "";
+  const errorMsg = error === "username_taken" ? "El nombre de usuario ya existe." : error === "invalid" ? "Datos inválidos." : "";
+  return c.html(AdminLayout(`Editar Usuario: ${escapeHtml(user.username)}`, `
+    <div class="max-w-lg mx-auto bg-white shadow rounded-lg p-6">
+      <h2 class="text-xl font-bold text-gray-800 mb-6">Editar usuario</h2>
+      ${errorMsg ? `<div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm">${escapeHtml(errorMsg)}</div>` : ""}
+      <form method="post" action="/admin/usuarios/${user.id}/editar" class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Nombre de usuario</label>
+          <input type="text" name="username" required value="${escapeHtml(user.username)}" autocomplete="off" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Contraseña</label>
+          <input type="password" name="password" autocomplete="new-password" placeholder="(dejar vacío para no cambiar)" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700">Rol</label>
+          <select name="role" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm">
+            <option value="admin" ${user.role === "admin" ? "selected" : ""}>admin — gestión completa excepto usuarios</option>
+            <option value="editor" ${user.role === "editor" ? "selected" : ""}>editor — puede crear/editar productos y categorías</option>
+            <option value="visor" ${user.role === "visor" ? "selected" : ""}>visor — solo lectura</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+            <input type="checkbox" name="active" value="1" ${user.active ? "checked" : ""} class="rounded border-gray-300 text-blue-600">
+            Usuario activo
+          </label>
+        </div>
+        <div class="flex items-center gap-3 pt-2">
+          <button type="submit" class="btn-primary px-5 py-2 rounded-md text-white text-sm font-medium">Guardar cambios</button>
+          <a href="/admin/usuarios" class="text-sm text-gray-600 hover:underline">Cancelar</a>
+        </div>
+      </form>
+    </div>
+  `, session));
+});
+
+adminRoutes.post("/usuarios/:id/editar", requireRole(["superusuario"]), async (c) => {
+  const id = Number(c.req.param("id"));
+  const user = getUserById(id);
+  if (!user) return c.html("<p>Usuario no encontrado.</p>", 404);
+  const body = await c.req.parseBody();
+  const username = formString(body.username).trim();
+  const password = formString(body.password);
+  const role = formString(body.role) as UserRole;
+  const active = body.active === "1" ? 1 : 0;
+  const validRoles: UserRole[] = ["admin", "editor", "visor"];
+  if (!username || !validRoles.includes(role)) {
+    return c.redirect(`/admin/usuarios/${id}/editar?error=invalid`);
+  }
+  try {
+    const updates: { username?: string; password_hash?: string; role?: UserRole; active?: number } = { username, role, active };
+    if (password) {
+      updates.password_hash = await Bun.password.hash(password);
+    }
+    updateUser(id, updates);
+    return c.redirect("/admin/usuarios");
+  } catch {
+    return c.redirect(`/admin/usuarios/${id}/editar?error=username_taken`);
+  }
+});
+
+adminRoutes.post("/usuarios/:id/eliminar", requireRole(["superusuario"]), (c) => {
+  const id = Number(c.req.param("id"));
+  deleteUser(id);
+  return c.redirect("/admin/usuarios");
 });
 
 // ── Notificaciones push (admin) ──────────────────────────────────────────
@@ -2015,7 +2278,7 @@ adminRoutes.get("/notificaciones", (c) => {
       refresh();
     })();
     </script>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 adminRoutes.get("/quotes", (c) => {
@@ -2105,7 +2368,7 @@ adminRoutes.get("/quotes", (c) => {
         </table>
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 adminRoutes.get("/zona-extendida/:cp", async (c) => {
@@ -2227,7 +2490,7 @@ adminRoutes.post("/image/enhance", async (c) => {
   }
 });
 
-const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
+const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "", session?: SessionData) => {
   const defaultTiers = getDefaultPriceTiers();
   const categories = getCategories();
   const subcategories = getSubcategories();
@@ -2340,20 +2603,20 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "") => {
         </div>
       </form>` : ""}
     </div>
-  `);
+  `, session);
 };
 
-adminRoutes.get("/makerworld", (c) => c.html(renderMakerWorldForm()));
+adminRoutes.get("/makerworld", (c) => c.html(renderMakerWorldForm(undefined, "", c.get("session") as SessionData | undefined)));
 
 adminRoutes.post("/makerworld", async (c) => {
   const body = await c.req.parseBody() as Record<string, unknown>;
   try {
     const clientHtml = formString(body.client_html) || undefined;
     const draft = await scrapeMakerWorld(formString(body.makerworld_url), clientHtml);
-    return c.html(renderMakerWorldForm(draft));
+    return c.html(renderMakerWorldForm(draft, "", c.get("session") as SessionData | undefined));
   } catch (error) {
     console.error("[MakerWorld scrape error]", error);
-    return c.html(renderMakerWorldForm(undefined, error instanceof Error ? error.message : "No se pudo analizar el link de MakerWorld"), 400);
+    return c.html(renderMakerWorldForm(undefined, error instanceof Error ? error.message : "No se pudo analizar el link de MakerWorld", c.get("session") as SessionData | undefined), 400);
   }
 });
 
@@ -2375,7 +2638,7 @@ adminRoutes.post("/makerworld/save", async (c) => {
   return c.redirect(`/admin/products/${result.id}/edit`);
 });
 
-adminRoutes.get("/config", (c) => {
+adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
   const config = getConfig();
   const tiers = getDefaultPriceTiers();
 
@@ -2958,10 +3221,10 @@ adminRoutes.get("/config", (c) => {
         });
       })();
     </script>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/config", async (c) => {
+adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) => {
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
 
   // Anti-wipe: rechazamos POSTs que no traigan el marcador de formulario.
@@ -3212,10 +3475,10 @@ adminRoutes.get("/categorias", (c) => {
         </div>
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/categorias", async (c) => {
+adminRoutes.post("/categorias", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody();
   const name = formString(body.name).trim();
   if (!name) return c.text("El nombre es obligatorio.", 400);
@@ -3225,7 +3488,7 @@ adminRoutes.post("/categorias", async (c) => {
   return c.redirect("/admin/categorias");
 });
 
-adminRoutes.post("/categorias/:id/edit", async (c) => {
+adminRoutes.post("/categorias/:id/edit", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = Number.parseInt(c.req.param("id"), 10);
   if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
   const body = await c.req.parseBody();
@@ -3236,7 +3499,7 @@ adminRoutes.post("/categorias/:id/edit", async (c) => {
   return c.redirect("/admin/categorias");
 });
 
-adminRoutes.post("/categorias/:id/delete", (c) => {
+adminRoutes.post("/categorias/:id/delete", requireRole(["superusuario", "admin", "editor"]), (c) => {
   const id = Number.parseInt(c.req.param("id"), 10);
   if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
   deleteCategory(id);
@@ -3246,7 +3509,7 @@ adminRoutes.post("/categorias/:id/delete", (c) => {
 // Crea una categoría desde JS (botón "Adaptar a IA" que acepta una sugerencia
 // del modelo). Devuelve la categoría completa para que el frontend pueda
 // inyectarla al <select> y seleccionarla sin recargar.
-adminRoutes.post("/categorias/quick-create", async (c) => {
+adminRoutes.post("/categorias/quick-create", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const name = formString(body.name).trim();
@@ -3263,7 +3526,7 @@ adminRoutes.post("/categorias/quick-create", async (c) => {
 });
 
 // ── Subcategorías (gestión dentro de /admin/categorias) ──────────────────
-adminRoutes.post("/categorias/:id/subcategorias", async (c) => {
+adminRoutes.post("/categorias/:id/subcategorias", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const categoryId = Number.parseInt(c.req.param("id"), 10);
   if (!Number.isFinite(categoryId) || !getCategory(categoryId)) return c.text("Categoría inválida.", 400);
   const body = await c.req.parseBody();
@@ -3275,7 +3538,7 @@ adminRoutes.post("/categorias/:id/subcategorias", async (c) => {
   return c.redirect("/admin/categorias");
 });
 
-adminRoutes.post("/subcategorias/:id/edit", async (c) => {
+adminRoutes.post("/subcategorias/:id/edit", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = Number.parseInt(c.req.param("id"), 10);
   if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
   const body = await c.req.parseBody();
@@ -3286,7 +3549,7 @@ adminRoutes.post("/subcategorias/:id/edit", async (c) => {
   return c.redirect("/admin/categorias");
 });
 
-adminRoutes.post("/subcategorias/:id/delete", (c) => {
+adminRoutes.post("/subcategorias/:id/delete", requireRole(["superusuario", "admin", "editor"]), (c) => {
   const id = Number.parseInt(c.req.param("id"), 10);
   if (!Number.isFinite(id)) return c.text("ID inválido.", 400);
   deleteSubcategory(id);
@@ -3296,7 +3559,7 @@ adminRoutes.post("/subcategorias/:id/delete", (c) => {
 // Crea una subcategoría desde JS (sugerencia del LLM aceptada). Vive dentro de
 // una categoría (category_id). Devuelve la subcategoría completa para inyectarla
 // al <select> sin recargar.
-adminRoutes.post("/subcategorias/quick-create", async (c) => {
+adminRoutes.post("/subcategorias/quick-create", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const categoryId = Number.parseInt(String(body.category_id ?? ""), 10);
@@ -3400,10 +3663,10 @@ adminRoutes.get("/products", (c) => {
             </tbody>
         </table>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.get("/products/new", (c) => {
+adminRoutes.get("/products/new", requireRole(["superusuario", "admin", "editor"]), (c) => {
   const defaultTiers = getDefaultPriceTiers();
   const categories = getCategories();
   const subcategories = getSubcategories();
@@ -3470,10 +3733,10 @@ adminRoutes.get("/products/new", (c) => {
             </div>
         </form>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/products/new", async (c) => {
+adminRoutes.post("/products/new", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
 
   let imageUrl = formString(body.image_url);
@@ -3504,14 +3767,14 @@ adminRoutes.post("/products/new", async (c) => {
   return c.redirect(useDefaultPricing ? "/admin/products" : `/admin/products/${result.id}/edit`);
 });
 
-adminRoutes.post("/products/:id/delete", (c) => {
+adminRoutes.post("/products/:id/delete", requireRole(["superusuario", "admin", "editor"]), (c) => {
   const id = c.req.param("id");
   db.run(`DELETE FROM products WHERE id = ?`, [id]);
   return c.redirect("/admin/products");
 });
 
 // Helper route to just serve edit form
-adminRoutes.get("/products/:id/edit", (c) => {
+adminRoutes.get("/products/:id/edit", requireRole(["superusuario", "admin", "editor"]), (c) => {
   const id = parseInt(c.req.param("id"));
   const product = getProduct(id);
   if (!product) return c.notFound();
@@ -3584,10 +3847,10 @@ adminRoutes.get("/products/:id/edit", (c) => {
             </div>
         </form>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/products/:id/edit", async (c) => {
+adminRoutes.post("/products/:id/edit", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = parseInt(c.req.param("id"));
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
 
@@ -3830,7 +4093,7 @@ adminRoutes.get("/herramientas/creador-disenios", (c) => {
         });
       })();
     </script>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 adminRoutes.get("/quotes/new", (c) => {
@@ -4249,7 +4512,7 @@ adminRoutes.get("/quotes/new", (c) => {
         });
       })();
     </script>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 adminRoutes.post("/quotes/new", async (c) => {
@@ -4614,7 +4877,7 @@ adminRoutes.get("/quotes/:id", (c) => {
         checkZonaExtendida();
       })();
     </script>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 adminRoutes.post("/quotes/:id/status", async (c) => {
@@ -5152,7 +5415,7 @@ adminRoutes.get("/production-settings", (c) => {
         </div>
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 adminRoutes.post("/production-settings/printers", async (c) => {
@@ -5573,7 +5836,7 @@ adminRoutes.get("/production", (c) => {
         `}
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 // Production proof and schedule actions
@@ -5684,7 +5947,7 @@ const kpiCard = (label: string, value: string, color: string, sub = "") => `
 `;
 
 // Dashboard
-adminRoutes.get("/finanzas", (c) => {
+adminRoutes.get("/finanzas", requireRole(["superusuario", "admin"]), (c) => {
   const from = c.req.query("from") || "";
   const to = c.req.query("to") || "";
   const summary = getFinancialSummary(from, to);
@@ -5816,11 +6079,11 @@ adminRoutes.get("/finanzas", (c) => {
         })()}
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 // Ingresos (Payments)
-adminRoutes.get("/finanzas/ingresos", (c) => {
+adminRoutes.get("/finanzas/ingresos", requireRole(["superusuario", "admin"]), (c) => {
   const from = c.req.query("from") || "";
   const to = c.req.query("to") || "";
   const payments = getPayments({ from: from || undefined, to: to || undefined });
@@ -5909,16 +6172,16 @@ adminRoutes.get("/finanzas/ingresos", (c) => {
         </div>
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/finanzas/ingresos/:id/delete", (c) => {
+adminRoutes.post("/finanzas/ingresos/:id/delete", requireRole(["superusuario", "admin"]), (c) => {
   deletePayment(parseInt(c.req.param("id"), 10));
   return c.redirect("/admin/finanzas/ingresos");
 });
 
 // Gastos (Expenses)
-adminRoutes.get("/finanzas/gastos", (c) => {
+adminRoutes.get("/finanzas/gastos", requireRole(["superusuario", "admin"]), (c) => {
   const from = c.req.query("from") || "";
   const to = c.req.query("to") || "";
   const catFilter = parseInt(c.req.query("category") || "0", 10) || undefined;
@@ -6051,10 +6314,10 @@ adminRoutes.get("/finanzas/gastos", (c) => {
         </div>
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/finanzas/gastos", async (c) => {
+adminRoutes.post("/finanzas/gastos", requireRole(["superusuario", "admin"]), async (c) => {
   const body = await c.req.parseBody();
   const amount = parseFloat(String(body.amount || "0"));
   if (amount <= 0 || !String(body.description || "").trim()) return c.redirect("/admin/finanzas/gastos");
@@ -6070,12 +6333,12 @@ adminRoutes.post("/finanzas/gastos", async (c) => {
   return c.redirect("/admin/finanzas/gastos");
 });
 
-adminRoutes.post("/finanzas/gastos/:id/delete", (c) => {
+adminRoutes.post("/finanzas/gastos/:id/delete", requireRole(["superusuario", "admin"]), (c) => {
   deleteExpense(parseInt(c.req.param("id"), 10));
   return c.redirect("/admin/finanzas/gastos");
 });
 
-adminRoutes.post("/finanzas/categorias", async (c) => {
+adminRoutes.post("/finanzas/categorias", requireRole(["superusuario", "admin"]), async (c) => {
   const body = await c.req.parseBody();
   const name = String(body.name || "").trim();
   if (!name) return c.redirect("/admin/finanzas/gastos");
@@ -6083,13 +6346,13 @@ adminRoutes.post("/finanzas/categorias", async (c) => {
   return c.redirect("/admin/finanzas/gastos");
 });
 
-adminRoutes.post("/finanzas/categorias/:id/delete", (c) => {
+adminRoutes.post("/finanzas/categorias/:id/delete", requireRole(["superusuario", "admin"]), (c) => {
   deleteExpenseCategory(parseInt(c.req.param("id"), 10));
   return c.redirect("/admin/finanzas/gastos");
 });
 
 // Reportes
-adminRoutes.get("/finanzas/reportes", (c) => {
+adminRoutes.get("/finanzas/reportes", requireRole(["superusuario", "admin"]), (c) => {
   const year = c.req.query("year") || String(new Date().getFullYear());
   const yearNum = parseInt(year, 10);
 
@@ -6245,7 +6508,7 @@ adminRoutes.get("/finanzas/reportes", (c) => {
         </table>
       </div>
     </div>
-  `));
+  `, c.get("session") as SessionData | undefined));
 });
 
 export { adminRoutes };
