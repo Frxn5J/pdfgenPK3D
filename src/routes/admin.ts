@@ -395,7 +395,12 @@ const scrapeMakerWorldCollection = async (rawUrl: string, clientHtml?: string): 
   } catch {
     throw new Error("No se pudo parsear los datos de la colección");
   }
+  // Debug: log top-level pageProps keys to find where designs are
+  console.log("[Collection debug] pageProps keys:", Object.keys(pageProps));
+  const favorite = pageProps?.favorite;
+  if (favorite) console.log("[Collection debug] favorite keys:", Object.keys(favorite), "| designs.length:", favorite.designs?.length, "| designCnt:", favorite.designCnt);
   const designs: any[] =
+    pageProps?.favorite?.designs?.length ? pageProps.favorite.designs :
     pageProps?.collectionDetail?.designs ||
     pageProps?.collection?.designs ||
     pageProps?.collectionInfo?.designs ||
@@ -403,7 +408,10 @@ const scrapeMakerWorldCollection = async (rawUrl: string, clientHtml?: string): 
     pageProps?.designList?.hits ||
     pageProps?.list?.hits ||
     [];
-  if (!designs.length) throw new Error("No se encontraron artículos en esta colección. Puede estar vacía o requerir sesión iniciada en MakerWorld.");
+  if (!designs.length) {
+    const pagePropsJson = JSON.stringify(Object.fromEntries(Object.entries(pageProps).map(([k,v]) => [k, typeof v === 'object' && v ? Object.keys(v) : v]))).slice(0, 800);
+    throw new Error(`No se encontraron artículos en esta colección. pageProps: ${pagePropsJson}`);
+  }
   return designs.map((d: any) => {
     const id = String(d.id || d.designId || "");
     const handle = String(d.handle || d.slug || "");
