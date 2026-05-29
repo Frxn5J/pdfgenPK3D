@@ -142,11 +142,29 @@ const formatDate = (value: string) => {
   return date.toLocaleDateString("es-MX");
 };
 
+type PrintProfile = {
+  id: string;
+  name: string;
+  filamentGrams: number;
+  printTimeMins: number;
+  filamentType: string;
+  filamentColor: string;
+};
+
+type MakerWorldCollectionItem = {
+  id: string;
+  title: string;
+  thumbnail: string;
+  itemUrl: string;
+  summary: string;
+};
+
 type MakerWorldDraft = {
   sourceUrl: string;
   name: string;
   description: string;
   images: string[];
+  printProfiles: PrintProfile[];
 };
 
 type ChatCompletionResponse = {
@@ -226,6 +244,10 @@ const normalizeMakerWorldUrl = (rawUrl: string) => {
     url.pathname = url.pathname.replace(/^\/[a-z]{2}\//, "/es/");
   }
   return url.toString();
+};
+
+const isMakerWorldCollection = (rawUrl: string) => {
+  try { return /\/collections\//i.test(new URL(rawUrl).pathname); } catch { return false; }
 };
 
 const isCloudflareChallenge = (html: string) => {
@@ -335,7 +357,65 @@ const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<Ma
     metaContent(html, "og:image"),
     ...Array.from(html.matchAll(/https:\/\/makerworld\.bblmw\.com[^"'<>\s]+\.(?:png|jpe?g|webp)(?:\?[^"'<>\s]*)?/gi)).map((match) => match[0]),
   ]);
-  return { sourceUrl, name: title || "Producto MakerWorld", description, images };
+  const printProfiles: PrintProfile[] = [];
+  const designFiles: any[] = Array.isArray(design?.designFiles) ? design.designFiles : [];
+  for (let i = 0; i < designFiles.length; i++) {
+    const file = designFiles[i];
+    const ps = file?.profileSetting || file?.profile || {};
+    const filamentArr: any[] = Array.isArray(ps?.filamentInfo) ? ps.filamentInfo : Array.isArray(ps?.filaments) ? ps.filaments : [];
+    const fi = filamentArr[0] || {};
+    const rawTime = Number(ps?.printTime ?? 0);
+    const printTimeMins = rawTime > 3600 ? Math.round(rawTime / 60) : rawTime;
+    const filamentGrams = Math.round(Number(ps?.weight ?? ps?.filamentWeight ?? 0) * 10) / 10;
+    if (printTimeMins > 0 || filamentGrams > 0) {
+      printProfiles.push({
+        id: String(file?.id ?? i),
+        name: cleanText(file?.name || file?.filename || `Perfil ${i + 1}`).replace(/\.3mf$/i, ""),
+        filamentGrams,
+        printTimeMins,
+        filamentType: cleanText(fi?.type || fi?.filamentType || ""),
+        filamentColor: String(fi?.color || fi?.filamentColor || ""),
+      });
+    }
+  }
+  return { sourceUrl, name: title || "Producto MakerWorld", description, images, printProfiles };
+};
+
+const scrapeMakerWorldCollection = async (rawUrl: string, clientHtml?: string): Promise<MakerWorldCollectionItem[]> => {
+  const sourceUrl = normalizeMakerWorldUrl(rawUrl);
+  const html = clientHtml && !isCloudflareChallenge(clientHtml)
+    ? clientHtml
+    : await fetchMakerWorldHtml(sourceUrl);
+  const nextRaw = html.match(/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i)?.[1];
+  if (!nextRaw) throw new Error("No se encontraron datos de la colección en la página");
+  let pageProps: Record<string, any> = {};
+  try {
+    const nextData = JSON.parse(decodeEntities(nextRaw));
+    pageProps = nextData?.props?.pageProps || {};
+  } catch {
+    throw new Error("No se pudo parsear los datos de la colección");
+  }
+  const designs: any[] =
+    pageProps?.collectionDetail?.designs ||
+    pageProps?.collection?.designs ||
+    pageProps?.collectionInfo?.designs ||
+    pageProps?.designs ||
+    pageProps?.designList?.hits ||
+    pageProps?.list?.hits ||
+    [];
+  if (!designs.length) throw new Error("No se encontraron artículos en esta colección. Puede estar vacía o requerir sesión iniciada en MakerWorld.");
+  return designs.map((d: any) => {
+    const id = String(d.id || d.designId || "");
+    const handle = String(d.handle || d.slug || "");
+    const itemUrl = `https://makerworld.com/es/models/${handle ? `${id}-${handle}` : id}`;
+    return {
+      id,
+      title: cleanText(d.title || d.name || `Artículo ${id}`),
+      thumbnail: String(d.coverUrl || d.cover || d.thumbnail || ""),
+      itemUrl,
+      summary: cleanText(d.summary || d.description || ""),
+    };
+  }).filter(item => item.id);
 };
 
 // Lee primero la DB y cae al .env como fallback. Permite editar el setting
@@ -2490,6 +2570,39 @@ adminRoutes.post("/image/enhance", async (c) => {
   }
 });
 
+const renderCollectionPage = (collectionUrl: string, items: MakerWorldCollectionItem[], error = "", session?: SessionData) => {
+  return AdminLayout("Colección MakerWorld", `
+    <div class="bg-white shadow rounded-lg p-6 space-y-6">
+      <div class="flex items-start gap-4">
+        <a href="/admin/makerworld" class="text-sm text-blue-600 hover:underline whitespace-nowrap mt-1">← Buscar otro link</a>
+        <div>
+          <h2 class="text-xl font-bold text-gray-800">Colección MakerWorld</h2>
+          <p class="text-sm text-gray-500">${items.length} artículo${items.length !== 1 ? "s" : ""} encontrado${items.length !== 1 ? "s" : ""}. Haz clic en un artículo para importarlo al catálogo.</p>
+          <p class="text-xs text-gray-400 mt-1 break-all">${escapeHtml(collectionUrl)}</p>
+        </div>
+      </div>
+      ${error ? `<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md">${escapeHtml(error)}</div>` : ""}
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        ${items.map(item => `
+          <form action="/admin/makerworld" method="post">
+            <input type="hidden" name="makerworld_url" value="${escapeHtml(item.itemUrl)}">
+            <button type="submit" class="w-full text-left border border-gray-200 rounded-lg overflow-hidden hover:border-blue-500 hover:shadow-md transition-all bg-white group">
+              ${item.thumbnail
+                ? `<img src="${escapeHtml(item.thumbnail)}" alt="${escapeHtml(item.title)}" class="w-full h-40 object-cover bg-gray-50 group-hover:opacity-90 transition-opacity" loading="lazy">`
+                : `<div class="w-full h-40 bg-gray-100 flex items-center justify-center text-gray-400 text-sm">Sin imagen</div>`
+              }
+              <div class="p-3">
+                <p class="font-medium text-sm text-gray-800 line-clamp-2">${escapeHtml(item.title)}</p>
+                ${item.summary ? `<p class="text-xs text-gray-500 mt-1 line-clamp-2">${escapeHtml(item.summary)}</p>` : ""}
+              </div>
+            </button>
+          </form>
+        `).join("")}
+      </div>
+    </div>
+  `, session);
+};
+
 const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "", session?: SessionData) => {
   const defaultTiers = getDefaultPriceTiers();
   const categories = getCategories();
@@ -2498,11 +2611,11 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "", session?: Ses
     <div class="bg-white shadow rounded-lg p-6 space-y-6">
       <div>
         <h2 class="text-xl font-bold text-gray-800">Importar desde MakerWorld</h2>
-        <p class="text-sm text-gray-500 mt-1">Pega un link de MakerWorld. El sistema intenta traer nombre, descripción en español e imágenes; TODO queda editable antes de mandar al catálogo.</p>
+        <p class="text-sm text-gray-500 mt-1">Pega un link de MakerWorld (artículo o colección). Si es una colección, muestra la lista de artículos para que elijas cuáles importar. Todo queda editable antes de mandar al catálogo.</p>
       </div>
       ${error ? `<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md">${escapeHtml(error)}</div>` : ""}
       <form id="mw-form" action="/admin/makerworld" method="post" class="flex flex-col sm:flex-row gap-3">
-        <input type="url" name="makerworld_url" id="mw-url" required value="${escapeHtml(draft?.sourceUrl || "")}" placeholder="https://makerworld.com/es/models/..." class="flex-1 px-3 py-2 border border-gray-300 rounded-md">
+        <input type="url" name="makerworld_url" id="mw-url" required value="${escapeHtml(draft?.sourceUrl || "")}" placeholder="https://makerworld.com/es/models/... o /es/collections/..." class="flex-1 px-3 py-2 border border-gray-300 rounded-md">
         <input type="hidden" name="client_html" id="mw-html">
         <button type="submit" id="mw-btn" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">Analizar link</button>
       </form>
@@ -2568,6 +2681,35 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "", session?: Ses
         </div>
         <div class="border border-orange-200 bg-orange-50 rounded-lg p-4">
           <h3 class="text-sm font-bold text-orange-900 mb-3">🖨 Datos de Impresión (para planificador de producción)</h3>
+          ${draft.printProfiles.length > 0 ? `
+          <div class="mb-4">
+            <label class="block text-xs font-bold text-gray-700 mb-1">Perfil de impresión detectado — selecciona uno para auto-rellenar los campos</label>
+            <select id="print-profile-select" class="block w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white">
+              <option value="">— Elige un perfil —</option>
+              ${draft.printProfiles.map(p => `
+                <option value="${escapeHtml(p.id)}"
+                  data-grams="${p.filamentGrams}"
+                  data-mins="${p.printTimeMins}"
+                  data-type="${escapeHtml(p.filamentType)}"
+                  data-color="${escapeHtml(p.filamentColor)}">
+                  ${escapeHtml(p.name)}${p.filamentType ? ` | ${escapeHtml(p.filamentType)}` : ""}${p.filamentColor ? ` ${escapeHtml(p.filamentColor)}` : ""} | ${p.filamentGrams}g | ${p.printTimeMins}min
+                </option>
+              `).join("")}
+            </select>
+            <script>
+            (function() {
+              var sel = document.getElementById('print-profile-select');
+              function applyProfile() {
+                var opt = sel.options[sel.selectedIndex];
+                if (!opt || !opt.value) return;
+                document.querySelector('[name="filament_grams"]').value = opt.dataset.grams || '0';
+                document.querySelector('[name="print_time_mins"]').value = opt.dataset.mins || '0';
+              }
+              sel.addEventListener('change', applyProfile);
+              if (sel.options.length === 2) { sel.selectedIndex = 1; applyProfile(); }
+            })();
+            </script>
+          </div>` : ""}
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label class="block text-xs font-bold text-gray-700">Filamento por pieza (gramos)</label>
@@ -2610,9 +2752,14 @@ adminRoutes.get("/makerworld", (c) => c.html(renderMakerWorldForm(undefined, "",
 
 adminRoutes.post("/makerworld", async (c) => {
   const body = await c.req.parseBody() as Record<string, unknown>;
+  const rawUrl = formString(body.makerworld_url);
+  const clientHtml = formString(body.client_html) || undefined;
   try {
-    const clientHtml = formString(body.client_html) || undefined;
-    const draft = await scrapeMakerWorld(formString(body.makerworld_url), clientHtml);
+    if (isMakerWorldCollection(rawUrl)) {
+      const items = await scrapeMakerWorldCollection(rawUrl, clientHtml);
+      return c.html(renderCollectionPage(rawUrl, items, "", c.get("session") as SessionData | undefined));
+    }
+    const draft = await scrapeMakerWorld(rawUrl, clientHtml);
     return c.html(renderMakerWorldForm(draft, "", c.get("session") as SessionData | undefined));
   } catch (error) {
     console.error("[MakerWorld scrape error]", error);
