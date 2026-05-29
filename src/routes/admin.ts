@@ -357,8 +357,12 @@ const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<Ma
     metaContent(html, "og:image"),
     ...Array.from(html.matchAll(/https:\/\/makerworld\.bblmw\.com[^"'<>\s]+\.(?:png|jpe?g|webp)(?:\?[^"'<>\s]*)?/gi)).map((match) => match[0]),
   ]);
-  const printProfiles: PrintProfile[] = [];
+  // Debug: log design top-level keys and designFiles structure
+  console.log("[Profile debug] design keys:", design ? Object.keys(design) : "no design");
   const designFiles: any[] = Array.isArray(design?.designFiles) ? design.designFiles : [];
+  console.log("[Profile debug] designFiles.length:", designFiles.length);
+  if (designFiles.length > 0) console.log("[Profile debug] designFiles[0] keys:", Object.keys(designFiles[0]), "| profileSetting:", JSON.stringify(designFiles[0]?.profileSetting).slice(0, 300));
+  const printProfiles: PrintProfile[] = [];
   for (let i = 0; i < designFiles.length; i++) {
     const file = designFiles[i];
     const ps = file?.profileSetting || file?.profile || {};
