@@ -357,30 +357,29 @@ const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<Ma
     metaContent(html, "og:image"),
     ...Array.from(html.matchAll(/https:\/\/makerworld\.bblmw\.com[^"'<>\s]+\.(?:png|jpe?g|webp)(?:\?[^"'<>\s]*)?/gi)).map((match) => match[0]),
   ]);
-  // Debug: log design top-level keys and designFiles structure
-  console.log("[Profile debug] design keys:", design ? Object.keys(design) : "no design");
-  const designFiles: any[] = Array.isArray(design?.designFiles) ? design.designFiles : [];
-  console.log("[Profile debug] designFiles.length:", designFiles.length);
-  if (designFiles.length > 0) console.log("[Profile debug] designFiles[0] keys:", Object.keys(designFiles[0]), "| profileSetting:", JSON.stringify(designFiles[0]?.profileSetting).slice(0, 300));
   const printProfiles: PrintProfile[] = [];
-  for (let i = 0; i < designFiles.length; i++) {
-    const file = designFiles[i];
-    const ps = file?.profileSetting || file?.profile || {};
+  const instanceFiles: any[] = Array.isArray(design?.instances) ? design.instances : [];
+  for (let i = 0; i < instanceFiles.length; i++) {
+    const inst = instanceFiles[i];
+    const ps = inst?.profileSetting || inst?.instanceSetting || inst?.profile || {};
     const filamentArr: any[] = Array.isArray(ps?.filamentInfo) ? ps.filamentInfo : Array.isArray(ps?.filaments) ? ps.filaments : [];
     const fi = filamentArr[0] || {};
-    const rawTime = Number(ps?.printTime ?? 0);
+    const rawTime = Number(ps?.printTime ?? inst?.printTime ?? 0);
     const printTimeMins = rawTime > 3600 ? Math.round(rawTime / 60) : rawTime;
-    const filamentGrams = Math.round(Number(ps?.weight ?? ps?.filamentWeight ?? 0) * 10) / 10;
+    const filamentGrams = Math.round(Number(ps?.weight ?? ps?.filamentWeight ?? inst?.weight ?? 0) * 10) / 10;
     if (printTimeMins > 0 || filamentGrams > 0) {
       printProfiles.push({
-        id: String(file?.id ?? i),
-        name: cleanText(file?.name || file?.filename || `Perfil ${i + 1}`).replace(/\.3mf$/i, ""),
+        id: String(inst?.id ?? i),
+        name: cleanText(inst?.name || inst?.title || `Perfil ${i + 1}`),
         filamentGrams,
         printTimeMins,
         filamentType: cleanText(fi?.type || fi?.filamentType || ""),
         filamentColor: String(fi?.color || fi?.filamentColor || ""),
       });
     }
+  }
+  if (!printProfiles.length && instanceFiles.length > 0) {
+    console.log("[Profile debug] instances[0]:", JSON.stringify(instanceFiles[0]).slice(0, 500));
   }
   return { sourceUrl, name: title || "Producto MakerWorld", description, images, printProfiles };
 };
