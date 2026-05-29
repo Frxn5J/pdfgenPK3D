@@ -357,8 +357,12 @@ const scrapeMakerWorld = async (rawUrl: string, clientHtml?: string): Promise<Ma
     metaContent(html, "og:image"),
     ...Array.from(html.matchAll(/https:\/\/makerworld\.bblmw\.com[^"'<>\s]+\.(?:png|jpe?g|webp)(?:\?[^"'<>\s]*)?/gi)).map((match) => match[0]),
   ]);
-  const printProfiles: PrintProfile[] = [];
+  // Debug: log design top-level keys and designFiles structure
+  console.log("[Profile debug] design keys:", design ? Object.keys(design) : "no design");
   const designFiles: any[] = Array.isArray(design?.designFiles) ? design.designFiles : [];
+  console.log("[Profile debug] designFiles.length:", designFiles.length);
+  if (designFiles.length > 0) console.log("[Profile debug] designFiles[0] keys:", Object.keys(designFiles[0]), "| profileSetting:", JSON.stringify(designFiles[0]?.profileSetting).slice(0, 300));
+  const printProfiles: PrintProfile[] = [];
   for (let i = 0; i < designFiles.length; i++) {
     const file = designFiles[i];
     const ps = file?.profileSetting || file?.profile || {};
@@ -395,23 +399,15 @@ const scrapeMakerWorldCollection = async (rawUrl: string, clientHtml?: string): 
   } catch {
     throw new Error("No se pudo parsear los datos de la colección");
   }
-  // Debug: log top-level pageProps keys to find where designs are
-  console.log("[Collection debug] pageProps keys:", Object.keys(pageProps));
-  const favorite = pageProps?.favorite;
-  if (favorite) console.log("[Collection debug] favorite keys:", Object.keys(favorite), "| designs.length:", favorite.designs?.length, "| designCnt:", favorite.designCnt);
-  const designs: any[] =
-    pageProps?.favorite?.designs?.length ? pageProps.favorite.designs :
+  const designs: any[] = (
+    pageProps?.favoriteDesigns?.hits ||
+    pageProps?.favorite?.designs ||
     pageProps?.collectionDetail?.designs ||
     pageProps?.collection?.designs ||
-    pageProps?.collectionInfo?.designs ||
     pageProps?.designs ||
-    pageProps?.designList?.hits ||
-    pageProps?.list?.hits ||
-    [];
-  if (!designs.length) {
-    const pagePropsJson = JSON.stringify(Object.fromEntries(Object.entries(pageProps).map(([k,v]) => [k, typeof v === 'object' && v ? Object.keys(v) : v]))).slice(0, 800);
-    throw new Error(`No se encontraron artículos en esta colección. pageProps: ${pagePropsJson}`);
-  }
+    []
+  );
+  if (!designs.length) throw new Error("No se encontraron artículos en esta colección. Puede estar vacía o requerir sesión iniciada en MakerWorld.");
   return designs.map((d: any) => {
     const id = String(d.id || d.designId || "");
     const handle = String(d.handle || d.slug || "");
