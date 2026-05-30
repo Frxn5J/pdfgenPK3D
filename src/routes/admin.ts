@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
@@ -4865,6 +4865,51 @@ adminRoutes.get("/quotes/:id", (c) => {
       </div>
 
       <div class="bg-white shadow rounded-lg p-6">
+        <h2 class="text-lg font-bold text-gray-800 border-b pb-3 mb-4">Parámetros de Impresión por Pieza</h2>
+        <p class="text-xs text-gray-500 mb-4">Sobreescribe los gramos y minutos por pieza para esta cotización específica. Los valores en azul indican que ya se sobreescribió el valor por defecto del producto.</p>
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="bg-gray-50 border-b">
+                <th class="px-4 py-2 text-left text-xs font-bold text-gray-600 uppercase">Producto</th>
+                <th class="px-4 py-2 text-left text-xs font-bold text-gray-600 uppercase">Cant</th>
+                <th class="px-4 py-2 text-left text-xs font-bold text-gray-600 uppercase">g / pza</th>
+                <th class="px-4 py-2 text-left text-xs font-bold text-gray-600 uppercase">min / pza</th>
+                <th class="px-4 py-2"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              ${items.map((item) => {
+                const gDef = item.product_filament_grams ?? 0;
+                const tDef = item.product_print_time_mins ?? 0;
+                const g = item.override_filament_grams ?? gDef;
+                const t = item.override_print_time_mins ?? tDef;
+                const gOverridden = item.override_filament_grams !== null;
+                const tOverridden = item.override_print_time_mins !== null;
+                return `
+                  <tr>
+                    <td class="px-4 py-2 font-medium text-gray-900">${escapeHtml(item.product_name)}</td>
+                    <td class="px-4 py-2 text-gray-500">${item.quantity}</td>
+                    <td class="px-4 py-2" colspan="3">
+                      <form action="/admin/quotes/${quote.id}/items/${item.id}/print-values" method="post" class="flex flex-wrap items-center gap-2">
+                        <input type="hidden" name="return_to" value="/admin/quotes/${quote.id}">
+                        <input type="number" name="filament_grams" value="${g}" step="0.1" min="0" placeholder="${gDef}"
+                          class="w-20 border rounded px-2 py-1 text-sm ${gOverridden ? 'border-blue-400 bg-blue-50 text-blue-900' : 'border-gray-300'}">
+                        <input type="number" name="print_time_mins" value="${t}" step="1" min="0" placeholder="${tDef}"
+                          class="w-20 border rounded px-2 py-1 text-sm ${tOverridden ? 'border-blue-400 bg-blue-50 text-blue-900' : 'border-gray-300'}">
+                        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors">Guardar</button>
+                        ${(gOverridden || tOverridden) ? `<span class="text-xs text-blue-600 font-semibold">sobreescrito</span>` : `<span class="text-xs text-gray-400">por defecto del producto</span>`}
+                      </form>
+                    </td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-6">
         <h2 class="text-lg font-bold text-gray-800 border-b pb-3 mb-6">Generador de Documento PDF de Cotización</h2>
         <form action="/admin/quotes/${quote.id}/pdf" method="get" target="_blank" class="space-y-6">
           <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -5040,6 +5085,17 @@ adminRoutes.post("/quotes/:id/status", async (c) => {
   // When dispatching, go straight to the production pipeline
   if (status === "despachado") return c.redirect("/admin/production?tab=pagos");
   return c.redirect(`/admin/quotes/${id}`);
+});
+
+adminRoutes.post("/quotes/:id/items/:itemId/print-values", async (c) => {
+  const quoteId = parseInt(c.req.param("id"), 10);
+  const itemId = parseInt(c.req.param("itemId"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const filamentGrams = formString(body.filament_grams) !== "" ? parseFloat(formString(body.filament_grams)) : null;
+  const printTimeMins = formString(body.print_time_mins) !== "" ? parseInt(formString(body.print_time_mins), 10) : null;
+  const returnTo = formString(body.return_to) || `/admin/quotes/${quoteId}`;
+  updateQuoteItemPrintValues(itemId, filamentGrams, printTimeMins);
+  return c.redirect(returnTo);
 });
 
 adminRoutes.get("/quotes/:id/pdf", (c) => {
@@ -5639,22 +5695,32 @@ adminRoutes.get("/production", (c) => {
     let totalMins = 0;
     let totalExtraCosts = 0;
     const itemsListHtml = items.map((item) => {
-      const g = item.product_filament_grams || 0;
-      const t = item.product_print_time_mins || 0;
+      const g = item.override_filament_grams ?? item.product_filament_grams ?? 0;
+      const t = item.override_print_time_mins ?? item.product_print_time_mins ?? 0;
       const e = item.product_extra_costs || 0;
+      const hasOverride = item.override_filament_grams !== null || item.override_print_time_mins !== null;
       totalGrams += item.quantity * g;
       totalMins += item.quantity * t;
       totalExtraCosts += item.quantity * e;
 
       return `
-        <div class="text-xs text-gray-700 bg-gray-50 border rounded p-2 flex justify-between items-center">
-          <div>
-            <span class="font-bold text-gray-900">${escapeHtml(item.product_name)}</span> (x${item.quantity})
-            <div class="text-gray-500 font-medium mt-0.5">${g}g · ${t}m por pza · extra: ${money(e)}</div>
+        <div class="text-xs text-gray-700 bg-gray-50 border rounded p-2">
+          <div class="flex justify-between items-start gap-2">
+            <div>
+              <span class="font-bold text-gray-900">${escapeHtml(item.product_name)}</span> (x${item.quantity})
+              <div class="font-semibold text-gray-700 mt-0.5">${(g * item.quantity).toFixed(1)}g total · ${formatPrintTime(t * item.quantity)} total</div>
+            </div>
+            <div class="text-right text-gray-500">extra: ${money(e)}</div>
           </div>
-          <div class="text-right">
-            <div class="font-semibold text-gray-800">${g * item.quantity}g · ${formatPrintTime(t * item.quantity)}</div>
-          </div>
+          <form action="/admin/quotes/${quote.id}/items/${item.id}/print-values" method="post" class="flex flex-wrap items-center gap-1.5 mt-2 pt-2 border-t border-dashed border-gray-200">
+            <input type="hidden" name="return_to" value="/admin/production?tab=produccion">
+            <label class="text-[10px] font-bold text-gray-500 uppercase">g/pza:</label>
+            <input type="number" name="filament_grams" value="${g}" step="0.1" min="0" class="w-16 border border-gray-300 rounded px-1 py-0.5 text-xs bg-white ${hasOverride && item.override_filament_grams !== null ? 'border-blue-400' : ''}">
+            <label class="text-[10px] font-bold text-gray-500 uppercase">min/pza:</label>
+            <input type="number" name="print_time_mins" value="${t}" step="1" min="0" class="w-16 border border-gray-300 rounded px-1 py-0.5 text-xs bg-white ${hasOverride && item.override_print_time_mins !== null ? 'border-blue-400' : ''}">
+            <button type="submit" class="bg-blue-100 hover:bg-blue-200 text-blue-800 font-bold text-[10px] px-2 py-0.5 rounded transition-colors">Guardar</button>
+            ${hasOverride ? `<span class="text-[10px] text-blue-600 font-semibold">· sobreescrito</span>` : ''}
+          </form>
         </div>
       `;
     }).join("");
