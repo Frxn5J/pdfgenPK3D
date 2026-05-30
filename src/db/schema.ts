@@ -147,6 +147,12 @@ export function initDb() {
   } catch {
     // Column already exists.
   }
+  try {
+    db.run(`ALTER TABLE quote_items ADD COLUMN override_filament_grams REAL`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quote_items ADD COLUMN override_print_time_mins INTEGER`);
+  } catch {}
 
   // Extra tables for printer and filament settings
   db.run(`
@@ -688,6 +694,8 @@ export interface QuoteItem {
   pricing_max_volume: number | null;
   delivery_time: string | null;
   custom_image_url: string | null;
+  override_filament_grams: number | null;
+  override_print_time_mins: number | null;
 }
 
 export function createQuote(input: QuoteInput) {
@@ -788,6 +796,10 @@ export function getQuoteItemsWithProducts(quoteId: number) {
     WHERE qi.quote_id = ?
     ORDER BY qi.id ASC
   `).all(quoteId);
+}
+
+export function updateQuoteItemPrintValues(itemId: number, filamentGrams: number | null, printTimeMins: number | null) {
+  db.run(`UPDATE quote_items SET override_filament_grams = ?, override_print_time_mins = ? WHERE id = ?`, [filamentGrams, printTimeMins, itemId]);
 }
 
 export function updateQuotePaymentProof(id: number, paymentProofUrl: string) {
