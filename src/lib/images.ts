@@ -1,5 +1,60 @@
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import * as fs from "fs";
+import { lookup } from "dns/promises";
+import { isIP } from "net";
+
+// ── Anti-SSRF ──────────────────────────────────────────────────────────────
+// Rechaza IPs internas/privadas para que un fetch a una URL controlada por el
+// usuario no alcance loopback, redes privadas ni el endpoint de metadatos cloud
+// (169.254.169.254).
+const isPrivateIp = (ip: string): boolean => {
+  if (isIP(ip) === 4) {
+    const [a = -1, b = -1] = ip.split(".").map(Number);
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;                       // link-local / metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;             // CGNAT
+    return false;
+  }
+  const v = ip.toLowerCase();
+  if (v === "::1" || v === "::") return true;                       // loopback / unspecified
+  if (v.startsWith("fe80")) return true;                           // link-local
+  if (v.startsWith("fc") || v.startsWith("fd")) return true;       // ULA
+  if (v.startsWith("::ffff:")) return isPrivateIp(v.slice(7));     // IPv4-mapped
+  return false;
+};
+
+// Valida que una URL saliente apunte a un host público vía http(s). Lanza si no.
+export const assertSafeOutboundUrl = async (rawUrl: string): Promise<void> => {
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { throw new Error("URL inválida."); }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Esquema de URL no permitido.");
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, ""); // sin brackets de IPv6
+  if (isIP(host)) {
+    if (isPrivateIp(host)) throw new Error("Destino de red no permitido.");
+    return;
+  }
+  const addrs = await lookup(host, { all: true });
+  if (!addrs.length) throw new Error("No se pudo resolver el host.");
+  for (const a of addrs) {
+    if (isPrivateIp(a.address)) throw new Error("Destino de red no permitido.");
+  }
+};
+
+// Resuelve una referencia "/uploads/..." a una ruta absoluta DENTRO de
+// data/uploads, rechazando cualquier traversal ("../") que escape del sandbox.
+export const resolveUploadPath = (ref: string): string => {
+  const uploadsRoot = resolve(process.cwd(), "data", "uploads");
+  const cleaned = ref.trim().replace(/^\/+/, ""); // p. ej. "uploads/products/x.png"
+  const candidate = resolve(process.cwd(), "data", cleaned);
+  if (candidate !== uploadsRoot && !candidate.startsWith(uploadsRoot + sep)) {
+    throw new Error("Ruta de archivo no permitida.");
+  }
+  return candidate;
+};
 
 export const imageExtensionFromMime = (mime: string) => {
   if (/jpe?g/i.test(mime)) return "jpg";
@@ -34,6 +89,7 @@ export const persistImageReference = async (value: string) => {
 
   if (/^https?:\/\//i.test(candidate)) {
     try {
+      await assertSafeOutboundUrl(candidate);
       const response = await fetch(candidate, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
       const mime = response.headers.get("content-type") || "";
       if (response.ok && mime.startsWith("image/")) {
@@ -90,6 +146,7 @@ export const extractImageCandidate = (payload: unknown): string => {
 };
 
 export const urlToDataUrl = async (url: string): Promise<string> => {
+  await assertSafeOutboundUrl(url);
   const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
   if (!res.ok) throw new Error(`No se pudo descargar la imagen: HTTP ${res.status}`);
   const mime = res.headers.get("content-type") || "image/png";
@@ -110,11 +167,12 @@ export const resolveImageBytes = async (value: string): Promise<{ bytes: Buffer;
   const dataImage = dataImageToBuffer(trimmed);
   if (dataImage) return { bytes: dataImage.buffer, mime: dataImage.mime };
   if (/^\/uploads\//.test(trimmed)) {
-    const localPath = join(process.cwd(), "data", trimmed.replace(/^\/+/, ""));
+    const localPath = resolveUploadPath(trimmed);
     if (!fs.existsSync(localPath)) throw new Error(`No se encontró el archivo local de la imagen: ${trimmed}`);
     return { bytes: fs.readFileSync(localPath), mime: mimeFromExtension(trimmed) };
   }
   if (/^https?:\/\//i.test(trimmed)) {
+    await assertSafeOutboundUrl(trimmed);
     const res = await fetch(trimmed, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
     if (!res.ok) throw new Error(`No se pudo descargar la imagen: HTTP ${res.status}`);
     return { bytes: Buffer.from(await res.arrayBuffer()), mime: res.headers.get("content-type") || mimeFromExtension(trimmed) };

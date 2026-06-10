@@ -2,7 +2,7 @@ import { join } from "path";
 import * as fs from "fs";
 import { llmConfig, settingValue, parseLlmError, parseLlmContent, trimToWordLimit } from "./llm";
 import { callImageEditProvider, type ImageEnhanceResult } from "./image-enhance";
-import { urlToDataUrl } from "./images";
+import { urlToDataUrl, resolveUploadPath } from "./images";
 import type { Category, Subcategory } from "../db/schema";
 
 export type CategorySuggestion =
@@ -246,7 +246,7 @@ export const resolveImageInput = async (imageInput: string): Promise<string> => 
   if (!trimmed) throw new Error("Sube una imagen para generar el diseño.");
   if (/^data:image\//i.test(trimmed)) return trimmed;
   if (/^\/uploads\//.test(trimmed)) {
-    const localPath = join(process.cwd(), "data", trimmed.replace(/^\//, ""));
+    const localPath = resolveUploadPath(trimmed);
     try {
       const buf = fs.readFileSync(localPath);
       const ext = (trimmed.split(".").pop() || "png").toLowerCase();

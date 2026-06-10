@@ -5,6 +5,23 @@ import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegis
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
 
+// ── Rate limiting de cotizaciones públicas (en memoria) ─────────────────────
+// Frena spam/DoS del endpoint público POST /api/quotes (que persiste en DB y
+// dispara push a todos los admins): máx. QUOTE_MAX por IP dentro de la ventana.
+const QUOTE_MAX = 10;
+const QUOTE_WINDOW_MS = 10 * 60 * 1000;
+const quoteHits = new Map<string, number[]>();
+const quoteClientIp = (c: any): string =>
+  (c.req.header("x-forwarded-for") || "").split(",")[0]?.trim() ||
+  c.req.header("x-real-ip") || "unknown";
+const quoteRateLimited = (ip: string): boolean => {
+  const now = Date.now();
+  const recent = (quoteHits.get(ip) || []).filter((t) => now - t < QUOTE_WINDOW_MS);
+  recent.push(now);
+  quoteHits.set(ip, recent);
+  return recent.length > QUOTE_MAX;
+};
+
 const htmlEntities: Record<string, string> = {
   "&": "&amp;",
   "<": "&lt;",
@@ -54,10 +71,27 @@ const renderParagraphs = (text: string | undefined, className = "theme-copy") =>
 
 const hasHtmlTags = (value: string) => /<[a-z][\s\S]*>/i.test(value);
 
+// Sanitiza HTML enriquecido autorizado (welcome/contact) antes de renderizarlo
+// en el catálogo público. No hay DOM en el servidor, así que es un saneado
+// conservador por blocklist: elimina elementos ejecutables, atributos on* y
+// esquemas de URL peligrosos. Mitiga XSS almacenado por config.
+const sanitizeRichHtml = (html: string): string => {
+  let out = html;
+  // Elementos peligrosos + su contenido.
+  out = out.replace(/<\s*(script|style|iframe|object|embed|noscript|template)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, "");
+  // Etiquetas peligrosas sueltas / self-closing.
+  out = out.replace(/<\s*\/?\s*(script|style|iframe|object|embed|link|meta|base|form)\b[^>]*>/gi, "");
+  // Atributos de evento (onclick, onerror, …).
+  out = out.replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+  // URLs javascript:/vbscript:/data: en atributos.
+  out = out.replace(/(href|src|xlink:href)\s*=\s*("|')?\s*(javascript|vbscript|data)\s*:/gi, "$1=$2#");
+  return out;
+};
+
 const renderAdminHtml = (text: string | undefined, className = "theme-copy") => {
   const value = String(text ?? "");
   if (!hasHtmlTags(value)) return renderParagraphs(value, className);
-  return `<div class="rich-content ${className}">${value}</div>`;
+  return `<div class="rich-content ${className}">${sanitizeRichHtml(value)}</div>`;
 };
 
 const formatVolume = (min: number, max: number | null) => max ? `${min} a ${max} piezas` : `${min} o más piezas`;
@@ -937,14 +971,20 @@ const renderInteractiveCatalog = () => {
 publicRoutes.get("/", (c) => c.redirect("/catalogo"));
 publicRoutes.post("/api/quotes", async (c) => {
   try {
+    if (quoteRateLimited(quoteClientIp(c))) {
+      return c.json({ error: "Demasiadas solicitudes. Intenta de nuevo en unos minutos." }, 429);
+    }
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-    const customerName = String(body.customerName ?? body.customer_name ?? "").trim();
-    const postalCode = String(body.postalCode ?? body.postal_code ?? "").trim();
+    const customerName = String(body.customerName ?? body.customer_name ?? "").trim().slice(0, 200);
+    const postalCode = String(body.postalCode ?? body.postal_code ?? "").trim().slice(0, 10);
     const requiresInvoice = Boolean(body.requiresInvoice ?? body.requires_invoice ?? false);
-    const rawItems = Array.isArray(body.items) ? body.items : [];
+    const rawItems = Array.isArray(body.items) ? body.items.slice(0, 200) : [];
 
     if (!customerName || !postalCode) {
       return c.json({ error: "Nombre y código postal son obligatorios." }, 400);
+    }
+    if (!/^\d{4,5}$/.test(postalCode)) {
+      return c.json({ error: "Código postal inválido." }, 400);
     }
     if (rawItems.length === 0) {
       return c.json({ error: "Agrega al menos un producto para cotizar." }, 400);
@@ -957,7 +997,7 @@ publicRoutes.post("/api/quotes", async (c) => {
     for (const rawItem of rawItems) {
       const item = rawItem as Record<string, unknown>;
       const productId = Number.parseInt(String(item.productId ?? item.product_id ?? item.id ?? ""), 10);
-      const quantity = Math.max(1, Number.parseInt(String(item.quantity ?? "1"), 10) || 1);
+      const quantity = Math.min(100000, Math.max(1, Number.parseInt(String(item.quantity ?? "1"), 10) || 1));
       const productEntry = productMap.get(productId);
       if (!productEntry) continue;
       const existing = selected.get(productId);

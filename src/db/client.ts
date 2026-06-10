@@ -379,6 +379,7 @@ export function initDb() {
   seedConfig("admin_username", "");
   seedConfig("admin_password", "");
   seedConfig("session_secret", "");
+  seedConfig("session_version", "1");
 
   // Users table for multi-user roles
   db.run(`

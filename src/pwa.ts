@@ -1,9 +1,10 @@
 // PWA + Web Push. Módulo compartido por public.ts (assets en scope raíz),
 // admin.ts (UI/endpoints de notificaciones) y el trigger de cotizaciones.
 import webpush from "web-push";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import * as fs from "fs";
 import { getConfig, updateConfig, getPushSubscriptions, deletePushSubscription } from "./db/schema";
+import { assertSafeOutboundUrl } from "./lib/images";
 
 // Escapes mínimos locales (no dependemos de los de public/admin).
 const escAttr = (value: unknown) =>
@@ -109,11 +110,15 @@ async function resolveLogoDataUri(config: Record<string, string>): Promise<strin
   try {
     if (src.startsWith("/")) {
       // Ruta local servida desde ./data (p.ej. /uploads/logo.png → data/uploads/logo.png).
-      const localPath = join(process.cwd(), "data", src.replace(/^\/+/, ""));
+      // Se resuelve y se verifica que no escape del directorio data (anti traversal).
+      const dataRoot = resolve(process.cwd(), "data");
+      const localPath = resolve(dataRoot, src.replace(/^\/+/, ""));
+      if (localPath !== dataRoot && !localPath.startsWith(dataRoot + sep)) return null;
       if (!fs.existsSync(localPath)) return null;
       return `data:${mimeFromExt(src)};base64,${fs.readFileSync(localPath).toString("base64")}`;
     }
     if (/^https?:\/\//i.test(src)) {
+      await assertSafeOutboundUrl(src);
       const res = await fetch(src);
       if (!res.ok) return null;
       const mime = res.headers.get("content-type") || mimeFromExt(src);

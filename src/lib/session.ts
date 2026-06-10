@@ -1,5 +1,5 @@
 import { getCookie } from "hono/cookie";
-import { db } from "../db/schema";
+import { db, updateConfig } from "../db/schema";
 import type { UserRole } from "../db/schema";
 
 export interface SessionData {
@@ -7,18 +7,45 @@ export interface SessionData {
   username: string;
   role: UserRole;
   exp: number;
+  v?: number; // versión de sesión: permite revocar todas las sesiones de golpe
 }
 
-const SESSION_SECRET = () => {
-  const dbValue = (db.query<{ value: string }, [string]>(`SELECT value FROM config WHERE key = ?`).get("session_secret")?.value || "").trim();
-  if (dbValue) return dbValue;
-  const envValue = (process.env["SESSION_SECRET"] || "").trim();
-  if (envValue) return envValue;
-  return "pixkey3d-default-secret-change-me";
+// Versión global de sesión. Se incrusta en cada token al firmar y se valida al
+// verificar; al incrementarla (bumpSessionVersion) todas las sesiones emitidas
+// previamente quedan invalidadas (revocación server-side, p. ej. al cambiar la
+// contraseña del superusuario). Es una lectura indexada por PK, muy barata.
+export const currentSessionVersion = (): number => {
+  const raw = db.query<{ value: string }, [string]>(`SELECT value FROM config WHERE key = ?`).get("session_version")?.value;
+  const n = parseInt((raw || "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
 };
 
+export const bumpSessionVersion = (): void => {
+  updateConfig({ session_version: String(currentSessionVersion() + 1) });
+};
+
+// El secreto de sesión debe ser ESTABLE e IMPREDECIBLE: si falta, se genera uno
+// aleatorio y se persiste (mismo patrón que ensureVapidKeys). Nunca se usa un
+// fallback público conocido, que permitiría forjar cookies de superusuario.
+let cachedSecret: string | null = null;
+
+const SESSION_SECRET = () => {
+  if (cachedSecret) return cachedSecret;
+  const dbValue = (db.query<{ value: string }, [string]>(`SELECT value FROM config WHERE key = ?`).get("session_secret")?.value || "").trim();
+  if (dbValue) return (cachedSecret = dbValue);
+  const envValue = (process.env["SESSION_SECRET"] || "").trim();
+  if (envValue) return (cachedSecret = envValue);
+  const generated = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("");
+  updateConfig({ session_secret: generated });
+  return (cachedSecret = generated);
+};
+
+// Genera y persiste el secreto al arranque (antes de servir peticiones) para que
+// siempre exista y evitar una carrera en el primer uso concurrente.
+export const ensureSessionSecret = () => SESSION_SECRET();
+
 export async function signSession(data: SessionData): Promise<string> {
-  const payload = JSON.stringify(data);
+  const payload = JSON.stringify({ ...data, v: currentSessionVersion() });
   const keyMaterial = new TextEncoder().encode(SESSION_SECRET());
   const key = await crypto.subtle.importKey("raw", keyMaterial, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
@@ -38,6 +65,7 @@ export async function verifySession(cookie: string): Promise<SessionData | null>
     if (!valid) return null;
     const data: SessionData = JSON.parse(payload);
     if (data.exp < Date.now()) return null;
+    if ((data.v ?? 0) !== currentSessionVersion()) return null; // sesión revocada
     return data;
   } catch {
     return null;

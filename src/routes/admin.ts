@@ -4,8 +4,8 @@ import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTi
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
-import { type SessionData, requireAuth, requireRole, signSession, verifySession } from "../lib/session";
-import { formString, formStringArray, formFile, safeFilename, isFontFile, saveUpload, escapeHtml, configValue, defaultFontFamily } from "../lib/html";
+import { type SessionData, requireAuth, requireRole, signSession, verifySession, bumpSessionVersion } from "../lib/session";
+import { formString, formStringArray, formFile, safeFilename, isFontFile, saveUpload, saveImageUpload, escapeHtml, configValue, defaultFontFamily } from "../lib/html";
 import { money, plainMoney, volumeText, renderStatusBadge, quoteFolio, formatDate } from "../lib/formatting";
 import { cleanText, decodeEntities, metaContent, tagText, uniqueImages, collectImageCandidates } from "../lib/text";
 import { settingValue, llmConfig, parseLlmContent, parseLlmError } from "../lib/llm";
@@ -15,6 +15,28 @@ import { type AdaptedDescriptionResult, type CategorySuggestion, type Subcategor
 import { bodyValues, parsePriceTiers, renderPriceTierRows } from "../lib/pricing";
 
 const adminRoutes = new Hono();
+
+// ── CSRF (proxy-aware) ──────────────────────────────────────────────────────
+// En métodos que mutan, si llega cabecera Origin debe coincidir con el host de
+// la petición (usa X-Forwarded-Host detrás del reverse proxy). Complementa el
+// SameSite=Lax de la cookie de sesión. No rompe peticiones same-origin ni las
+// que no envían Origin (algunos clientes legítimos).
+const csrfGuard = async (c: any, next: any) => {
+  const method = c.req.method;
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+  const origin = c.req.header("origin");
+  if (origin) {
+    const host = c.req.header("x-forwarded-host") || c.req.header("host") || "";
+    try {
+      if (new URL(origin).host !== host) return c.text("CSRF: origen no permitido.", 403);
+    } catch {
+      return c.text("CSRF: origen inválido.", 403);
+    }
+  }
+  return next();
+};
+adminRoutes.use("/*", csrfGuard);
+
 const renderPricingEditor = (tiers: Omit<PriceTier, "id">[]) => `
   <div class="border border-gray-200 rounded-lg overflow-hidden" data-pricing-editor>
     <table class="min-w-full divide-y divide-gray-200" id="price-tiers-table">
@@ -609,19 +631,64 @@ adminRoutes.get("/login", (c) => {
   `);
 });
 
+// ── Rate limiting de login (en memoria) ────────────────────────────────────
+// Frena fuerza bruta: máx. LOGIN_MAX_ATTEMPTS fallos por IP+usuario dentro de
+// LOGIN_WINDOW_MS. Un login exitoso limpia el contador.
+const LOGIN_MAX_ATTEMPTS = 8;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const loginAttempts = new Map<string, number[]>();
+
+const clientIp = (c: any): string =>
+  (c.req.header("x-forwarded-for") || "").split(",")[0]?.trim() ||
+  c.req.header("x-real-ip") || "unknown";
+
+const loginRateKey = (c: any, username: string) => `${clientIp(c)}:${username.toLowerCase()}`;
+
+// Devuelve segundos de espera si está limitado, o 0 si puede intentar.
+const loginRetryAfter = (key: string): number => {
+  const now = Date.now();
+  const recent = (loginAttempts.get(key) || []).filter((t) => now - t < LOGIN_WINDOW_MS);
+  loginAttempts.set(key, recent);
+  if (recent.length >= LOGIN_MAX_ATTEMPTS) {
+    return Math.max(1, Math.ceil((LOGIN_WINDOW_MS - (now - recent[0]!)) / 1000));
+  }
+  return 0;
+};
+
+const recordLoginFailure = (key: string) => {
+  const arr = loginAttempts.get(key) || [];
+  arr.push(Date.now());
+  loginAttempts.set(key, arr);
+};
+
 adminRoutes.post("/login", async (c) => {
   const body = await c.req.parseBody();
   const inputUsername = String(body.username || "").trim();
   const inputPassword = String(body.password || "");
 
-  const superUsername = settingValue("admin_username", "ADMIN_USERNAME", "Frxn5J");
+  const rateKey = loginRateKey(c, inputUsername);
+  const retryAfter = loginRetryAfter(rateKey);
+  if (retryAfter > 0) {
+    c.header("Retry-After", String(retryAfter));
+    return c.text(`Demasiados intentos de inicio de sesión. Intenta de nuevo en ${Math.ceil(retryAfter / 60)} minuto(s).`, 429);
+  }
+
+  const superUsername = settingValue("admin_username", "ADMIN_USERNAME", "");
   const superPassword = settingValue("admin_password", "ADMIN_PASSWORD", "");
 
   let sessionData: SessionData | null = null;
 
-  // Check config superusuario first
-  if (inputUsername === superUsername && superPassword && inputPassword === superPassword) {
-    sessionData = { id: 0, username: superUsername, role: "superusuario", exp: Date.now() + 24 * 60 * 60 * 1000 };
+  // Superusuario de config: la contraseña se almacena hasheada (Bun.password).
+  // Compat: si el valor viniera en texto plano (p. ej. ADMIN_PASSWORD del .env
+  // sin migrar), se compara directo. Sin username configurado → deshabilitado.
+  if (inputUsername && superUsername && inputUsername === superUsername && superPassword) {
+    const looksHashed = /^\$(argon2|2[aby]?)\$/.test(superPassword);
+    const valid = looksHashed
+      ? await Bun.password.verify(inputPassword, superPassword)
+      : inputPassword === superPassword;
+    if (valid) {
+      sessionData = { id: 0, username: superUsername, role: "superusuario", exp: Date.now() + 24 * 60 * 60 * 1000 };
+    }
   }
 
   // If not superusuario, check users table
@@ -636,11 +703,13 @@ adminRoutes.post("/login", async (c) => {
   }
 
   if (sessionData) {
+    loginAttempts.delete(rateKey);
     const token = await signSession(sessionData);
-    setCookie(c, "admin_session", token, { path: "/", httpOnly: true, sameSite: "Lax", maxAge: 86400 });
+    setCookie(c, "admin_session", token, { path: "/", httpOnly: true, secure: true, sameSite: "Lax", maxAge: 86400 });
     return c.redirect("/admin");
   }
 
+  recordLoginFailure(rateKey);
   return c.redirect("/admin/login?error=1");
 });
 
@@ -863,7 +932,8 @@ adminRoutes.post("/push/subscribe", async (c) => {
     addPushSubscription(endpoint, p256dh, auth, c.req.header("user-agent") || null);
     return c.json({ ok: true, total: countPushSubscriptions() });
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "No se pudo guardar la suscripción." }, 400);
+    console.error("[push] subscribe failed", error);
+    return c.json({ error: "No se pudo guardar la suscripción." }, 400);
   }
 });
 
@@ -874,7 +944,8 @@ adminRoutes.post("/push/unsubscribe", async (c) => {
     if (endpoint) deletePushSubscription(endpoint);
     return c.json({ ok: true, total: countPushSubscriptions() });
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "No se pudo cancelar la suscripción." }, 400);
+    console.error("[push] unsubscribe failed", error);
+    return c.json({ error: "No se pudo cancelar la suscripción." }, 400);
   }
 });
 
@@ -888,7 +959,8 @@ adminRoutes.post("/push/test", async (c) => {
     });
     return c.json({ ok: true, ...result });
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "No se pudo enviar la prueba." }, 500);
+    console.error("[push] test failed", error);
+    return c.json({ error: "No se pudo enviar la prueba." }, 500);
   }
 });
 
@@ -1175,11 +1247,11 @@ adminRoutes.get("/zona-extendida/:cp", async (c) => {
     });
   } catch (error) {
     console.error("[zona-extendida] failed", error);
-    return c.json({ error: error instanceof Error ? error.message : "Error al consultar" }, 500);
+    return c.json({ error: "Error al consultar" }, 500);
   }
 });
 
-adminRoutes.post("/description/adapt", async (c) => {
+adminRoutes.post("/description/adapt", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const categories = getCategories();
@@ -1193,11 +1265,12 @@ adminRoutes.post("/description/adapt", async (c) => {
     );
     return c.json(result);
   } catch (error) {
+    console.error("[description/adapt] failed", error);
     return c.json({ error: error instanceof Error ? error.message : "No se pudo adaptar la descripción." }, 400);
   }
 });
 
-adminRoutes.post("/design/generate", async (c) => {
+adminRoutes.post("/design/generate", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const imageInput = formString(body.image) || formString(body.imageUrl);
@@ -1210,11 +1283,12 @@ adminRoutes.post("/design/generate", async (c) => {
     const result = await generateDesign(imageInput, template, userPrompt);
     return c.json(result);
   } catch (error) {
+    console.error("[design/generate] failed", error);
     return c.json({ error: error instanceof Error ? error.message : "No se pudo generar el diseño." }, 400);
   }
 });
 
-adminRoutes.post("/design/refine", async (c) => {
+adminRoutes.post("/design/refine", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const previousImageUrl = formString(body.imageUrl);
@@ -1222,16 +1296,18 @@ adminRoutes.post("/design/refine", async (c) => {
     const result = await refineDesign(previousImageUrl, feedback);
     return c.json(result);
   } catch (error) {
+    console.error("[design/refine] failed", error);
     return c.json({ error: error instanceof Error ? error.message : "No se pudo refinar el diseño." }, 400);
   }
 });
 
-adminRoutes.post("/image/enhance", async (c) => {
+adminRoutes.post("/image/enhance", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   try {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const result = await enhanceImageForCatalog(formString(body.imageUrl));
     return c.json(result);
   } catch (error) {
+    console.error("[image/enhance] failed", error);
     return c.json({ error: error instanceof Error ? error.message : "No se pudo mejorar la imagen." }, 400);
   }
 });
@@ -1416,7 +1492,7 @@ const renderMakerWorldForm = (draft?: MakerWorldDraft, error = "", session?: Ses
 
 adminRoutes.get("/makerworld", (c) => c.html(renderMakerWorldForm(undefined, "", c.get("session") as SessionData | undefined)));
 
-adminRoutes.post("/makerworld", async (c) => {
+adminRoutes.post("/makerworld", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody() as Record<string, unknown>;
   const rawUrl = formString(body.makerworld_url);
   const clientHtml = formString(body.client_html) || undefined;
@@ -1433,11 +1509,11 @@ adminRoutes.post("/makerworld", async (c) => {
   }
 });
 
-adminRoutes.post("/makerworld/save", async (c) => {
+adminRoutes.post("/makerworld/save", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
   let imageUrl = formString(body.image_url) || formString(body.selected_image);
   const file = formFile(body.image_file);
-  if (file) imageUrl = await saveUpload(file, "products", "prod");
+  if (file) imageUrl = await saveImageUpload(file, "products", "prod");
   const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
@@ -1809,7 +1885,7 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                         <div class="sm:col-span-2">
                             <label class="block text-sm font-medium text-gray-700">API Key ${sourceLabel("llm_api_key", "LLM_API_KEY")}</label>
                             <div class="mt-1 flex gap-2">
-                                <input type="password" name="llm_api_key" value="${eff("llm_api_key", "LLM_API_KEY")}" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="sk-... (vacío = no cambiar)" autocomplete="new-password" data-secret>
+                                <input type="password" name="llm_api_key" value="" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="sk-... (vacío = no cambiar)" autocomplete="new-password" data-secret>
                                 <button type="button" class="px-3 py-2 border border-gray-300 rounded-md text-xs text-gray-700 bg-white hover:bg-gray-50" data-toggle-secret>Mostrar</button>
                             </div>
                             <p class="text-xs text-gray-500 mt-1">Anti-wipe: si dejas el campo vacío al guardar, el valor actual se conserva.</p>
@@ -1859,7 +1935,7 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                         <div class="sm:col-span-2">
                             <label class="block text-sm font-medium text-gray-700">API Key ${sourceLabel("image_api_key", "QWEN_IMAGE_API_KEY", "IMAGE_ENHANCE_API_KEY")}</label>
                             <div class="mt-1 flex gap-2">
-                                <input type="password" name="image_api_key" value="${eff("image_api_key", "QWEN_IMAGE_API_KEY", "IMAGE_ENHANCE_API_KEY")}" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="sk-... (vacío = no cambiar)" autocomplete="new-password" data-secret>
+                                <input type="password" name="image_api_key" value="" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="sk-... (vacío = no cambiar)" autocomplete="new-password" data-secret>
                                 <button type="button" class="px-3 py-2 border border-gray-300 rounded-md text-xs text-gray-700 bg-white hover:bg-gray-50" data-toggle-secret>Mostrar</button>
                             </div>
                         </div>
@@ -1933,7 +2009,7 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                         <div>
                             <label class="block text-sm font-medium text-gray-700">Password ${sourceLabel("admin_password", "ADMIN_PASSWORD")}</label>
                             <div class="mt-1 flex gap-2">
-                                <input type="password" name="admin_password" value="${eff("admin_password", "ADMIN_PASSWORD")}" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="(vacío = no cambiar)" autocomplete="new-password" data-secret>
+                                <input type="password" name="admin_password" value="" class="block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="(vacío = no cambiar)" autocomplete="new-password" data-secret>
                                 <button type="button" class="px-3 py-2 border border-gray-300 rounded-md text-xs text-gray-700 bg-white hover:bg-gray-50" data-toggle-secret>Mostrar</button>
                             </div>
                             <p class="text-xs text-gray-500 mt-1">Anti-wipe: si dejas el campo vacío al guardar, el valor actual se conserva.</p>
@@ -2123,7 +2199,16 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
   // Secretos: anti-wipe explícito. Vacío = no tocar.
   putSecret("llm_api_key");
   putSecret("image_api_key");
-  putSecret("admin_password");
+  // admin_password: se hashea antes de persistir (nunca se guarda en claro).
+  // Al cambiarla se revocan todas las sesiones activas (bump de versión).
+  let superPasswordChanged = false;
+  if ("admin_password" in body) {
+    const pw = formString(body.admin_password);
+    if (pw.length > 0) {
+      updates.admin_password = await Bun.password.hash(pw);
+      superPasswordChanged = true;
+    }
+  }
 
   // Campos con default cuando llegan vacíos.
   if ("shipping_provider" in body) updates.shipping_provider = formString(body.shipping_provider) || "Estafeta";
@@ -2133,11 +2218,7 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
   // Logo: archivo nuevo OR campo URL presente. Si ninguno aplica, no se toca.
   const logoFile = formFile(body.company_logo_file);
   if (logoFile) {
-    const filename = `${Date.now()}-${logoFile.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-    const uploadPath = join(process.cwd(), "data", "uploads", filename);
-    const buffer = await logoFile.arrayBuffer();
-    fs.writeFileSync(uploadPath, Buffer.from(buffer));
-    updates.company_logo = `/uploads/${filename}`;
+    updates.company_logo = await saveImageUpload(logoFile, "", "logo");
   } else if ("company_logo_url" in body) {
     updates.company_logo = formString(body.company_logo_url);
   }
@@ -2164,6 +2245,7 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
   updates.decorative_shapes_enabled = body.decorative_shapes_enabled ? "1" : "0";
 
   updateConfig(updates);
+  if (superPasswordChanged) bumpSessionVersion();
 
   // Price tiers: solo reemplazamos si vinieron campos tier_min Y el parse
   // arrojó al menos un tier válido. Eso impide vaciados accidentales.
@@ -2334,7 +2416,8 @@ adminRoutes.post("/categorias/quick-create", requireRole(["superusuario", "admin
     const created = createCategory(name);
     return c.json({ category: created, created: true });
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "No se pudo crear la categoría." }, 400);
+    console.error("[categorias/quick-create] failed", error);
+    return c.json({ error: "No se pudo crear la categoría." }, 400);
   }
 });
 
@@ -2384,7 +2467,8 @@ adminRoutes.post("/subcategorias/quick-create", requireRole(["superusuario", "ad
     const created = createSubcategory(categoryId, name);
     return c.json({ subcategory: created, created: true });
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "No se pudo crear la subcategoría." }, 400);
+    console.error("[subcategorias/quick-create] failed", error);
+    return c.json({ error: "No se pudo crear la subcategoría." }, 400);
   }
 });
 
@@ -2557,11 +2641,7 @@ adminRoutes.post("/products/new", requireRole(["superusuario", "admin", "editor"
   // Handle file upload
   const file = formFile(body.image_file);
   if (file) {
-    const filename = `prod-${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-    const uploadPath = join(process.cwd(), "data", "uploads", filename);
-    const buffer = await file.arrayBuffer();
-    fs.writeFileSync(uploadPath, Buffer.from(buffer));
-    imageUrl = `/uploads/${filename}`;
+    imageUrl = await saveImageUpload(file, "", "prod");
   }
 
   const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
@@ -2672,11 +2752,7 @@ adminRoutes.post("/products/:id/edit", requireRole(["superusuario", "admin", "ed
   // Handle file upload
   const file = formFile(body.image_file);
   if (file) {
-    const filename = `prod-${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-    const uploadPath = join(process.cwd(), "data", "uploads", filename);
-    const buffer = await file.arrayBuffer();
-    fs.writeFileSync(uploadPath, Buffer.from(buffer));
-    imageUrl = `/uploads/${filename}`;
+    imageUrl = await saveImageUpload(file, "", "prod");
   }
 
   const useDefaultPricing = formString(body.use_default_pricing) === "1" ? 1 : 0;
@@ -3328,7 +3404,7 @@ adminRoutes.get("/quotes/new", (c) => {
   `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/quotes/new", async (c) => {
+adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
   const customerName = formString(body.customer_name).trim();
   const postalCode = formString(body.postal_code).trim();
@@ -3363,7 +3439,7 @@ adminRoutes.post("/quotes/new", async (c) => {
     let customImageUrl: string | null = null;
     const fileVal = imageFiles[i];
     if (fileVal instanceof File && fileVal.size > 0) {
-      customImageUrl = await saveUpload(fileVal, "quote-items", "qitem");
+      customImageUrl = await saveImageUpload(fileVal, "quote-items", "qitem");
     } else {
       const designUrl = (imageUrls[i] || "").trim();
       if (designUrl) customImageUrl = designUrl;
@@ -3738,25 +3814,30 @@ adminRoutes.get("/quotes/:id", (c) => {
   `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/quotes/:id/status", async (c) => {
+const VALID_QUOTE_STATUSES = ["no_despachado", "despachado", "produccion", "finalizado", "spam"];
+
+adminRoutes.post("/quotes/:id/status", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = parseInt(c.req.param("id"), 10);
   const body = await c.req.parseBody() as Record<string, unknown>;
   const status = formString(body.status);
-  if (status) {
-    updateQuoteStatus(id, status);
+  if (!VALID_QUOTE_STATUSES.includes(status)) {
+    return c.text("Estado de cotización no válido.", 400);
   }
+  updateQuoteStatus(id, status);
   // When dispatching, go straight to the production pipeline
   if (status === "despachado") return c.redirect("/admin/production?tab=pagos");
   return c.redirect(`/admin/quotes/${id}`);
 });
 
-adminRoutes.post("/quotes/:id/items/:itemId/print-values", async (c) => {
+adminRoutes.post("/quotes/:id/items/:itemId/print-values", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const quoteId = parseInt(c.req.param("id"), 10);
   const itemId = parseInt(c.req.param("itemId"), 10);
   const body = await c.req.parseBody() as Record<string, unknown>;
   const filamentGrams = formString(body.filament_grams) !== "" ? parseFloat(formString(body.filament_grams)) : null;
   const printTimeMins = formString(body.print_time_mins) !== "" ? parseInt(formString(body.print_time_mins), 10) : null;
-  const returnTo = formString(body.return_to) || `/admin/quotes/${quoteId}`;
+  // Solo rutas internas (evita open redirect): debe empezar con "/" pero no "//".
+  const rawReturn = formString(body.return_to);
+  const returnTo = /^\/(?!\/)/.test(rawReturn) ? rawReturn : `/admin/quotes/${quoteId}`;
   updateQuoteItemPrintValues(itemId, filamentGrams, printTimeMins);
   return c.redirect(returnTo);
 });
@@ -4287,7 +4368,7 @@ adminRoutes.get("/production-settings", (c) => {
   `, c.get("session") as SessionData | undefined));
 });
 
-adminRoutes.post("/production-settings/printers", async (c) => {
+adminRoutes.post("/production-settings/printers", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody() as Record<string, unknown>;
   const name = formString(body.name).trim();
   const powerCost = parseFloat(formString(body.power_cost)) || 0;
@@ -4299,13 +4380,13 @@ adminRoutes.post("/production-settings/printers", async (c) => {
   return c.redirect("/admin/production-settings");
 });
 
-adminRoutes.post("/production-settings/printers/:id/delete", (c) => {
+adminRoutes.post("/production-settings/printers/:id/delete", requireRole(["superusuario", "admin", "editor"]), (c) => {
   const id = parseInt(c.req.param("id"), 10);
   deletePrinter(id);
   return c.redirect("/admin/production-settings");
 });
 
-adminRoutes.post("/production-settings/filaments", async (c) => {
+adminRoutes.post("/production-settings/filaments", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody() as Record<string, unknown>;
   const color = formString(body.color).trim();
   const price = parseFloat(formString(body.price)) || 0;
@@ -4316,7 +4397,7 @@ adminRoutes.post("/production-settings/filaments", async (c) => {
   return c.redirect("/admin/production-settings");
 });
 
-adminRoutes.post("/production-settings/filaments/:id/delete", (c) => {
+adminRoutes.post("/production-settings/filaments/:id/delete", requireRole(["superusuario", "admin", "editor"]), (c) => {
   const id = parseInt(c.req.param("id"), 10);
   deleteFilament(id);
   return c.redirect("/admin/production-settings");
@@ -4719,12 +4800,12 @@ adminRoutes.get("/production", (c) => {
 });
 
 // Production proof and schedule actions
-adminRoutes.post("/production/:id/proof", async (c) => {
+adminRoutes.post("/production/:id/proof", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = parseInt(c.req.param("id"), 10);
   const body = await c.req.parseBody() as Record<string, unknown>;
   const file = formFile(body.payment_proof);
   if (file) {
-    const fileUrl = await saveUpload(file, "payments", "proof");
+    const fileUrl = await saveImageUpload(file, "payments", "proof");
     updateQuotePaymentProof(id, fileUrl);
 
     // Register anticipo payment
@@ -4743,7 +4824,7 @@ adminRoutes.post("/production/:id/proof", async (c) => {
   return c.redirect("/admin/production?tab=produccion");
 });
 
-adminRoutes.post("/production/:id/schedule", async (c) => {
+adminRoutes.post("/production/:id/schedule", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = parseInt(c.req.param("id"), 10);
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
   const printerId = parseInt(formString(body.printer_id), 10) || null;
@@ -4778,14 +4859,14 @@ adminRoutes.post("/production/:id/schedule", async (c) => {
   return c.redirect("/admin/production?tab=produccion");
 });
 
-adminRoutes.post("/production/:id/finish", async (c) => {
+adminRoutes.post("/production/:id/finish", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = parseInt(c.req.param("id"), 10);
   const body = await c.req.parseBody() as Record<string, unknown>;
 
   // Save final payment proof
   const file = formFile(body.final_proof);
   if (file) {
-    const fileUrl = await saveUpload(file, "payments", "liquidacion");
+    const fileUrl = await saveImageUpload(file, "payments", "liquidacion");
     db.run(`UPDATE quotes SET payment_proof_url_final = ? WHERE id = ?`, [fileUrl, id]);
   }
 
@@ -5232,7 +5313,9 @@ adminRoutes.post("/finanzas/categorias/:id/delete", requireRole(["superusuario",
 
 // Reportes
 adminRoutes.get("/finanzas/reportes", requireRole(["superusuario", "admin"]), (c) => {
-  const year = c.req.query("year") || String(new Date().getFullYear());
+  const rawYear = c.req.query("year") || "";
+  // Solo años de 4 dígitos en rango razonable; cualquier otra cosa cae al actual.
+  const year = /^\d{4}$/.test(rawYear) && +rawYear >= 2000 && +rawYear <= 2100 ? rawYear : String(new Date().getFullYear());
   const yearNum = parseInt(year, 10);
 
   // Monthly P&L for the selected year

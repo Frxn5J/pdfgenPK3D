@@ -135,38 +135,49 @@ export function deletePayment(id: number) {
 // ── Resumen financiero ────────────────────────────────────────────────────────
 
 export function getFinancialSummary(from?: string, to?: string): FinancialSummary {
-  const dateFilter = (col: string) => {
+  // from/to se parametrizan con placeholders (?) para evitar SQL injection.
+  // La columna es fija por llamada (no proviene del usuario), así que es seguro
+  // interpolarla en el texto de la query.
+  const dateFilter = (col: string): { clause: string; params: string[] } => {
     const parts: string[] = [];
-    if (from) parts.push(`${col} >= '${from}'`);
-    if (to) parts.push(`${col} <= '${to}'`);
-    return parts.length ? `AND ${parts.join(" AND ")}` : "";
+    const params: string[] = [];
+    if (from) { parts.push(`${col} >= ?`); params.push(from); }
+    if (to) { parts.push(`${col} <= ?`); params.push(to); }
+    return { clause: parts.length ? `AND ${parts.join(" AND ")}` : "", params };
   };
 
-  const totalRevenue = db.query<{ total: number }, []>(`SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE 1=1 ${dateFilter("date")}`).get()?.total || 0;
-  const totalExpenses = db.query<{ total: number }, []>(`SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE 1=1 ${dateFilter("date")}`).get()?.total || 0;
+  const fPay = dateFilter("date");
+  const totalRevenue = db.query<{ total: number }, string[]>(`SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE 1=1 ${fPay.clause}`).get(...fPay.params)?.total || 0;
+  const fExp = dateFilter("date");
+  const totalExpenses = db.query<{ total: number }, string[]>(`SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE 1=1 ${fExp.clause}`).get(...fExp.params)?.total || 0;
 
-  const productionCost = db.query<{ total: number }, []>(`
+  const fProd = dateFilter("q.created_at");
+  const productionCost = db.query<{ total: number }, string[]>(`
     SELECT COALESCE(SUM(
       (qf.grams_used / 1000.0 * f.price_per_kg)
     ), 0) as total
     FROM quote_filaments qf
     JOIN filaments f ON f.id = qf.filament_id
     JOIN quotes q ON q.id = qf.quote_id
-    WHERE q.status IN ('produccion', 'finalizado') ${dateFilter("q.created_at")}
-  `).get()?.total || 0;
+    WHERE q.status IN ('produccion', 'finalizado') ${fProd.clause}
+  `).get(...fProd.params)?.total || 0;
 
-  const quoteCount = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM quotes WHERE status != 'spam' ${dateFilter("created_at")}`).get()?.count || 0;
-  const paidQuoteCount = db.query<{ count: number }, []>(`SELECT COUNT(*) as count FROM quotes WHERE status IN ('despachado', 'produccion', 'finalizado') ${dateFilter("created_at")}`).get()?.count || 0;
-  const pendingRevenue = db.query<{ total: number }, []>(`SELECT COALESCE(SUM(grand_total), 0) as total FROM quotes WHERE status IN ('no_despachado', 'despachado') ${dateFilter("created_at")}`).get()?.total || 0;
+  const fQuotes = dateFilter("created_at");
+  const quoteCount = db.query<{ count: number }, string[]>(`SELECT COUNT(*) as count FROM quotes WHERE status != 'spam' ${fQuotes.clause}`).get(...fQuotes.params)?.count || 0;
+  const fPaid = dateFilter("created_at");
+  const paidQuoteCount = db.query<{ count: number }, string[]>(`SELECT COUNT(*) as count FROM quotes WHERE status IN ('despachado', 'produccion', 'finalizado') ${fPaid.clause}`).get(...fPaid.params)?.count || 0;
+  const fPending = dateFilter("created_at");
+  const pendingRevenue = db.query<{ total: number }, string[]>(`SELECT COALESCE(SUM(grand_total), 0) as total FROM quotes WHERE status IN ('no_despachado', 'despachado') ${fPending.clause}`).get(...fPending.params)?.total || 0;
 
-  const expensesByCategory = db.query<{ category_name: string; category_icon: string; total: number }, []>(`
+  const fCat = dateFilter("e.date");
+  const expensesByCategory = db.query<{ category_name: string; category_icon: string; total: number }, string[]>(`
     SELECT COALESCE(ec.name, 'Sin categoría') AS category_name, COALESCE(ec.icon, '📋') AS category_icon, SUM(e.amount) AS total
     FROM expenses e
     LEFT JOIN expense_categories ec ON ec.id = e.category_id
-    WHERE 1=1 ${dateFilter("e.date")}
+    WHERE 1=1 ${fCat.clause}
     GROUP BY e.category_id
     ORDER BY total DESC
-  `).all();
+  `).all(...fCat.params);
 
   const monthlyRevenue = db.query<{ month: string; total: number }, []>(`
     SELECT strftime('%Y-%m', date) AS month, SUM(amount) AS total
