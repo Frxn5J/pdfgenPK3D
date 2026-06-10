@@ -18,13 +18,15 @@ services:
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     restart: always
-    ports:
-      - "8191:8191"
+    # Sin mapeo de puertos al host: solo accesible por la red interna de compose
+    # (el servicio "catalog" lo alcanza vía http://flaresolverr:8191).
+    expose:
+      - "8191"
     dns:
       - 1.1.1.1
       - 8.8.8.8
     environment:
-      - LOG_LEVEL=debug
+      - LOG_LEVEL=info
       - BROWSER_TIMEOUT=90000
       - TZ=America/Mexico_City
       - HOST=0.0.0.0

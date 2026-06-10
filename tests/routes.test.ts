@@ -1,11 +1,15 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 import { app } from "../src/app";
 import { db, initDb, countPushSubscriptions, updateConfig } from "../src/db/schema";
+import { signSession } from "../src/lib/session";
 
-const AUTH = { Cookie: "admin_session=authenticated" };
+// Cookie de sesión válida (firmada con el secreto activo) para un superusuario.
+let AUTH: { Cookie: string } = { Cookie: "" };
 
-beforeAll(() => {
+beforeAll(async () => {
   initDb();
+  const token = await signSession({ id: 0, username: "tester", role: "superusuario", exp: Date.now() + 3600_000 });
+  AUTH = { Cookie: `admin_session=${token}` };
 });
 
 beforeEach(() => {
