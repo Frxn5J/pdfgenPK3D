@@ -77,4 +77,29 @@ export const escapeHtml = (value: unknown) =>
 export const configValue = (config: Record<string, string>, key: string, fallback = "") =>
   escapeHtml(config[key] || fallback);
 
+// Renderiza un <img> con atributos de rendimiento/SEO. width/height declarados
+// reservan el espacio del layout (anti-CLS) aun cuando object-fit recorte. Por
+// defecto loading="lazy"; usa priority=true para el LCP (logo/hero): fija
+// fetchpriority="high" y desactiva el lazy-load.
+export const imgTag = (opts: {
+  src: string;
+  alt: string;
+  w?: number;
+  h?: number;
+  className?: string;
+  lazy?: boolean;
+  priority?: boolean;
+}): string => {
+  const { src, alt, w, h, className = "", lazy = true, priority = false } = opts;
+  return (
+    `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}"` +
+    (className ? ` class="${escapeHtml(className)}"` : "") +
+    (w ? ` width="${w}"` : "") +
+    (h ? ` height="${h}"` : "") +
+    ` decoding="async"` +
+    (priority ? ` fetchpriority="high"` : ` loading="${lazy ? "lazy" : "eager"}"`) +
+    `>`
+  );
+};
+
 export const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";

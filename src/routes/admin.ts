@@ -1531,6 +1531,17 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
   const config = getConfig();
   const tiers = getDefaultPriceTiers();
 
+  // Landing: prefill de beneficios. Render de 6 filas fijas (icon/title/text).
+  const LANDING_BENEFIT_ROWS = 6;
+  let landingBenefits: Array<{ icon?: string; title?: string; text?: string }> = [];
+  try {
+    const parsed = JSON.parse(config.landing_benefits_items || "[]");
+    if (Array.isArray(parsed)) landingBenefits = parsed;
+  } catch {
+    landingBenefits = [];
+  }
+  const landingChecked = (key: string) => (config[key] !== "0" ? "checked" : "");
+
   // Indica de dónde proviene el valor actual de cada setting "env-style".
   const sourceLabel = (key: string, envKey: string, envKeyLegacy = "") => {
     if ((config[key] || "").trim()) return '<span class="ml-2 inline-flex items-center text-[10px] font-semibold uppercase tracking-wide text-green-700 bg-green-100 px-1.5 py-0.5 rounded">guardado</span>';
@@ -1573,6 +1584,7 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
             <div class="border-b border-gray-200">
                 <nav class="-mb-px flex flex-wrap gap-1 sm:gap-2" id="config-tabs" role="tablist">
                     <button type="button" data-config-tab="marca" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-blue-600 text-blue-700 text-sm font-medium" aria-selected="true">Marca y Catálogo</button>
+                    <button type="button" data-config-tab="landing" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Landing</button>
                     <button type="button" data-config-tab="tema" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Tema Visual</button>
                     <button type="button" data-config-tab="precios" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Precios</button>
                     <button type="button" data-config-tab="ia-modelos" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">IA · Modelos</button>
@@ -1636,6 +1648,145 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                     <label class="block text-sm font-medium text-gray-700">Texto de Contacto / Pie de página (acepta HTML)</label>
                     <textarea name="contact_text" rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "contact_text")}</textarea>
                     <p class="text-xs text-gray-500 mt-1">Este contenido se inserta como HTML en la última página del catálogo.</p>
+                </div>
+            </section>
+
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: LANDING (homepage configurable)                          -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="landing" class="space-y-8 hidden">
+                <p class="text-sm text-gray-500">Esta es la página de inicio (<code>/</code>). Configura su contenido por secciones. El catálogo sigue en <code>/catalogo</code>. El SEO (título, descripción, Open Graph, datos estructurados) se genera automáticamente — aquí solo editas el contenido.</p>
+
+                <!-- HERO -->
+                <div class="border border-gray-200 rounded-lg p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Hero (encabezado principal)</h3>
+                        <label class="inline-flex items-center"><input type="checkbox" name="landing_hero_enabled" value="1" ${landingChecked("landing_hero_enabled")} class="h-4 w-4 text-blue-600 border-gray-300 rounded"><span class="ml-2 text-sm text-gray-700">Mostrar</span></label>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Título</label>
+                            <input type="text" name="landing_hero_title" value="${configValue(config, "landing_hero_title")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Texto del botón</label>
+                            <input type="text" name="landing_hero_cta_label" value="${configValue(config, "landing_hero_cta_label")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700">Subtítulo</label>
+                            <textarea name="landing_hero_subtitle" rows="2" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "landing_hero_subtitle")}</textarea>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Destino del botón</label>
+                            <select name="landing_hero_cta_target" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                                <option value="/catalogo" ${config.landing_hero_cta_target !== "whatsapp" ? "selected" : ""}>Catálogo (/catalogo)</option>
+                                <option value="whatsapp" ${config.landing_hero_cta_target === "whatsapp" ? "selected" : ""}>WhatsApp</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Imagen del hero (URL o subir)</label>
+                            <input type="text" name="landing_hero_image_url" value="${configValue(config, "landing_hero_image")}" placeholder="Por defecto usa el logo" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
+                            <input type="file" name="landing_hero_image_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BENEFICIOS -->
+                <div class="border border-gray-200 rounded-lg p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Beneficios</h3>
+                        <label class="inline-flex items-center"><input type="checkbox" name="landing_benefits_enabled" value="1" ${landingChecked("landing_benefits_enabled")} class="h-4 w-4 text-blue-600 border-gray-300 rounded"><span class="ml-2 text-sm text-gray-700">Mostrar</span></label>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Título de la sección</label>
+                        <input type="text" name="landing_benefits_title" value="${configValue(config, "landing_benefits_title")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                    </div>
+                    <p class="text-xs text-gray-500">Hasta ${LANDING_BENEFIT_ROWS} beneficios. Las filas vacías se ignoran.</p>
+                    <div class="space-y-2">
+                        ${Array.from({ length: LANDING_BENEFIT_ROWS }, (_, i) => {
+                          const it = landingBenefits[i] || {};
+                          return `
+                        <div class="grid grid-cols-12 gap-2">
+                            <input type="text" name="landing_benefit_icon" value="${escapeHtml(it.icon || "")}" placeholder="Icono" class="col-span-2 px-2 py-2 border border-gray-300 rounded-md text-center">
+                            <input type="text" name="landing_benefit_title" value="${escapeHtml(it.title || "")}" placeholder="Título" class="col-span-4 px-3 py-2 border border-gray-300 rounded-md">
+                            <input type="text" name="landing_benefit_text" value="${escapeHtml(it.text || "")}" placeholder="Descripción" class="col-span-6 px-3 py-2 border border-gray-300 rounded-md">
+                        </div>`;
+                        }).join("")}
+                    </div>
+                </div>
+
+                <!-- PRODUCTOS DESTACADOS -->
+                <div class="border border-gray-200 rounded-lg p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Productos destacados</h3>
+                        <label class="inline-flex items-center"><input type="checkbox" name="landing_featured_enabled" value="1" ${landingChecked("landing_featured_enabled")} class="h-4 w-4 text-blue-600 border-gray-300 rounded"><span class="ml-2 text-sm text-gray-700">Mostrar</span></label>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Título de la sección</label>
+                        <input type="text" name="landing_featured_title" value="${configValue(config, "landing_featured_title")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                    </div>
+                    <p class="text-xs text-gray-500">Marca productos como destacados editándolos en <a href="/admin/products" class="text-blue-600 underline">Productos</a> (casilla "Destacar en landing").</p>
+                </div>
+
+                <!-- SOBRE NOSOTROS -->
+                <div class="border border-gray-200 rounded-lg p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Sobre nosotros</h3>
+                        <label class="inline-flex items-center"><input type="checkbox" name="landing_about_enabled" value="1" ${landingChecked("landing_about_enabled")} class="h-4 w-4 text-blue-600 border-gray-300 rounded"><span class="ml-2 text-sm text-gray-700">Mostrar</span></label>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Título</label>
+                            <input type="text" name="landing_about_title" value="${configValue(config, "landing_about_title")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Imagen (URL o subir)</label>
+                            <input type="text" name="landing_about_image_url" value="${configValue(config, "landing_about_image")}" placeholder="URL de imagen..." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
+                            <input type="file" name="landing_about_image_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto (acepta HTML)</label>
+                        <textarea name="landing_about_text" rows="5" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "landing_about_text")}</textarea>
+                    </div>
+                </div>
+
+                <!-- CTA -->
+                <div class="border border-gray-200 rounded-lg p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Llamada a la acción (CTA)</h3>
+                        <label class="inline-flex items-center"><input type="checkbox" name="landing_cta_enabled" value="1" ${landingChecked("landing_cta_enabled")} class="h-4 w-4 text-blue-600 border-gray-300 rounded"><span class="ml-2 text-sm text-gray-700">Mostrar</span></label>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Título</label>
+                            <input type="text" name="landing_cta_title" value="${configValue(config, "landing_cta_title")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Texto del botón</label>
+                            <input type="text" name="landing_cta_button_label" value="${configValue(config, "landing_cta_button_label")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                        </div>
+                        <div class="sm:col-span-2">
+                            <label class="block text-sm font-medium text-gray-700">Texto</label>
+                            <textarea name="landing_cta_text" rows="2" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">${configValue(config, "landing_cta_text")}</textarea>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Destino del botón</label>
+                            <select name="landing_cta_button_target" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+                                <option value="whatsapp" ${config.landing_cta_button_target !== "/catalogo" ? "selected" : ""}>WhatsApp</option>
+                                <option value="/catalogo" ${config.landing_cta_button_target === "/catalogo" ? "selected" : ""}>Catálogo (/catalogo)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- CONTACTO -->
+                <div class="border border-gray-200 rounded-lg p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Contacto</h3>
+                        <label class="inline-flex items-center"><input type="checkbox" name="landing_contact_enabled" value="1" ${landingChecked("landing_contact_enabled")} class="h-4 w-4 text-blue-600 border-gray-300 rounded"><span class="ml-2 text-sm text-gray-700">Mostrar</span></label>
+                    </div>
+                    <p class="text-xs text-gray-500">Reutiliza el "Texto de Contacto" y el WhatsApp configurados en la pestaña <strong>Marca y Catálogo</strong>.</p>
                 </div>
             </section>
 
@@ -2177,6 +2328,19 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
     "decorative_shape_opacity",
     "decorative_shape_blur",
     "custom_css",
+    // ── Landing (contenido de marketing) ──────────────────────────────
+    "landing_hero_title",
+    "landing_hero_subtitle",
+    "landing_hero_cta_label",
+    "landing_hero_cta_target",
+    "landing_benefits_title",
+    "landing_featured_title",
+    "landing_about_title",
+    "landing_about_text",
+    "landing_cta_title",
+    "landing_cta_text",
+    "landing_cta_button_label",
+    "landing_cta_button_target",
     // ── Settings que sobrescriben al .env ─────────────────────────────
     // Texto plano (URL, modelo, número): si vienen vacíos sí se borra el
     // override de DB y el sistema cae al .env como fallback.
@@ -2243,6 +2407,47 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
   // Checkbox: el marcador garantiza que el form fue enviado, así que la
   // ausencia se interpreta como "desmarcado".
   updates.decorative_shapes_enabled = body.decorative_shapes_enabled ? "1" : "0";
+
+  // ── Landing: toggles de sección (mismo patrón checkbox) ──────────────
+  // Solo se procesan cuando el form del landing fue enviado (el pane siempre
+  // incluye los checkboxes, así que su ausencia total = no se editó el landing).
+  if ("landing_hero_enabled" in body || "landing_benefits_enabled" in body || "landing_cta_enabled" in body) {
+    updates.landing_hero_enabled = body.landing_hero_enabled ? "1" : "0";
+    updates.landing_benefits_enabled = body.landing_benefits_enabled ? "1" : "0";
+    updates.landing_featured_enabled = body.landing_featured_enabled ? "1" : "0";
+    updates.landing_about_enabled = body.landing_about_enabled ? "1" : "0";
+    updates.landing_cta_enabled = body.landing_cta_enabled ? "1" : "0";
+    updates.landing_contact_enabled = body.landing_contact_enabled ? "1" : "0";
+
+    // Beneficios: zip de las filas fijas → JSON, descartando filas vacías.
+    const icons = formStringArray(body.landing_benefit_icon);
+    const titles = formStringArray(body.landing_benefit_title);
+    const texts = formStringArray(body.landing_benefit_text);
+    const rows = Math.max(icons.length, titles.length, texts.length);
+    const benefits: Array<{ icon: string; title: string; text: string }> = [];
+    for (let i = 0; i < rows; i++) {
+      const icon = (icons[i] || "").trim();
+      const title = (titles[i] || "").trim();
+      const text = (texts[i] || "").trim();
+      if (!title && !text) continue; // fila vacía
+      benefits.push({ icon, title, text });
+    }
+    updates.landing_benefits_items = JSON.stringify(benefits);
+  }
+
+  // Landing: imágenes hero/about (archivo nuevo OR campo URL presente).
+  const heroImageFile = formFile(body.landing_hero_image_file);
+  if (heroImageFile) {
+    updates.landing_hero_image = await saveImageUpload(heroImageFile, "", "landing-hero");
+  } else if ("landing_hero_image_url" in body) {
+    updates.landing_hero_image = formString(body.landing_hero_image_url);
+  }
+  const aboutImageFile = formFile(body.landing_about_image_file);
+  if (aboutImageFile) {
+    updates.landing_about_image = await saveImageUpload(aboutImageFile, "", "landing-about");
+  } else if ("landing_about_image_url" in body) {
+    updates.landing_about_image = formString(body.landing_about_image_url);
+  }
 
   updateConfig(updates);
   if (superPasswordChanged) bumpSessionVersion();
@@ -2540,7 +2745,7 @@ adminRoutes.get("/products", (c) => {
                         }
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">
-                        <div class="text-sm font-medium text-gray-900">${escapeHtml(p.name)}</div>
+                        <div class="text-sm font-medium text-gray-900">${escapeHtml(p.name)}${p.featured ? ' <span class="ml-1 text-xs font-semibold text-amber-600" title="Destacado en landing">★</span>' : ''}</div>
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">${catCell}</td>
                     <td class="px-6 py-4 whitespace-nowrap">
@@ -2619,6 +2824,18 @@ adminRoutes.get("/products/new", requireRole(["superusuario", "admin", "editor"]
             </div>
 
             <div>
+                <div class="flex items-start">
+                    <div class="flex items-center h-5">
+                        <input id="featured" name="featured" type="checkbox" value="1" class="focus:ring-blue-500 h-4 w-4 text-blue-600 border-gray-300 rounded">
+                    </div>
+                    <div class="ml-3 text-sm">
+                        <label for="featured" class="font-medium text-gray-700">Destacar en landing</label>
+                        <p class="text-gray-500">Aparece en la sección "Productos destacados" de la página de inicio. Orden: <input type="number" name="featured_order" value="0" step="1" class="w-20 px-2 py-1 border border-gray-300 rounded-md"> (menor = primero).</p>
+                    </div>
+                </div>
+            </div>
+
+            <div>
                 <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
                 <p class="text-sm text-gray-500 mb-3">Si “Usar tabla global” está marcado, esta tabla se desactiva y no bloquea el guardado. Desmárcalo para editar precios personalizados.</p>
                 ${renderPricingEditor(defaultTiers)}
@@ -2648,12 +2865,14 @@ adminRoutes.post("/products/new", requireRole(["superusuario", "admin", "editor"
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
   const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
+  const featured = formString(body.featured) === "1" ? 1 : 0;
+  const featuredOrder = parseInt(formString(body.featured_order) || "0", 10) || 0;
   const { categoryId, subcategoryId } = parseCategoryAndSub(body);
 
   const result = db.query(`
-    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order, category_id, subcategory_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) RETURNING id
-  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, subcategoryId) as {id: number};
+    INSERT INTO products (name, description, image_url, makerworld_url, filament_grams, print_time_mins, extra_costs, use_default_pricing, sort_order, category_id, subcategory_id, featured, featured_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?) RETURNING id
+  `).get(formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, subcategoryId, featured, featuredOrder) as {id: number};
 
   if (!useDefaultPricing) replaceProductPriceTiers(result.id, parsePriceTiers(body));
 
@@ -2729,6 +2948,18 @@ adminRoutes.get("/products/:id/edit", requireRole(["superusuario", "admin", "edi
             </div>
 
             <div>
+                <div class="flex items-start">
+                    <div class="flex items-center h-5">
+                        <input id="featured" name="featured" type="checkbox" value="1" ${product.featured ? 'checked' : ''} class="focus:ring-blue-500 h-4 w-4 text-blue-600 border-gray-300 rounded">
+                    </div>
+                    <div class="ml-3 text-sm">
+                        <label for="featured" class="font-medium text-gray-700">Destacar en landing</label>
+                        <p class="text-gray-500">Aparece en la sección "Productos destacados" de la página de inicio. Orden: <input type="number" name="featured_order" value="${product.featured_order || 0}" step="1" class="w-20 px-2 py-1 border border-gray-300 rounded-md"> (menor = primero).</p>
+                    </div>
+                </div>
+            </div>
+
+            <div>
                 <h3 class="text-lg font-semibold mb-3">Rangos de precios custom</h3>
                 <p class="text-sm text-gray-500 mb-3">Si “Usar tabla global” está marcado, esta tabla se desactiva y no bloquea el guardado. Desmárcalo para editar precios personalizados.</p>
                 ${renderPricingEditor(tiers)}
@@ -2759,11 +2990,13 @@ adminRoutes.post("/products/:id/edit", requireRole(["superusuario", "admin", "ed
   const filamentGrams = parseFloat(formString(body.filament_grams) || "0") || 0;
   const printTimeMins = parseInt(formString(body.print_time_mins) || "0", 10) || 0;
   const extraCosts = parseFloat(formString(body.extra_costs) || "0") || 0;
+  const featured = formString(body.featured) === "1" ? 1 : 0;
+  const featuredOrder = parseInt(formString(body.featured_order) || "0", 10) || 0;
   const { categoryId, subcategoryId } = parseCategoryAndSub(body);
 
   db.run(`
-    UPDATE products SET name = ?, description = ?, image_url = ?, makerworld_url = ?, filament_grams = ?, print_time_mins = ?, extra_costs = ?, use_default_pricing = ?, category_id = ?, subcategory_id = ? WHERE id = ?
-  `, [formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, subcategoryId, id]);
+    UPDATE products SET name = ?, description = ?, image_url = ?, makerworld_url = ?, filament_grams = ?, print_time_mins = ?, extra_costs = ?, use_default_pricing = ?, category_id = ?, subcategory_id = ?, featured = ?, featured_order = ? WHERE id = ?
+  `, [formString(body.name), formString(body.description) || null, imageUrl || null, formString(body.makerworld_url) || null, filamentGrams, printTimeMins, extraCosts, useDefaultPricing, categoryId, subcategoryId, featured, featuredOrder, id]);
 
   replaceProductPriceTiers(id, useDefaultPricing ? [] : parsePriceTiers(body));
 

@@ -1,6 +1,9 @@
 import { Hono } from "hono";
-import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, getSubcategories, type Category, type Subcategory, type Product } from "../db/schema";
+import { createQuote, getConfig, getProducts, getFeaturedProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, getSubcategories, type Category, type Subcategory, type Product } from "../db/schema";
 import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegisterScript, sendPushToAll } from "../pwa";
+import { imgTag } from "../lib/html";
+import { cleanText } from "../lib/text";
+import { buildHeadMeta, buildJsonLd, resolveOrigin, escXml, type SeoProduct } from "../lib/seo";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -291,6 +294,31 @@ const buildThemeCss = (config: Record<string, string>) => {
     .contact-section h1, .contact-section h2, .contact-section h3, .contact-section h4, .contact-section p { color: var(--contact-text); }
     .contact-section .page-shell { width: min(860px, 100%); }
 
+    /* ── Landing page ── */
+    .landing-hero { min-height: 78vh; display: grid; place-items: center; background: var(--cover-bg); color: var(--cover-text); text-align: center; }
+    .landing-hero-shell { display: grid; gap: 1.25rem; justify-items: center; }
+    .landing-hero-image { display: block; width: min(240px, 60vw); max-height: 200px; object-fit: contain; margin: 0 auto; }
+    .landing-hero h1 { color: var(--cover-text); font-size: clamp(2.4rem, 7vw, 4.5rem); letter-spacing: -.05em; margin: .5rem 0 0; }
+    .landing-hero-subtitle { color: var(--cover-text); opacity: .82; font-size: clamp(1.05rem, 2.4vw, 1.4rem); max-width: 46ch; margin: 0 auto; }
+    .landing-hero-cta { margin-top: .75rem; padding: .9rem 2rem; font-size: 1.05rem; }
+    .landing-benefits { background: var(--welcome-bg); }
+    .landing-benefits-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--product-gap); }
+    .landing-benefit-card { padding: var(--card-padding); text-align: center; }
+    .landing-benefit-icon { font-size: 2.5rem; line-height: 1; margin-bottom: .75rem; }
+    .landing-benefit-card h3 { margin: 0 0 .5rem; font-size: 1.25rem; }
+    .landing-benefit-card p { margin: 0; color: var(--muted-text); }
+    .landing-featured { background: var(--products-bg); }
+    .landing-featured-card { display: block; text-decoration: none; color: inherit; }
+    .landing-about { background: var(--welcome-bg); }
+    .landing-about-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--product-gap); align-items: center; }
+    .landing-about-image { width: 100%; height: auto; border-radius: var(--radius); object-fit: cover; }
+    .landing-about-body .section-title { text-align: left; }
+    .landing-cta { background: var(--brand-primary); color: #fff; text-align: center; }
+    .landing-cta-shell { display: grid; gap: 1rem; justify-items: center; }
+    .landing-cta .section-title, .landing-cta-text { color: #fff; }
+    .landing-cta-text { max-width: 52ch; margin: 0 auto; font-size: clamp(1.05rem, 2.4vw, 1.3rem); opacity: .94; }
+    .landing-cta-button { background: #fff; color: var(--brand-primary); padding: .9rem 2rem; font-size: 1.05rem; }
+
     .theme-shapes { position: absolute; inset: 0; pointer-events: none; opacity: var(--shape-opacity); filter: blur(var(--shape-blur)); z-index: 0; }
     .theme-shapes span { position: absolute; display: block; background: var(--shape-color); }
     .shape-organic .shape-one { width: 380px; height: 380px; top: -120px; right: -90px; border-radius: 42% 58% 63% 37% / 42% 40% 60% 58%; }
@@ -308,6 +336,9 @@ const buildThemeCss = (config: Record<string, string>) => {
 
     @media (max-width: 900px) {
       .products-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .landing-benefits-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .landing-about-shell { grid-template-columns: 1fr; }
+      .landing-about-body .section-title { text-align: center; }
       .cart-line { grid-template-columns: 1fr; }
     }
     @media (max-width: 640px) {
@@ -315,6 +346,7 @@ const buildThemeCss = (config: Record<string, string>) => {
       .action-bar { left: 1rem; right: 1rem; justify-content: space-between; }
       .theme-button, .admin-link { padding: .65rem .85rem; }
       .products-grid { grid-template-columns: 1fr; }
+      .landing-benefits-grid { grid-template-columns: 1fr; }
       .product-image, .product-image-fallback { height: 220px; }
       table { min-width: 440px; }
       .cart-control { grid-template-columns: 1fr; }
@@ -342,7 +374,17 @@ const renderShapes = (config: Record<string, string>) => {
   return `<div class="theme-shapes shape-${style}" aria-hidden="true"><span class="shape-one"></span><span class="shape-two"></span><span class="shape-three"></span></div>`;
 };
 
-const Layout = (title: string, content: string, config: Record<string, string>) => {
+// `seo` opcional: cuando se provee, headMeta YA incluye <title> + meta/OG/canonical
+// y jsonLd el bloque structured-data. Cuando falta (solo /imprimir), se emite un
+// <title> legacy + noindex para no indexar la vista imprimible (contenido duplicado).
+// `lcpImage` precarga la imagen principal (logo/hero) para mejorar LCP.
+const Layout = (
+  title: string,
+  content: string,
+  config: Record<string, string>,
+  seo?: { headMeta: string; jsonLd: string },
+  lcpImage?: string,
+) => {
   const cardStyle = choice(config.card_style, ["flat", "bordered", "minimal"], "flat");
   const density = choice(config.layout_density, ["compact", "comfortable", "spacious"], "comfortable");
   const imageFit = choice(config.product_image_fit, ["cover", "contain"], "cover");
@@ -353,9 +395,11 @@ const Layout = (title: string, content: string, config: Record<string, string>) 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${escapeHtml(title)}</title>
+    ${seo ? seo.headMeta : `<title>${escapeHtml(title)}</title>\n    <meta name="robots" content="noindex">`}
     ${pwaHeadTags(config)}
+    ${lcpImage ? `<link rel="preload" as="image" href="${escapeHtml(lcpImage)}" fetchpriority="high">` : ""}
     <style>${buildThemeCss(config)}</style>
+    ${seo ? seo.jsonLd : ""}
 </head>
 <body class="catalog-body density-${density} card-style-${cardStyle} image-fit-${imageFit}">
     ${content}
@@ -364,6 +408,48 @@ const Layout = (title: string, content: string, config: Record<string, string>) 
 </html>
 `;
 };
+
+// SeoProduct[] desde las entradas catálogo (precio low/high = min/max de tiers).
+const toSeoProducts = (
+  entries: Array<{ product: Product; priceTiers: ReturnType<typeof getDefaultPriceTiers> }>,
+): SeoProduct[] =>
+  entries.map(({ product, priceTiers }) => {
+    const prices = priceTiers.map((t) => Number(t.price)).filter((n) => Number.isFinite(n));
+    return {
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      image_url: product.image_url,
+      priceLow: prices.length ? Math.min(...prices) : null,
+      priceHigh: prices.length ? Math.max(...prices) : null,
+    };
+  });
+
+// Resuelve el destino de un botón del landing: WhatsApp o ruta interna segura.
+const landingTarget = (config: Record<string, string>, target: string | undefined) => {
+  if (target === "whatsapp") {
+    return `https://wa.me/${normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304")}`;
+  }
+  return target && target.startsWith("/") ? target : "/catalogo";
+};
+
+// Acceso discreto al panel admin: 5 toques rápidos sobre un elemento [data-admin-gate].
+const adminGateScript = () => `
+  <script>
+  (function () {
+    var gates = document.querySelectorAll('[data-admin-gate]');
+    if (!gates.length) return;
+    var taps = 0, timer = null;
+    function onTap() {
+      taps++;
+      clearTimeout(timer);
+      timer = setTimeout(function () { taps = 0; }, 1500);
+      if (taps >= 5) { taps = 0; window.location.href = '/admin/login'; }
+    }
+    gates.forEach(function (g) { g.addEventListener('click', onTap); });
+  })();
+  </script>
+`;
 
 const getCatalogData = () => {
   const config = getConfig();
@@ -474,29 +560,14 @@ const renderCoverSection = (config: Record<string, string>) => `
       ${renderShapes(config)}
       <div class="page-shell">
           ${config.company_logo
-            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image" data-admin-gate>`
+            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image" decoding="async" fetchpriority="high" data-admin-gate>`
             : `<div class="logo-fallback" data-admin-gate>Logo</div>`
           }
           <h1 data-admin-gate>${escapeHtml(config.company_name || "PIXKEY3D")}</h1>
           <p class="cover-subtitle">${escapeHtml(config.cover_subtitle || "Catálogo de Productos")}</p>
       </div>
   </section>
-  <script>
-  (function () {
-    // Acceso discreto al panel: 5 toques rápidos sobre el logo o el nombre.
-    // No hay enlace ni pista visual para el cliente.
-    var gates = document.querySelectorAll('[data-admin-gate]');
-    if (!gates.length) return;
-    var taps = 0, timer = null;
-    function onTap() {
-      taps++;
-      clearTimeout(timer);
-      timer = setTimeout(function () { taps = 0; }, 1500);
-      if (taps >= 5) { taps = 0; window.location.href = '/admin/login'; }
-    }
-    gates.forEach(function (g) { g.addEventListener('click', onTap); });
-  })();
-  </script>
+  ${adminGateScript()}
 `;
 
 const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers: ReturnType<typeof getDefaultPriceTiers>) => `
@@ -537,7 +608,7 @@ const renderProductCard = (
 ) => `
   <article class="theme-card page-break-inside-avoid">
       ${product.image_url
-        ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" class="product-image">`
+        ? imgTag({ src: product.image_url, alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
         : `<div class="product-image-fallback">Sin imagen</div>`
       }
       <div class="product-content">
@@ -629,6 +700,141 @@ const renderContactSection = (config: Record<string, string>) => `
       </div>
   </section>
 `;
+
+// ── Landing page (secciones configurables) ─────────────────────────────────────
+
+const renderHeroSection = (config: Record<string, string>) => {
+  const heroImg = config.landing_hero_image || config.company_logo;
+  const ctaHref = landingTarget(config, config.landing_hero_cta_target);
+  const ctaLabel = config.landing_hero_cta_label || "Ver catálogo";
+  const isExternal = ctaHref.startsWith("http");
+  return `
+  <section class="page-section landing-hero">
+      ${renderShapes(config)}
+      <div class="page-shell landing-hero-shell">
+          ${heroImg
+            ? `<img src="${escapeHtml(heroImg)}" alt="Logo ${escapeHtml(config.company_name || "PIXKEY3D")}" class="landing-hero-image" decoding="async" fetchpriority="high" data-admin-gate>`
+            : `<div class="logo-fallback" data-admin-gate>Logo</div>`}
+          <h1 data-admin-gate>${escapeHtml(config.landing_hero_title || config.company_name || "PIXKEY3D")}</h1>
+          ${config.landing_hero_subtitle ? `<p class="landing-hero-subtitle">${escapeHtml(config.landing_hero_subtitle)}</p>` : ""}
+          <a class="theme-button landing-hero-cta" href="${escapeHtml(ctaHref)}"${isExternal ? ' target="_blank" rel="noopener"' : ""}>${escapeHtml(ctaLabel)}</a>
+      </div>
+  </section>
+`;
+};
+
+const renderBenefitsSection = (config: Record<string, string>) => {
+  let items: Array<{ icon?: string; title?: string; text?: string }> = [];
+  try {
+    const parsed = JSON.parse(config.landing_benefits_items || "[]");
+    if (Array.isArray(parsed)) items = parsed;
+  } catch {
+    items = [];
+  }
+  if (items.length === 0) return "";
+  return `
+  <section class="page-section landing-benefits">
+      ${renderShapes(config)}
+      <div class="page-shell">
+          ${config.landing_benefits_title ? `<h2 class="section-title">${escapeHtml(config.landing_benefits_title)}</h2>` : ""}
+          <div class="landing-benefits-grid">
+              ${items.map((it) => `
+              <article class="theme-card landing-benefit-card">
+                  ${it.icon ? `<div class="landing-benefit-icon" aria-hidden="true">${escapeHtml(it.icon)}</div>` : ""}
+                  <h3>${escapeHtml(it.title || "")}</h3>
+                  <p>${escapeHtml(it.text || "")}</p>
+              </article>`).join("")}
+          </div>
+      </div>
+  </section>
+`;
+};
+
+const renderFeaturedSection = (
+  config: Record<string, string>,
+  featured: Array<{ product: Product; priceTiers: ReturnType<typeof getDefaultPriceTiers> }>,
+) => {
+  if (featured.length === 0) return "";
+  return `
+  <section class="page-section landing-featured">
+      ${renderShapes(config)}
+      <div class="page-shell">
+          <h2 class="section-title">${escapeHtml(config.landing_featured_title || "Productos destacados")}</h2>
+          <div class="products-grid">
+              ${featured.map(({ product }) => `
+              <a class="theme-card landing-featured-card" href="/catalogo">
+                  ${product.image_url
+                    ? imgTag({ src: product.image_url, alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
+                    : `<div class="product-image-fallback">Sin imagen</div>`}
+                  <div class="product-content">
+                      <h3 class="product-title">${escapeHtml(product.name)}</h3>
+                      ${product.description ? `<p class="product-description">${escapeHtml(product.description)}</p>` : ""}
+                  </div>
+              </a>`).join("")}
+          </div>
+      </div>
+  </section>
+`;
+};
+
+const renderAboutSection = (config: Record<string, string>) => {
+  const text = config.landing_about_text || "";
+  const img = config.landing_about_image;
+  if (!cleanText(text) && !img) return "";
+  return `
+  <section class="page-section landing-about">
+      ${renderShapes(config)}
+      <div class="page-shell landing-about-shell">
+          ${img ? imgTag({ src: img, alt: config.landing_about_title || "Sobre nosotros", w: 600, h: 400, className: "landing-about-image", lazy: true }) : ""}
+          <div class="landing-about-body">
+              <h2 class="section-title">${escapeHtml(config.landing_about_title || "Sobre nosotros")}</h2>
+              ${renderAdminHtml(text)}
+          </div>
+      </div>
+  </section>
+`;
+};
+
+const renderCtaSection = (config: Record<string, string>) => {
+  const href = landingTarget(config, config.landing_cta_button_target);
+  const label = config.landing_cta_button_label || "Cotizar ahora";
+  const isExternal = href.startsWith("http");
+  return `
+  <section class="page-section landing-cta">
+      ${renderShapes(config)}
+      <div class="page-shell landing-cta-shell">
+          <h2 class="section-title">${escapeHtml(config.landing_cta_title || "")}</h2>
+          ${config.landing_cta_text ? `<p class="landing-cta-text">${escapeHtml(config.landing_cta_text)}</p>` : ""}
+          <a class="theme-button landing-cta-button" href="${escapeHtml(href)}"${isExternal ? ' target="_blank" rel="noopener"' : ""}>${escapeHtml(label)}</a>
+      </div>
+  </section>
+`;
+};
+
+const renderLanding = (origin: string) => {
+  const config = getConfig();
+  const defaultPriceTiers = getDefaultPriceTiers();
+  const featured = getFeaturedProducts().map((product) => ({
+    product,
+    priceTiers: product.use_default_pricing ? defaultPriceTiers : getProductPriceTiers(product.id),
+  }));
+  const seoProducts = toSeoProducts(featured);
+
+  const content = `
+    ${config.landing_hero_enabled !== "0" ? renderHeroSection(config) : ""}
+    ${config.landing_benefits_enabled !== "0" ? renderBenefitsSection(config) : ""}
+    ${config.landing_featured_enabled !== "0" ? renderFeaturedSection(config, featured) : ""}
+    ${config.landing_about_enabled !== "0" ? renderAboutSection(config) : ""}
+    ${config.landing_cta_enabled !== "0" ? renderCtaSection(config) : ""}
+    ${config.landing_contact_enabled !== "0" ? renderContactSection(config) : ""}
+    ${adminGateScript()}
+  `;
+  const seo = {
+    headMeta: buildHeadMeta({ pageType: "landing", config, origin, path: "/", products: seoProducts }),
+    jsonLd: buildJsonLd({ pageType: "landing", config, origin, path: "/", products: seoProducts }),
+  };
+  return Layout(config.company_name || "PIXKEY3D", content, config, seo, config.landing_hero_image || config.company_logo || undefined);
+};
 
 const renderPrintableCatalog = (showActions: boolean) => {
   const { config, defaultPriceTiers, productsWithTiers, categories, subcategories } = getCatalogData();
@@ -956,7 +1162,7 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
   `;
 };
 
-const renderInteractiveCatalog = () => {
+const renderInteractiveCatalog = (origin: string) => {
   const { config, defaultPriceTiers, productsWithTiers, categories, subcategories } = getCatalogData();
   const content = `
     ${renderCoverSection(config)}
@@ -965,10 +1171,35 @@ const renderInteractiveCatalog = () => {
     ${renderCartSection(config, productsWithTiers)}
     ${renderContactSection(config)}
   `;
-  return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo`, content, config);
+  const seoProducts = toSeoProducts(productsWithTiers);
+  const seo = {
+    headMeta: buildHeadMeta({ pageType: "catalog", config, origin, path: "/catalogo", products: seoProducts }),
+    jsonLd: buildJsonLd({ pageType: "catalog", config, origin, path: "/catalogo", products: seoProducts }),
+  };
+  return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo`, content, config, seo, config.company_logo || undefined);
 };
 
-publicRoutes.get("/", (c) => c.redirect("/catalogo"));
+// El landing es ahora la homepage en "/". El catálogo se conserva en "/catalogo".
+publicRoutes.get("/", (c) => c.html(renderLanding(resolveOrigin(c, getConfig()))));
+publicRoutes.get("/robots.txt", (c) => {
+  const origin = resolveOrigin(c, getConfig());
+  const body = `User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nDisallow: /imprimir\n\nSitemap: ${origin}/sitemap.xml\n`;
+  return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
+});
+publicRoutes.get("/sitemap.xml", (c) => {
+  const origin = resolveOrigin(c, getConfig());
+  const lastmod = new Date().toISOString().slice(0, 10);
+  // Solo URLs reales del sitio. Punto de extensión: agregar páginas de producto
+  // aquí cuando existan rutas de detalle por producto.
+  const urls = [
+    { loc: `${origin}/`, priority: "1.0" },
+    { loc: `${origin}/catalogo`, priority: "0.8" },
+  ];
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls
+    .map((u) => `  <url><loc>${escXml(u.loc)}</loc><lastmod>${lastmod}</lastmod><priority>${u.priority}</priority></url>`)
+    .join("\n")}\n</urlset>\n`;
+  return c.body(xml, 200, { "content-type": "application/xml; charset=utf-8" });
+});
 publicRoutes.post("/api/quotes", async (c) => {
   try {
     if (quoteRateLimited(quoteClientIp(c))) {
@@ -1104,7 +1335,7 @@ publicRoutes.post("/api/quotes", async (c) => {
     return c.json({ error: "No se pudo guardar la cotización." }, 500);
   }
 });
-publicRoutes.get("/catalogo", (c) => c.html(renderInteractiveCatalog()));
+publicRoutes.get("/catalogo", (c) => c.html(renderInteractiveCatalog(resolveOrigin(c, getConfig()))));
 publicRoutes.get("/imprimir", (c) => c.html(renderPrintableCatalog(c.req.query("embed") !== "1")));
 
 // ── PWA: assets en scope raíz ────────────────────────────────────────────
