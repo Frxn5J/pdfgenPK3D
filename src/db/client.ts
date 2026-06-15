@@ -14,9 +14,17 @@ export const db = new Database(process.env.CATALOG_DB_PATH || join(dataDir, "cat
 // PRAGMAs de conexión. foreign_keys activa los ON DELETE CASCADE/SET NULL del
 // esquema (SQLite los trae OFF por defecto). WAL permite lecturas concurrentes
 // mientras hay una escritura; busy_timeout evita errores SQLITE_BUSY puntuales.
+// journal_mode=WAL requiere permisos de escritura en el archivo; si el volumen
+// está montado read-only o el proceso carece de permisos, continuamos en DELETE
+// mode (comportamiento por defecto de SQLite — funcional, sin mejora de concurrencia).
 db.run("PRAGMA foreign_keys = ON");
-db.run("PRAGMA journal_mode = WAL");
-db.run("PRAGMA synchronous = NORMAL");
+try {
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA synchronous = NORMAL");
+} catch {
+  // ponytail: WAL no disponible (DB readonly o sin permisos) — continúa en DELETE mode
+  console.warn("[db] journal_mode=WAL no disponible — asegúrate de que el archivo DB y su directorio sean escribibles por el proceso.");
+}
 db.run("PRAGMA busy_timeout = 5000");
 
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
