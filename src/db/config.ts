@@ -2,7 +2,10 @@ import { db } from "./client";
 
 export function getConfig() {
   const rows = db.query<{key: string, value: string}, []>(`SELECT key, value FROM config`).all();
-  return rows.reduce((acc, row) => ({ ...acc, [row.key]: row.value }), {} as Record<string, string>);
+  // Mutación en sitio en vez de spread por fila (evita la copia O(n²) del acc).
+  const out: Record<string, string> = {};
+  for (const row of rows) out[row.key] = row.value;
+  return out;
 }
 
 export function updateConfig(updates: Record<string, string>) {

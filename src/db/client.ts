@@ -11,6 +11,14 @@ if (!fs.existsSync(dataDir)) {
 // tocar la base real. En producción queda sin definir y usa data/catalog.sqlite.
 export const db = new Database(process.env.CATALOG_DB_PATH || join(dataDir, "catalog.sqlite"), { create: true });
 
+// PRAGMAs de conexión. foreign_keys activa los ON DELETE CASCADE/SET NULL del
+// esquema (SQLite los trae OFF por defecto). WAL permite lecturas concurrentes
+// mientras hay una escritura; busy_timeout evita errores SQLITE_BUSY puntuales.
+db.run("PRAGMA foreign_keys = ON");
+db.run("PRAGMA journal_mode = WAL");
+db.run("PRAGMA synchronous = NORMAL");
+db.run("PRAGMA busy_timeout = 5000");
+
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
 
 export function initDb() {
@@ -463,4 +471,17 @@ export function initDb() {
     insertTier.run(101, 500, 23.00, "7 a 15 días hábiles");
     insertTier.run(501, null, 21.00, "A convenir");
   }
+
+  // Índices sobre columnas de FK/filtro. Evitan full-scans en los N+1 de la
+  // lista de cotizaciones, el panel de producción y el resumen financiero.
+  db.run(`CREATE INDEX IF NOT EXISTS idx_quote_items_quote ON quote_items(quote_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_quote_filaments_quote ON quote_filaments(quote_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_product_tiers_product ON product_price_tiers(product_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_products_subcategory ON products(subcategory_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_subcategories_category ON subcategories(category_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(date)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_payments_quote ON payments(quote_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category_id)`);
 }
