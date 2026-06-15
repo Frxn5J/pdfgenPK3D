@@ -10,7 +10,8 @@ COPY . .
 
 FROM oven/bun:1-slim
 
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# gosu: escalación segura root→bun en el entrypoint (patrón canónico Docker)
+RUN apt-get update && apt-get install -y ca-certificates gosu && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -20,12 +21,15 @@ COPY --from=builder /app .
 # Create volume mount point for sqlite and uploads, propiedad del usuario bun
 RUN mkdir -p /app/data/uploads && chown -R bun:bun /app/data
 
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 ENV NODE_ENV=production
 ENV PORT=3000
 
 EXPOSE 3000
 
-# No correr como root: la imagen oven/bun trae el usuario sin privilegios "bun".
-USER bun
-
+# El contenedor arranca como root para que el entrypoint pueda corregir
+# permisos del volumen montado, luego baja a "bun" antes de ejecutar la app.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bun", "run", "index.ts"]
