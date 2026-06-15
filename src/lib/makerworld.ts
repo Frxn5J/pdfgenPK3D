@@ -1,4 +1,5 @@
 import { settingValue } from "./llm";
+import { assertSafeOutboundUrl } from "./images";
 import { cleanText, decodeEntities, metaContent, tagText, uniqueImages, collectImageCandidates } from "./text";
 
 export type PrintProfile = {
@@ -28,7 +29,12 @@ export type MakerWorldDraft = {
 
 export const normalizeMakerWorldUrl = (rawUrl: string) => {
   const url = new URL(rawUrl);
-  if (!url.hostname.endsWith("makerworld.com")) throw new Error("El link debe ser de makerworld.com");
+  // Match exacto con frontera de subdominio: "makerworld.com" o "*.makerworld.com".
+  // endsWith() suelto aceptaría "evilmakerworld.com".
+  const host = url.hostname.toLowerCase();
+  if (host !== "makerworld.com" && !host.endsWith(".makerworld.com")) {
+    throw new Error("El link debe ser de makerworld.com");
+  }
   if (!url.pathname.startsWith("/es/") && /^\/(en|zh|de|fr|it|ja|sv|pt|ko)\//.test(url.pathname)) {
     url.pathname = url.pathname.replace(/^\/[a-z]{2}\//, "/es/");
   }
@@ -51,6 +57,7 @@ export const isCloudflareChallenge = (html: string) => {
 const flaresolverrUrl = () => settingValue("flaresolverr_url", "FLARESOLVERR_URL", "");
 
 export const fetchViaFlareSolverr = async (targetUrl: string): Promise<string> => {
+  await assertSafeOutboundUrl(targetUrl);
   const base = flaresolverrUrl();
   if (!base) throw new Error("FLARESOLVERR_URL no está configurada");
   console.log("[MakerWorld/FlareSolverr] POST", base, "→", targetUrl);
@@ -58,6 +65,8 @@ export const fetchViaFlareSolverr = async (targetUrl: string): Promise<string> =
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ cmd: "request.get", url: targetUrl, maxTimeout: 90000 }),
+    // Supera el maxTimeout interno (90s) de FlareSolverr para no colgar el worker.
+    signal: AbortSignal.timeout(95000),
   });
   const rawBody = await res.text();
   console.log("[MakerWorld/FlareSolverr] HTTP", res.status, "body len", rawBody.length);
@@ -84,6 +93,7 @@ const fetchViaPublicProxy = async (targetUrl: string): Promise<string> => {
     try {
       const res = await fetch(makeUrl(targetUrl), {
         headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" },
+        signal: AbortSignal.timeout(20000),
       });
       if (res.ok) {
         const html = await res.text();
@@ -95,6 +105,9 @@ const fetchViaPublicProxy = async (targetUrl: string): Promise<string> => {
 };
 
 export const fetchMakerWorldHtml = async (targetUrl: string): Promise<string> => {
+  // Bloquea SSRF: valida esquema + resuelve DNS y rechaza IPs internas antes de
+  // cualquier fetch (la URL viene del usuario, aunque autenticado).
+  await assertSafeOutboundUrl(targetUrl);
   const errors: string[] = [];
   if (flaresolverrUrl()) {
     try {
@@ -112,6 +125,7 @@ export const fetchMakerWorldHtml = async (targetUrl: string): Promise<string> =>
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "accept-language": "es-ES,es;q=0.9,en;q=0.8",
       },
+      signal: AbortSignal.timeout(20000),
     });
     if (response.ok) {
       const html = await response.text();

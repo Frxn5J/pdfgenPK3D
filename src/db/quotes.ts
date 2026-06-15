@@ -226,8 +226,53 @@ export function deleteFilament(id: number) {
   db.run(`DELETE FROM filaments WHERE id = ?`, [id]);
 }
 
-export function subtractFilamentStock(filamentId: number, grams: number) {
-  db.run(`UPDATE filaments SET stock_grams = MAX(0, stock_grams - ?) WHERE id = ?`, [grams, filamentId]);
+// Reprograma una cotización de forma atómica: actualiza impresora/fecha,
+// reemplaza los filamentos asignados y ajusta el stock en UNA transacción.
+//
+// El stock se ajusta por DELTA NETO por filamento (gramos nuevos − gramos
+// previos), aplicado en una sola operación. Esto evita dos defectos del flujo
+// anterior (restore-todo → replace → subtract-todo, sin transacción):
+//   1. Corrupción si fallaba a mitad de camino (no era atómico).
+//   2. El clamp MAX(0,...) entre el restore y el subtract perdía la deuda real
+//      cuando el stock tocaba 0, sobre-acreditando en la siguiente reprogramación.
+// No se aplica clamp: el stock puede quedar negativo (señal legítima de
+// sobre-asignación) y así los ajustes son siempre reversibles. La barra de
+// progreso en la vista hace clamp solo para mostrar.
+export function applyQuoteSchedule(
+  quoteId: number,
+  printerId: number | null,
+  scheduledStart: string | null,
+  entries: { filament_id: number; grams_used: number }[],
+) {
+  const insert = db.prepare(`INSERT INTO quote_filaments (quote_id, filament_id, grams_used) VALUES (?, ?, ?)`);
+  const adjustStock = db.prepare(`UPDATE filaments SET stock_grams = stock_grams - ? WHERE id = ?`);
+
+  const tx = db.transaction(() => {
+    const delta = new Map<number, number>();
+    for (const pf of getQuoteFilaments(quoteId)) {
+      delta.set(pf.filament_id, (delta.get(pf.filament_id) || 0) - pf.grams_used);
+    }
+    for (const e of entries) {
+      if (e.filament_id && e.grams_used > 0) {
+        delta.set(e.filament_id, (delta.get(e.filament_id) || 0) + e.grams_used);
+      }
+    }
+
+    db.run(`UPDATE quotes SET printer_id = ?, scheduled_start = ? WHERE id = ?`, [printerId, scheduledStart, quoteId]);
+
+    db.run(`DELETE FROM quote_filaments WHERE quote_id = ?`, [quoteId]);
+    for (const e of entries) {
+      if (e.filament_id && e.grams_used > 0) {
+        insert.run(quoteId, e.filament_id, e.grams_used);
+      }
+    }
+
+    for (const [filamentId, d] of delta) {
+      if (d !== 0) adjustStock.run(d, filamentId);
+    }
+  });
+
+  tx();
 }
 
 // ── Filamentos por cotización ─────────────────────────────────────────────────

@@ -34,6 +34,8 @@ export interface Product {
   sort_order: number;
   category_id: number | null;
   subcategory_id: number | null;
+  featured: number;
+  featured_order: number;
 }
 
 export type ProductGroup = { category: Category | null; products: Product[] };
@@ -123,6 +125,14 @@ export function getProducts() {
 
 export function getProduct(id: number) {
   return db.query<Product, [number]>(`SELECT * FROM products WHERE id = ?`).get(id);
+}
+
+export function getFeaturedProducts(): Product[] {
+  return db
+    .query<Product, []>(
+      `SELECT * FROM products WHERE featured = 1 ORDER BY featured_order ASC, sort_order ASC, id DESC`,
+    )
+    .all();
 }
 
 export function getProductsGroupedByCategory(): ProductGroup[] {

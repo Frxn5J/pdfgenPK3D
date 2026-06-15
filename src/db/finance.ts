@@ -167,7 +167,10 @@ export function getFinancialSummary(from?: string, to?: string): FinancialSummar
   const fPaid = dateFilter("created_at");
   const paidQuoteCount = db.query<{ count: number }, string[]>(`SELECT COUNT(*) as count FROM quotes WHERE status IN ('despachado', 'produccion', 'finalizado') ${fPaid.clause}`).get(...fPaid.params)?.count || 0;
   const fPending = dateFilter("created_at");
-  const pendingRevenue = db.query<{ total: number }, string[]>(`SELECT COALESCE(SUM(grand_total), 0) as total FROM quotes WHERE status IN ('no_despachado', 'despachado') ${fPending.clause}`).get(...fPending.params)?.total || 0;
+  // 'new' es el estado por defecto de una cotización recién creada y la app lo
+  // trata como equivalente a 'no_despachado' (pendiente de despacho), así que
+  // debe contar en el ingreso pendiente.
+  const pendingRevenue = db.query<{ total: number }, string[]>(`SELECT COALESCE(SUM(grand_total), 0) as total FROM quotes WHERE status IN ('new', 'no_despachado', 'despachado') ${fPending.clause}`).get(...fPending.params)?.total || 0;
 
   const fCat = dateFilter("e.date");
   const expensesByCategory = db.query<{ category_name: string; category_icon: string; total: number }, string[]>(`

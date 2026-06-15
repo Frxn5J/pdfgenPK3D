@@ -1,6 +1,9 @@
 import { Hono } from "hono";
-import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, getSubcategories, type Category, type Subcategory, type Product } from "../db/schema";
+import { createQuote, getConfig, getProducts, getFeaturedProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, getSubcategories, type Category, type Subcategory, type Product } from "../db/schema";
 import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegisterScript, sendPushToAll } from "../pwa";
+import { imgTag } from "../lib/html";
+import { cleanText } from "../lib/text";
+import { buildHeadMeta, buildJsonLd, resolveOrigin, escXml, type SeoProduct } from "../lib/seo";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -167,6 +170,8 @@ const buildThemeCss = (config: Record<string, string>) => {
       --shape-color: ${cssValue(config.decorative_shape_color, "rgba(239, 68, 68, 0.12)")};
       --shape-opacity: ${opacity(config.decorative_shape_opacity)};
       --shape-blur: ${cssValue(config.decorative_shape_blur, "0px")};
+      --ln-font-heading: 'Montserrat', sans-serif;
+      --ln-font-body: 'Montserrat', sans-serif;
     }
 
     * { box-sizing: border-box; }
@@ -291,6 +296,127 @@ const buildThemeCss = (config: Record<string, string>) => {
     .contact-section h1, .contact-section h2, .contact-section h3, .contact-section h4, .contact-section p { color: var(--contact-text); }
     .contact-section .page-shell { width: min(860px, 100%); }
 
+    /* ── Landing page (legacy — kept for backward compat) ── */
+    .landing-featured-card { display: block; text-decoration: none; color: inherit; }
+
+    /* ── Landing redesign v2 ── */
+    .ln-nav { position: fixed; top: 0; width: 100%; z-index: 50; background: color-mix(in srgb, var(--cover-bg) 92%, transparent); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid color-mix(in srgb, var(--cover-text) 12%, transparent); }
+    .ln-nav-inner { display: flex; justify-content: space-between; align-items: center; padding: 1rem 2rem; max-width: 1440px; margin: 0 auto; gap: 1rem; }
+    .ln-brand { display: flex; align-items: center; gap: .5rem; text-decoration: none; color: var(--cover-text); font-family: var(--font-heading); font-size: 1.125rem; font-weight: 700; }
+    .ln-brand img { width: 2rem; height: 2rem; object-fit: contain; }
+    .ln-nav-links { display: flex; gap: 2rem; align-items: center; }
+    .ln-nav-links a { text-decoration: none; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; color: color-mix(in srgb, var(--cover-text) 60%, transparent); transition: color .15s; }
+    .ln-nav-links a:hover { color: var(--cover-text); }
+    .ln-nav-cta { display: inline-flex; align-items: center; justify-content: center; background: var(--brand-primary); color: white; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; padding: .625rem 1.25rem; border-radius: var(--button-radius); text-decoration: none; transition: filter .15s, transform .1s; white-space: nowrap; }
+    .ln-nav-cta:hover { filter: brightness(.88); }
+    .ln-nav-cta:active { transform: scale(.97); }
+
+    .ln-nav-inner { font-family: var(--ln-font-body); }
+    .ln-main { padding-top: 72px; font-family: var(--ln-font-body); }
+
+    .ln-hero { min-height: calc(100vh - 72px); display: grid; place-items: center; padding: 4rem 2rem; background: var(--cover-bg); color: var(--cover-text); position: relative; overflow: hidden; }
+    .ln-hero-grid-bg { position: absolute; inset: 0; pointer-events: none; opacity: .07; background-image: linear-gradient(to right, var(--cover-text) 1px, transparent 1px), linear-gradient(to bottom, var(--cover-text) 1px, transparent 1px); background-size: 40px 40px; }
+    .ln-hero-inner { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: center; width: min(1440px, 100%); margin: 0 auto; }
+    .ln-hero-text { display: flex; flex-direction: column; gap: 1.5rem; }
+    .ln-hero h1 { color: var(--cover-text); font-family: var(--ln-font-heading); font-size: clamp(1.9rem, 4.5vw, 2.75rem); line-height: 1.2; letter-spacing: -.02em; margin: 0; }
+    .ln-hero h1 span { color: color-mix(in srgb, var(--cover-text) 52%, transparent); }
+    .ln-hero-sub { color: color-mix(in srgb, var(--cover-text) 70%, transparent); font-size: 1.075rem; line-height: 1.6; margin: 0; }
+    .ln-hero-actions { display: flex; flex-wrap: wrap; gap: 1rem; }
+    .ln-btn-primary { display: inline-flex; align-items: center; gap: .5rem; background: var(--brand-primary); color: white; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; padding: 1rem 2rem; border-radius: var(--button-radius); text-decoration: none; transition: filter .15s, transform .1s; }
+    .ln-btn-primary:hover { filter: brightness(.88); }
+    .ln-btn-primary:active { transform: scale(.97); }
+    .ln-btn-outline { display: inline-flex; align-items: center; justify-content: center; background: transparent; color: var(--cover-text); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; padding: 1rem 2rem; border-radius: var(--button-radius); border: 1px solid color-mix(in srgb, var(--cover-text) 28%, transparent); text-decoration: none; transition: background .15s; }
+    .ln-btn-outline:hover { background: color-mix(in srgb, var(--cover-text) 8%, transparent); }
+    .ln-btn-solid { display: inline-flex; align-items: center; gap: .5rem; background: var(--brand-primary); color: white; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; padding: .75rem 1.5rem; border-radius: var(--button-radius); text-decoration: none; transition: filter .15s, transform .1s; white-space: nowrap; }
+    .ln-btn-solid:hover { filter: brightness(.88); }
+    .ln-btn-solid:active { transform: scale(.97); }
+    .ln-hero-trust { display: flex; flex-wrap: wrap; gap: 1.5rem; padding-top: 2rem; border-top: 1px solid color-mix(in srgb, var(--cover-text) 12%, transparent); }
+    .ln-trust-item { display: flex; align-items: center; gap: .5rem; font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; color: color-mix(in srgb, var(--cover-text) 52%, transparent); }
+    .ln-trust-item .msi { font-size: 1rem; }
+    .ln-hero-img-wrap { position: relative; border-radius: var(--radius); overflow: hidden; aspect-ratio: 4/3; border: 1px solid color-mix(in srgb, var(--cover-text) 12%, transparent); background: color-mix(in srgb, var(--cover-bg) 60%, black); }
+    .ln-hero-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
+    .ln-hero-logo-fallback { width: 100%; height: 100%; display: grid; place-items: center; color: color-mix(in srgb, var(--cover-text) 28%, transparent); font-size: 4rem; font-family: var(--ln-font-heading); font-weight: 700; }
+
+    .ln-section-dark { padding: 5rem 2rem; background: color-mix(in srgb, var(--cover-bg) 88%, black); border-top: 1px solid color-mix(in srgb, var(--cover-text) 10%, transparent); color: var(--cover-text); }
+    .ln-section-light { padding: 5rem 2rem; background: var(--products-bg); color: var(--body-text); }
+    .ln-section-mid { padding: 5rem 2rem; background: var(--welcome-bg); color: var(--body-text); }
+    .ln-inner { width: min(1440px, 100%); margin: 0 auto; }
+    .ln-inner-narrow { width: min(820px, 100%); margin: 0 auto; }
+
+    .ln-heading-dark { color: var(--cover-text); font-family: var(--ln-font-heading); font-size: clamp(1.6rem, 3.5vw, 2.4rem); letter-spacing: -.02em; margin: 0 0 .75rem; }
+    .ln-heading-light { color: var(--heading-text); font-family: var(--ln-font-heading); font-size: clamp(1.6rem, 3.5vw, 2.4rem); letter-spacing: -.02em; margin: 0 0 .75rem; text-align: center; }
+    .ln-sub-dark { color: color-mix(in srgb, var(--cover-text) 62%, transparent); font-size: 1rem; margin: 0 0 2.5rem; max-width: 60ch; }
+    .ln-sub-light { color: var(--muted-text); font-size: 1rem; margin: 0 0 2.5rem; text-align: center; }
+
+    /* Pricing table */
+    .ln-table-wrap { overflow-x: auto; border: 1px solid color-mix(in srgb, var(--cover-text) 14%, transparent); border-radius: var(--radius); background: color-mix(in srgb, var(--cover-bg) 70%, black); }
+    .ln-table { width: 100%; border-collapse: collapse; min-width: 440px; }
+    .ln-table thead tr { background: color-mix(in srgb, var(--cover-bg) 55%, black); }
+    .ln-table th { padding: .9rem 1.5rem; text-align: left; font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; color: color-mix(in srgb, var(--cover-text) 55%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--cover-text) 14%, transparent); background: transparent; }
+    .ln-table td { padding: 1rem 1.5rem; color: var(--cover-text); font-size: .9rem; font-weight: 500; border-top: 1px solid color-mix(in srgb, var(--cover-text) 8%, transparent); }
+    .ln-table tr:hover td { background: color-mix(in srgb, var(--cover-text) 4%, transparent); }
+    .ln-price-hi { color: var(--cover-text); font-weight: 700; }
+    .ln-price-lo { color: color-mix(in srgb, var(--cover-text) 52%, transparent); font-style: italic; }
+    .ln-table-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1.25rem; }
+    .ln-table-note { display: flex; align-items: center; gap: .5rem; font-size: .68rem; letter-spacing: .05em; color: color-mix(in srgb, var(--cover-text) 52%, transparent); }
+    .ln-table-note strong { color: var(--cover-text); }
+    .ln-table-note .msi { font-size: 1rem; }
+
+    /* Process steps */
+    .ln-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-top: 3rem; }
+    .ln-step { display: flex; flex-direction: column; gap: 1rem; padding: 1.5rem; border: 1px solid color-mix(in srgb, var(--cover-text) 12%, transparent); border-radius: var(--radius); background: color-mix(in srgb, var(--cover-bg) 65%, black); }
+    .ln-step-num { width: 2rem; height: 2rem; border-radius: 50%; background: var(--brand-primary); color: white; display: grid; place-items: center; font-size: .72rem; font-weight: 700; flex-shrink: 0; }
+    .ln-step h3 { color: var(--cover-text); margin: 0; font-size: 1rem; font-weight: 600; }
+    .ln-step p { color: color-mix(in srgb, var(--cover-text) 58%, transparent); margin: 0; font-size: .9rem; line-height: 1.6; }
+    .ln-steps-cta { text-align: center; margin-top: 2.5rem; }
+
+    /* Location */
+    .ln-location-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4rem; align-items: center; }
+    .ln-location-items { display: flex; flex-direction: column; gap: .75rem; margin-top: 1.5rem; }
+    .ln-location-item { display: flex; align-items: flex-start; gap: .75rem; padding: 1rem; border-radius: var(--radius); border: 1px solid var(--card-border); background: var(--card-bg); }
+    .ln-location-item .msi { color: var(--brand-primary); flex-shrink: 0; margin-top: .1rem; }
+    .ln-location-item-body { display: flex; flex-direction: column; gap: .15rem; }
+    .ln-location-label { font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; color: var(--muted-text); }
+    .ln-location-value { color: var(--body-text); font-size: .95rem; }
+    .ln-location-value a { color: var(--brand-primary); text-decoration: none; }
+    .ln-map-placeholder { border-radius: var(--radius); aspect-ratio: 4/3; border: 1px solid var(--card-border); background: var(--products-bg); display: grid; place-items: center; color: var(--muted-text); text-align: center; padding: 2rem; }
+    .ln-map-link { display: inline-flex; align-items: center; gap: .5rem; color: var(--brand-primary); text-decoration: none; font-weight: 600; margin-top: .75rem; font-size: .9rem; }
+
+    /* FAQ */
+    .ln-faq-list { display: flex; flex-direction: column; margin-top: 2.5rem; }
+    details.ln-faq-item { border-bottom: 1px solid color-mix(in srgb, var(--cover-text) 10%, transparent); }
+    details.ln-faq-item:first-child { border-top: 1px solid color-mix(in srgb, var(--cover-text) 10%, transparent); }
+    details.ln-faq-item summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: center; padding: 1.2rem 0; gap: 1rem; color: var(--cover-text); font-weight: 600; font-size: .95rem; }
+    details.ln-faq-item summary::-webkit-details-marker { display: none; }
+    details.ln-faq-item summary::after { content: "+"; flex-shrink: 0; width: 1.5rem; height: 1.5rem; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--cover-text) 24%, transparent); border-radius: 50%; font-size: .9rem; color: color-mix(in srgb, var(--cover-text) 52%, transparent); }
+    details.ln-faq-item[open] summary::after { content: "−"; }
+    .ln-faq-answer { padding: 0 0 1.2rem; color: color-mix(in srgb, var(--cover-text) 62%, transparent); font-size: .9rem; line-height: 1.7; margin: 0; }
+
+    /* CTA banner */
+    .ln-cta-banner { padding: 5rem 2rem; background: var(--brand-primary); color: white; text-align: center; }
+    .ln-cta-banner h2 { color: white; font-family: var(--ln-font-heading); font-size: clamp(1.6rem, 3.5vw, 2.4rem); letter-spacing: -.02em; margin: 0 0 .75rem; }
+    .ln-cta-banner p { color: rgba(255,255,255,.84); margin: 0 0 2rem; max-width: 52ch; margin-left: auto; margin-right: auto; font-size: 1.05rem; }
+    .ln-cta-btn { display: inline-flex; align-items: center; gap: .5rem; background: white; color: var(--brand-primary); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; padding: 1rem 2rem; border-radius: var(--button-radius); text-decoration: none; transition: filter .15s, transform .1s; }
+    .ln-cta-btn:hover { filter: brightness(.96); }
+    .ln-cta-btn:active { transform: scale(.97); }
+
+    /* Footer */
+    .ln-footer { padding: 4rem 2rem; background: color-mix(in srgb, var(--cover-bg) 92%, black); border-top: 1px solid color-mix(in srgb, var(--cover-text) 10%, transparent); color: var(--cover-text); font-family: var(--ln-font-body); }
+    .ln-footer-inner { width: min(1440px, 100%); margin: 0 auto; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 2rem; }
+    .ln-footer-brand { display: flex; flex-direction: column; gap: 1rem; }
+    .ln-footer-brand-name { display: flex; align-items: center; gap: .5rem; font-family: var(--font-heading); font-size: 1.1rem; font-weight: 700; color: var(--cover-text); }
+    .ln-footer-brand-name img { width: 1.5rem; height: 1.5rem; object-fit: contain; filter: grayscale(1) brightness(2); }
+    .ln-footer-tagline { font-size: .78rem; color: color-mix(in srgb, var(--cover-text) 52%, transparent); line-height: 1.5; margin: 0; }
+    .ln-footer-copy { font-size: .7rem; color: color-mix(in srgb, var(--cover-text) 38%, transparent); margin: auto 0 0; }
+    .ln-footer-col { display: flex; flex-direction: column; gap: .75rem; }
+    .ln-footer-col-title { font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; color: color-mix(in srgb, var(--cover-text) 42%, transparent); margin: 0; }
+    .ln-footer-col a { font-size: .92rem; color: color-mix(in srgb, var(--cover-text) 65%, transparent); text-decoration: none; transition: color .15s; display: flex; align-items: center; gap: .4rem; }
+    .ln-footer-col a:hover { color: var(--cover-text); }
+    .ln-footer-col a .msi { font-size: 1rem; }
+
+    /* Material Symbols helper */
+    .msi { font-family: 'Material Symbols Outlined'; font-variation-settings: 'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24; font-style: normal; display: inline-block; vertical-align: middle; line-height: 1; }
+
     .theme-shapes { position: absolute; inset: 0; pointer-events: none; opacity: var(--shape-opacity); filter: blur(var(--shape-blur)); z-index: 0; }
     .theme-shapes span { position: absolute; display: block; background: var(--shape-color); }
     .shape-organic .shape-one { width: 380px; height: 380px; top: -120px; right: -90px; border-radius: 42% 58% 63% 37% / 42% 40% 60% 58%; }
@@ -309,6 +435,13 @@ const buildThemeCss = (config: Record<string, string>) => {
     @media (max-width: 900px) {
       .products-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .cart-line { grid-template-columns: 1fr; }
+      .ln-hero-inner { grid-template-columns: 1fr; }
+      .ln-hero-img-wrap { display: none; }
+      .ln-steps { grid-template-columns: 1fr; }
+      .ln-location-grid { grid-template-columns: 1fr; }
+      .ln-map-placeholder { display: none; }
+      .ln-footer-inner { grid-template-columns: 1fr 1fr; gap: 2rem 3rem; }
+      .ln-nav-links { display: none; }
     }
     @media (max-width: 640px) {
       body.catalog-body { --section-x: 1rem; }
@@ -320,6 +453,13 @@ const buildThemeCss = (config: Record<string, string>) => {
       .cart-control { grid-template-columns: 1fr; }
       .quote-actions { justify-content: stretch; }
       .quote-button, .secondary-button { width: 100%; }
+      .ln-hero { padding: 3rem 1rem; }
+      .ln-hero-actions { flex-direction: column; }
+      .ln-btn-primary, .ln-btn-outline { text-align: center; justify-content: center; }
+      .ln-section-dark, .ln-section-light, .ln-section-mid { padding: 3.5rem 1rem; }
+      .ln-footer-inner { grid-template-columns: 1fr; }
+      .ln-nav-inner { padding: 1rem; }
+      .ln-nav-cta { display: none; }
     }
     @media print {
       .no-print, .quote-cart, .customer-modal { display: none !important; }
@@ -342,7 +482,18 @@ const renderShapes = (config: Record<string, string>) => {
   return `<div class="theme-shapes shape-${style}" aria-hidden="true"><span class="shape-one"></span><span class="shape-two"></span><span class="shape-three"></span></div>`;
 };
 
-const Layout = (title: string, content: string, config: Record<string, string>) => {
+// `seo` opcional: cuando se provee, headMeta YA incluye <title> + meta/OG/canonical
+// y jsonLd el bloque structured-data. Cuando falta (solo /imprimir), se emite un
+// <title> legacy + noindex para no indexar la vista imprimible (contenido duplicado).
+// `lcpImage` precarga la imagen principal (logo/hero) para mejorar LCP.
+const Layout = (
+  title: string,
+  content: string,
+  config: Record<string, string>,
+  seo?: { headMeta: string; jsonLd: string },
+  lcpImage?: string,
+  extraHead?: string,
+) => {
   const cardStyle = choice(config.card_style, ["flat", "bordered", "minimal"], "flat");
   const density = choice(config.layout_density, ["compact", "comfortable", "spacious"], "comfortable");
   const imageFit = choice(config.product_image_fit, ["cover", "contain"], "cover");
@@ -353,9 +504,12 @@ const Layout = (title: string, content: string, config: Record<string, string>) 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${escapeHtml(title)}</title>
+    ${seo ? seo.headMeta : `<title>${escapeHtml(title)}</title>\n    <meta name="robots" content="noindex">`}
     ${pwaHeadTags(config)}
+    ${lcpImage ? `<link rel="preload" as="image" href="${escapeHtml(lcpImage)}" fetchpriority="high">` : ""}
     <style>${buildThemeCss(config)}</style>
+    ${seo ? seo.jsonLd : ""}
+    ${extraHead || ""}
 </head>
 <body class="catalog-body density-${density} card-style-${cardStyle} image-fit-${imageFit}">
     ${content}
@@ -364,6 +518,48 @@ const Layout = (title: string, content: string, config: Record<string, string>) 
 </html>
 `;
 };
+
+// SeoProduct[] desde las entradas catálogo (precio low/high = min/max de tiers).
+const toSeoProducts = (
+  entries: Array<{ product: Product; priceTiers: ReturnType<typeof getDefaultPriceTiers> }>,
+): SeoProduct[] =>
+  entries.map(({ product, priceTiers }) => {
+    const prices = priceTiers.map((t) => Number(t.price)).filter((n) => Number.isFinite(n));
+    return {
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      image_url: product.image_url,
+      priceLow: prices.length ? Math.min(...prices) : null,
+      priceHigh: prices.length ? Math.max(...prices) : null,
+    };
+  });
+
+// Resuelve el destino de un botón del landing: WhatsApp o ruta interna segura.
+const landingTarget = (config: Record<string, string>, target: string | undefined) => {
+  if (target === "whatsapp") {
+    return `https://wa.me/${normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304")}`;
+  }
+  return target && target.startsWith("/") ? target : "/catalogo";
+};
+
+// Acceso discreto al panel admin: 5 toques rápidos sobre un elemento [data-admin-gate].
+const adminGateScript = () => `
+  <script>
+  (function () {
+    var gates = document.querySelectorAll('[data-admin-gate]');
+    if (!gates.length) return;
+    var taps = 0, timer = null;
+    function onTap() {
+      taps++;
+      clearTimeout(timer);
+      timer = setTimeout(function () { taps = 0; }, 1500);
+      if (taps >= 5) { taps = 0; window.location.href = atob('L2FkbWluL2xvZ2lu'); }
+    }
+    gates.forEach(function (g) { g.addEventListener('click', onTap); });
+  })();
+  </script>
+`;
 
 const getCatalogData = () => {
   const config = getConfig();
@@ -474,29 +670,14 @@ const renderCoverSection = (config: Record<string, string>) => `
       ${renderShapes(config)}
       <div class="page-shell">
           ${config.company_logo
-            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image" data-admin-gate>`
+            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image" decoding="async" fetchpriority="high" data-admin-gate>`
             : `<div class="logo-fallback" data-admin-gate>Logo</div>`
           }
           <h1 data-admin-gate>${escapeHtml(config.company_name || "PIXKEY3D")}</h1>
           <p class="cover-subtitle">${escapeHtml(config.cover_subtitle || "Catálogo de Productos")}</p>
       </div>
   </section>
-  <script>
-  (function () {
-    // Acceso discreto al panel: 5 toques rápidos sobre el logo o el nombre.
-    // No hay enlace ni pista visual para el cliente.
-    var gates = document.querySelectorAll('[data-admin-gate]');
-    if (!gates.length) return;
-    var taps = 0, timer = null;
-    function onTap() {
-      taps++;
-      clearTimeout(timer);
-      timer = setTimeout(function () { taps = 0; }, 1500);
-      if (taps >= 5) { taps = 0; window.location.href = '/admin/login'; }
-    }
-    gates.forEach(function (g) { g.addEventListener('click', onTap); });
-  })();
-  </script>
+  ${adminGateScript()}
 `;
 
 const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers: ReturnType<typeof getDefaultPriceTiers>) => `
@@ -537,7 +718,7 @@ const renderProductCard = (
 ) => `
   <article class="theme-card page-break-inside-avoid">
       ${product.image_url
-        ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" class="product-image">`
+        ? imgTag({ src: product.image_url, alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
         : `<div class="product-image-fallback">Sin imagen</div>`
       }
       <div class="product-content">
@@ -629,6 +810,349 @@ const renderContactSection = (config: Record<string, string>) => `
       </div>
   </section>
 `;
+
+// ── Landing page v2 ────────────────────────────────────────────────────────────
+
+const msi = (name: string, cls = "") =>
+  `<span class="material-symbols-outlined${cls ? ` ${cls}` : ""}" aria-hidden="true">${escapeHtml(name)}</span>`;
+
+const waHref = (config: Record<string, string>, msg = "") => {
+  const num = normalizeWhatsappNumber(config.quote_whatsapp_number || "");
+  return `https://wa.me/${num}${msg ? `?text=${encodeURIComponent(msg)}` : ""}`;
+};
+
+const renderLandingNav = (config: Record<string, string>) => {
+  const logo = config.landing_logo || config.company_logo;
+  const name = escapeHtml(config.company_name || "PIXKEY3D");
+  return `
+<header class="ln-nav" role="banner">
+  <div class="ln-nav-inner">
+    <a class="ln-brand" href="/" data-admin-gate>
+      ${logo ? `<img src="${escapeHtml(logo)}" alt="${name}" width="32" height="32">` : ""}
+      ${name}
+    </a>
+    <nav class="ln-nav-links" aria-label="Navegación principal">
+      <a href="#catalogo">Catálogo</a>
+      <a href="#precios">Precios</a>
+      <a href="#proceso">Proceso</a>
+      <a href="#ubicacion">Ubicación</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <a class="ln-nav-cta" href="${escapeHtml(waHref(config))}" target="_blank" rel="noopener noreferrer">
+      Cotizar por WhatsApp
+    </a>
+  </div>
+</header>`;
+};
+
+const renderLandingHero = (config: Record<string, string>) => {
+  const heroImg = config.landing_hero_image || config.company_logo;
+  const title = config.landing_hero_title || config.company_name || "Llaveros y Figuras 3D Personalizados";
+  const subtitle = config.landing_hero_subtitle || "Producción en impresión 3D para empresas y eventos. Precios de mayoreo desde $25 MXN, envíos a todo México por Estafeta y recolección local en SLP.";
+  const ctaHref = landingTarget(config, config.landing_hero_cta_target);
+  const ctaLabel = config.landing_hero_cta_label || "Ver catálogo completo ↓";
+  const isExternal = ctaHref.startsWith("http");
+  return `
+<section class="ln-hero" id="inicio">
+  <div class="ln-hero-grid-bg" aria-hidden="true"></div>
+  <div class="ln-hero-inner">
+    <div class="ln-hero-text">
+      <h1>${escapeHtml(title)}</h1>
+      <p class="ln-hero-sub">${escapeHtml(subtitle)}</p>
+      <div class="ln-hero-actions">
+        <a class="ln-btn-primary" href="${escapeHtml(waHref(config))}" target="_blank" rel="noopener noreferrer">
+          ${msi("chat")} Cotizar por WhatsApp
+        </a>
+        <a class="ln-btn-outline" href="${escapeHtml(ctaHref)}"${isExternal ? ' target="_blank" rel="noopener"' : ""}>
+          ${escapeHtml(ctaLabel)}
+        </a>
+      </div>
+      <div class="ln-hero-trust" aria-label="Características clave">
+        <div class="ln-trust-item">${msi("inventory_2", "msi")} <span>Min. 25 piezas</span></div>
+        <div class="ln-trust-item">${msi("local_shipping", "msi")} <span>Envío Nacional</span></div>
+        <div class="ln-trust-item">${msi("schedule", "msi")} <span>Lun–Sáb 9–18h</span></div>
+      </div>
+    </div>
+    <div class="ln-hero-img-wrap" aria-hidden="true">
+      ${heroImg
+        ? `<img src="${escapeHtml(heroImg)}" alt="" decoding="async" fetchpriority="high" loading="eager" width="800" height="600">`
+        : `<div class="ln-hero-logo-fallback">3D</div>`}
+    </div>
+  </div>
+</section>`;
+};
+
+const renderLandingPricing = (config: Record<string, string>, tiers: ReturnType<typeof getDefaultPriceTiers>) => {
+  const shipping = getShippingSettings(config);
+  const sortedTiers = [...tiers].sort((a, b) => a.min_volume - b.min_volume);
+  const tiersHtml = sortedTiers.length === 0
+    ? `<tr><td colspan="3" style="text-align:center;padding:2rem;color:inherit;opacity:.5">Sin niveles configurados.</td></tr>`
+    : sortedTiers.map((t) => `
+      <tr>
+        <td class="ln-price-hi">${escapeHtml(formatVolume(t.min_volume, t.max_volume))}</td>
+        <td class="ln-price-hi">${t.max_volume === null ? `<span class="ln-price-lo">Cotizar proyecto</span>` : `${currency.format(Number(t.price))}`}</td>
+        <td>${escapeHtml(t.delivery_time || "—")}</td>
+      </tr>`).join("");
+
+  const freeNote = shipping.freeMinPieces
+    ? ` · <strong>Gratis desde ${shipping.freeMinPieces} piezas</strong>`
+    : "";
+
+  return `
+<section class="ln-section-dark" id="precios">
+  <div class="ln-inner">
+    <h2 class="ln-heading-dark">¿Cuánto cuestan los llaveros 3D al mayoreo?</h2>
+    <p class="ln-sub-dark">Precios escalonados por volumen. Materiales de alta calidad, precisión de grado industrial.</p>
+    <div class="ln-table-wrap">
+      <table class="ln-table">
+        <thead>
+          <tr><th>Cantidad</th><th>Precio por pieza</th><th>Tiempo de producción</th></tr>
+        </thead>
+        <tbody>${tiersHtml}</tbody>
+      </table>
+    </div>
+    <div class="ln-table-footer">
+      <p class="ln-table-note">${msi("info", "msi")} Envío ${currency.format(shipping.price)} MXN vía ${escapeHtml(shipping.provider)}${freeNote}</p>
+      <a class="ln-btn-solid" href="${escapeHtml(waHref(config, "Hola, me interesa una cotización empresarial"))}" target="_blank" rel="noopener noreferrer">
+        Solicitar cotización empresarial
+      </a>
+    </div>
+  </div>
+</section>`;
+};
+
+const renderLandingFeatured = (
+  config: Record<string, string>,
+  featured: Array<{ product: Product; priceTiers: ReturnType<typeof getDefaultPriceTiers> }>,
+) => {
+  if (featured.length === 0) return "";
+  return `
+<section class="ln-section-light" id="catalogo">
+  <div class="ln-inner">
+    <h2 class="ln-heading-light">${escapeHtml(config.landing_featured_title || "Nuestros Productos")}</h2>
+    <div class="products-grid" style="margin-top:2rem;">
+      ${featured.map(({ product }) => `
+      <a class="theme-card landing-featured-card" href="/catalogo">
+        ${product.image_url
+          ? imgTag({ src: product.image_url, alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
+          : `<div class="product-image-fallback">Sin imagen</div>`}
+        <div class="product-content">
+          <h3 class="product-title">${escapeHtml(product.name)}</h3>
+          ${product.description ? `<p class="product-description">${escapeHtml(product.description)}</p>` : ""}
+        </div>
+      </a>`).join("")}
+    </div>
+    <div style="text-align:center;margin-top:2.5rem;">
+      <a class="theme-button" href="/catalogo">Ver catálogo completo</a>
+    </div>
+  </div>
+</section>`;
+};
+
+const renderLandingProcess = (config: Record<string, string>) => {
+  const provider = escapeHtml(getShippingSettings(config).provider);
+  return `
+<section class="ln-section-dark" id="proceso">
+  <div class="ln-inner">
+    <h2 class="ln-heading-dark" style="text-align:center;">¿Cómo hacer tu pedido?</h2>
+    <div class="ln-steps">
+      <div class="ln-step">
+        <div class="ln-step-num" aria-hidden="true">1</div>
+        <h3>Elige tus productos</h3>
+        <p>Selecciona del catálogo o solicita un diseño personalizado. Aceptamos archivos STL, OBJ y referencias visuales.</p>
+      </div>
+      <div class="ln-step">
+        <div class="ln-step-num" aria-hidden="true">2</div>
+        <h3>Cotiza por WhatsApp</h3>
+        <p>Comparte cantidad y modelo. Respondemos en menos de 24 hrs con confirmación y tiempo de entrega exacto.</p>
+      </div>
+      <div class="ln-step">
+        <div class="ln-step-num" aria-hidden="true">3</div>
+        <h3>Recibe tu pedido</h3>
+        <p>Producción y envío por ${provider} a domicilio, o retiro presencial en San Luis Potosí.</p>
+      </div>
+    </div>
+    <div class="ln-steps-cta">
+      <a class="ln-btn-solid" href="${escapeHtml(waHref(config))}" target="_blank" rel="noopener noreferrer">
+        ${msi("chat")} Empezar cotización
+      </a>
+    </div>
+  </div>
+</section>`;
+};
+
+const renderLandingLocation = (config: Record<string, string>) => {
+  const provider = escapeHtml(getShippingSettings(config).provider);
+  const wa = waHref(config);
+  const phone = normalizeWhatsappNumber(config.quote_whatsapp_number || "");
+  const displayPhone = phone ? `+${phone}` : "";
+  return `
+<section class="ln-section-mid" id="ubicacion">
+  <div class="ln-inner">
+    <div class="ln-location-grid">
+      <div>
+        <h2 class="ln-heading-light" style="text-align:left;">Retiro y entrega local en San Luis Potosí</h2>
+        <p class="ln-sub-light" style="text-align:left;">Fabricamos en San Luis Potosí, S.L.P. y enviamos a toda la república mexicana vía ${provider}. Los clientes locales pueden recoger en persona al terminar la producción.</p>
+        <div class="ln-location-items">
+          <div class="ln-location-item">
+            ${msi("location_on", "msi")}
+            <div class="ln-location-item-body">
+              <span class="ln-location-label">Ubicación</span>
+              <span class="ln-location-value">San Luis Potosí, S.L.P., México</span>
+            </div>
+          </div>
+          <div class="ln-location-item">
+            ${msi("schedule", "msi")}
+            <div class="ln-location-item-body">
+              <span class="ln-location-label">Horario</span>
+              <span class="ln-location-value">Lunes a Sábado · 9:00 a 18:00 hrs</span>
+            </div>
+          </div>
+          ${displayPhone ? `
+          <div class="ln-location-item">
+            ${msi("phone", "msi")}
+            <div class="ln-location-item-body">
+              <span class="ln-location-label">WhatsApp</span>
+              <span class="ln-location-value"><a href="${escapeHtml(wa)}" target="_blank" rel="noopener">${escapeHtml(displayPhone)}</a></span>
+            </div>
+          </div>` : ""}
+        </div>
+      </div>
+      <div class="ln-map-placeholder">
+        ${msi("map")}
+        <div style="margin-top:.75rem;">
+          <p style="margin:0;font-size:.9rem;">San Luis Potosí, S.L.P.</p>
+          <a class="ln-map-link" href="https://maps.google.com/?q=San+Luis+Potosi+SLP+Mexico" target="_blank" rel="noopener">
+            ${msi("open_in_new")} Ver en Google Maps
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>`;
+};
+
+const renderLandingFaq = (config: Record<string, string>) => {
+  const shipping = getShippingSettings(config);
+  const faqs: Array<[string, string]> = [
+    ["¿Cuál es el pedido mínimo de llaveros 3D personalizados?",
+      "El pedido mínimo de PIXKEY3D es de 25 piezas. A partir de ese volumen puedes solicitar cotización. Para pedidos mayores el precio por pieza baja según la tabla de precios. Para proyectos especiales escríbenos y buscamos una solución."],
+    ["¿De qué material están fabricados los llaveros y figuras?",
+      "La mayoría de nuestros productos están fabricados en PLA de alta calidad, un material rígido, liviano y con excelente detalle de impresión. Para piezas que requieren mayor flexibilidad utilizamos PETG. El material exacto de cada producto se confirma al cotizar."],
+    ["¿Puedo pedir un diseño personalizado que no está en el catálogo?",
+      "Sí. Aceptamos diseños personalizados. Puedes enviarnos tu archivo en formato STL u OBJ, o compartir una referencia visual y cotizamos la factibilidad. Para diseños complejos puede aplicarse un costo adicional de modelado."],
+    ["¿Cuánto tiempo tarda la producción y el envío?",
+      `El tiempo de producción depende del volumen. El envío por ${shipping.provider} agrega 1 a 3 días hábiles según la zona del país. Los clientes en San Luis Potosí pueden recoger en persona al terminar la producción.`],
+    ["¿Qué métodos de pago aceptan?",
+      "Aceptamos transferencia bancaria (SPEI), depósito OXXO y pago en efectivo para clientes que recojan en San Luis Potosí. El proceso de pago se coordina directamente por WhatsApp al confirmar el pedido."],
+    ["¿Hacen envíos a toda la república mexicana?",
+      `Sí, enviamos a toda la república mexicana vía ${shipping.provider}. El costo de envío es de ${currency.format(shipping.price)} MXN${shipping.freeMinPieces ? ` y es gratuito en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}.`],
+    ["¿Tienen descuentos para distribuidores o revendedores?",
+      "Sí, contamos con precios especiales por volumen para revendedores, empresas y mayoristas. Cuanto mayor el volumen, menor el precio por pieza. Para proyectos de gran volumen el precio es negociable. Contáctanos con tu estimado."],
+    ["¿Qué pasa si mi pedido llega con defectos?",
+      "La calidad de cada pieza se revisa antes del envío. En caso de que un producto llegue dañado o con defectos de fabricación, coordinamos la reposición o ajuste según el caso. Escríbenos por WhatsApp con fotos del daño dentro de los 5 días hábiles posteriores a la recepción."],
+  ];
+  return `
+<section class="ln-section-dark" id="faq">
+  <div class="ln-inner-narrow">
+    <h2 class="ln-heading-dark" style="text-align:center;">Preguntas frecuentes</h2>
+    <div class="ln-faq-list">
+      ${faqs.map(([q, a]) => `
+      <details class="ln-faq-item">
+        <summary>${escapeHtml(q)}</summary>
+        <p class="ln-faq-answer">${escapeHtml(a)}</p>
+      </details>`).join("")}
+    </div>
+  </div>
+</section>`;
+};
+
+const renderLandingCtaBanner = (config: Record<string, string>) => {
+  const title = config.landing_cta_title || "¿Listo para hacer tu pedido?";
+  const text = config.landing_cta_text || "Contáctanos por WhatsApp y te cotizamos en menos de 24 horas.";
+  const label = config.landing_cta_button_label || "Cotizar por WhatsApp";
+  const href = (!config.landing_cta_button_target || config.landing_cta_button_target === "whatsapp")
+    ? waHref(config)
+    : landingTarget(config, config.landing_cta_button_target);
+  return `
+<section class="ln-cta-banner">
+  <h2>${escapeHtml(title)}</h2>
+  <p>${escapeHtml(text)}</p>
+  <a class="ln-cta-btn" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">
+    ${msi("chat")} ${escapeHtml(label)}
+  </a>
+</section>`;
+};
+
+const renderLandingFooter = (config: Record<string, string>) => {
+  const logo = config.landing_logo || config.company_logo;
+  const name = escapeHtml(config.company_name || "PIXKEY3D");
+  const wa = waHref(config);
+  const phone = normalizeWhatsappNumber(config.quote_whatsapp_number || "");
+  const displayPhone = phone ? `+${phone}` : "";
+  const year = new Date().getFullYear();
+  return `
+<footer class="ln-footer" role="contentinfo">
+  <div class="ln-footer-inner">
+    <div class="ln-footer-brand">
+      <div class="ln-footer-brand-name">
+        ${logo ? `<img src="${escapeHtml(logo)}" alt="" width="24" height="24">` : ""}
+        ${name}
+      </div>
+      <p class="ln-footer-tagline">Fabricación digital de precisión.<br>San Luis Potosí, México.</p>
+      <p class="ln-footer-copy">© ${year} ${name}. Todos los derechos reservados.</p>
+    </div>
+    <div class="ln-footer-col">
+      <h4 class="ln-footer-col-title">Catálogo</h4>
+      <a href="/catalogo">Ver catálogo</a>
+      <a href="#precios">Precios por volumen</a>
+      <a href="#catalogo">Productos destacados</a>
+    </div>
+    <div class="ln-footer-col">
+      <h4 class="ln-footer-col-title">Contacto</h4>
+      ${displayPhone ? `<a href="${escapeHtml(wa)}" target="_blank" rel="noopener">${msi("phone", "msi")} ${escapeHtml(displayPhone)}</a>` : ""}
+      <a href="#ubicacion">${msi("location_on", "msi")} San Luis Potosí, SLP</a>
+      <a href="#proceso">${msi("schedule", "msi")} Lun–Sáb 9–18h</a>
+    </div>
+    <div class="ln-footer-col">
+      <h4 class="ln-footer-col-title">Legal</h4>
+      <a href="/aviso-privacidad">Aviso de privacidad</a>
+      <a href="/terminos">Términos y condiciones</a>
+    </div>
+  </div>
+</footer>`;
+};
+
+const renderLanding = (origin: string) => {
+  const config = getConfig();
+  const defaultPriceTiers = getDefaultPriceTiers();
+  const featured = getFeaturedProducts().map((product) => ({
+    product,
+    priceTiers: product.use_default_pricing ? defaultPriceTiers : getProductPriceTiers(product.id),
+  }));
+  const seoProducts = toSeoProducts(featured);
+
+  const content = `
+    ${renderLandingNav(config)}
+    <main class="ln-main">
+      ${renderLandingHero(config)}
+      ${renderLandingPricing(config, defaultPriceTiers)}
+      ${featured.length > 0 ? renderLandingFeatured(config, featured) : ""}
+      ${renderLandingProcess(config)}
+      ${renderLandingLocation(config)}
+      ${renderLandingFaq(config)}
+      ${renderLandingCtaBanner(config)}
+    </main>
+    ${renderLandingFooter(config)}
+    ${adminGateScript()}
+  `;
+  const seo = {
+    headMeta: buildHeadMeta({ pageType: "landing", config, origin, path: "/", products: seoProducts }),
+    jsonLd: buildJsonLd({ pageType: "landing", config, origin, path: "/", products: seoProducts }),
+  };
+  const extraHead = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">`;
+  return Layout(config.company_name || "PIXKEY3D", content, config, seo, config.landing_hero_image || config.company_logo || undefined, extraHead);
+};
 
 const renderPrintableCatalog = (showActions: boolean) => {
   const { config, defaultPriceTiers, productsWithTiers, categories, subcategories } = getCatalogData();
@@ -956,7 +1480,7 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
   `;
 };
 
-const renderInteractiveCatalog = () => {
+const renderInteractiveCatalog = (origin: string) => {
   const { config, defaultPriceTiers, productsWithTiers, categories, subcategories } = getCatalogData();
   const content = `
     ${renderCoverSection(config)}
@@ -965,10 +1489,204 @@ const renderInteractiveCatalog = () => {
     ${renderCartSection(config, productsWithTiers)}
     ${renderContactSection(config)}
   `;
-  return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo`, content, config);
+  const seoProducts = toSeoProducts(productsWithTiers);
+  const seo = {
+    headMeta: buildHeadMeta({ pageType: "catalog", config, origin, path: "/catalogo", products: seoProducts }),
+    jsonLd: buildJsonLd({ pageType: "catalog", config, origin, path: "/catalogo", products: seoProducts }),
+  };
+  return Layout(`${config.company_name || "PIXKEY3D"} - Catálogo`, content, config, seo, config.company_logo || undefined);
 };
 
-publicRoutes.get("/", (c) => c.redirect("/catalogo"));
+// El landing es ahora la homepage en "/". El catálogo se conserva en "/catalogo".
+publicRoutes.get("/", (c) => c.html(renderLanding(resolveOrigin(c, getConfig()))));
+publicRoutes.get("/robots.txt", (c) => {
+  const origin = resolveOrigin(c, getConfig());
+  const body = [
+    "User-agent: *",
+    "Allow: /",
+    "Disallow: /admin",
+    "Disallow: /api/",
+    "Disallow: /imprimir",
+    "",
+    "# Bots de IA — acceso permitido para indexación y citabilidad",
+    "User-agent: GPTBot",
+    "Allow: /",
+    "",
+    "User-agent: OAI-SearchBot",
+    "Allow: /",
+    "",
+    "User-agent: ClaudeBot",
+    "Allow: /",
+    "",
+    "User-agent: PerplexityBot",
+    "Allow: /",
+    "",
+    "User-agent: CCBot",
+    "Allow: /",
+    "",
+    "User-agent: anthropic-ai",
+    "Allow: /",
+    "",
+    `Sitemap: ${origin}/sitemap.xml`,
+    "",
+  ].join("\n");
+  return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
+});
+publicRoutes.get("/sitemap.xml", (c) => {
+  const origin = resolveOrigin(c, getConfig());
+  const lastmod = new Date().toISOString().slice(0, 10);
+  // Solo URLs reales del sitio. Punto de extensión: agregar páginas de producto
+  // aquí cuando existan rutas de detalle por producto.
+  const urls = [
+    { loc: `${origin}/`, priority: "1.0" },
+    { loc: `${origin}/catalogo`, priority: "0.8" },
+    { loc: `${origin}/aviso-privacidad`, priority: "0.3" },
+    { loc: `${origin}/terminos`, priority: "0.3" },
+  ];
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls
+    .map((u) => `  <url><loc>${escXml(u.loc)}</loc><lastmod>${lastmod}</lastmod><priority>${u.priority}</priority></url>`)
+    .join("\n")}\n</urlset>\n`;
+  return c.body(xml, 200, { "content-type": "application/xml; charset=utf-8" });
+});
+
+publicRoutes.get("/llms.txt", (c) => {
+  const config = getConfig();
+  const name = config.company_name || "PIXKEY3D";
+  const origin = resolveOrigin(c, config);
+  const shipping = getShippingSettings(config);
+  const tiers = getDefaultPriceTiers().sort((a, b) => a.min_volume - b.min_volume);
+  const tiersText = tiers.map((t) =>
+    `  - ${formatVolume(t.min_volume, t.max_volume)}: ${t.max_volume === null ? "precio negociable" : `${currency.format(Number(t.price))} MXN`}${t.delivery_time ? ` (${t.delivery_time})` : ""}`
+  ).join("\n");
+  const body = `# ${name}
+
+> Fabricación de llaveros y figuras 3D personalizados en San Luis Potosí, México.
+> Producción bajo pedido con tecnología de impresión 3D de alta precisión.
+> Precios especiales por volumen para revendedores, empresas y mayoristas.
+
+## Productos
+
+- Llaveros 3D personalizados (kawasaki, PS5, deportes, bandas, temáticos)
+- Figuras 3D impresas (Dragon Ball, Marvel, Invincible, articuladas)
+- Motores articulados funcionales
+- Diseños personalizados a solicitud (formatos STL, OBJ)
+
+## Precios por volumen
+
+Pedido mínimo: 25 piezas.
+
+${tiersText || "  - Consultar cotización directa"}
+
+## Envíos
+
+- Proveedor: ${shipping.provider}
+- Costo estándar: ${currency.format(shipping.price)} MXN${shipping.freeMinPieces ? `\n- Envío gratuito en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}
+- Cobertura: toda la república mexicana
+- Tiempo de tránsito: 1 a 3 días hábiles adicionales
+
+## Ubicación
+
+San Luis Potosí, S.L.P., México
+Lunes a Sábado, 9:00 a 18:00 hrs
+Recolección en persona disponible para clientes locales.
+
+## Contacto
+
+- WhatsApp: ${origin}/#ubicacion
+- Email: contacto@${new URL(origin).hostname}
+- Web: ${origin}
+
+## Materiales
+
+PLA de alta calidad (estándar), PETG (piezas que requieren mayor flexibilidad).
+
+## Proceso de pedido
+
+1. El cliente elige productos del catálogo o comparte un diseño personalizado.
+2. Se solicita cotización por WhatsApp con cantidad y modelo.
+3. Se confirma producción y tiempo de entrega en menos de 24 hrs.
+4. Producción y envío o recolección local al finalizar.
+`;
+  return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
+});
+
+publicRoutes.get("/aviso-privacidad", (c) => {
+  const config = getConfig();
+  const name = escapeHtml(config.company_name || "PIXKEY3D");
+  const origin = resolveOrigin(c, config);
+  const content = `
+<div class="page-section welcome-section">
+  <div class="page-shell" style="max-width:800px;">
+    <h1 style="font-size:clamp(1.8rem,4vw,2.8rem);margin:0 0 2rem;">Aviso de Privacidad</h1>
+    <p class="theme-copy">De conformidad con lo establecido en la <strong>Ley Federal de Protección de Datos Personales en Posesión de los Particulares</strong> (LFPDPPP) y su Reglamento, <strong>${name}</strong>, con domicilio en San Luis Potosí, S.L.P., México, en adelante <strong>"el Responsable"</strong>, pone a su disposición el presente Aviso de Privacidad.</p>
+    <h2 style="margin:2rem 0 1rem;">Datos personales recabados</h2>
+    <p class="theme-copy">Para llevar a cabo las finalidades descritas en el presente aviso, podemos recabar los siguientes datos personales:</p>
+    <ul style="margin:0 0 1rem;padding-left:1.5rem;color:var(--body-text);">
+      <li>Nombre completo</li>
+      <li>Código postal</li>
+      <li>Número de teléfono o WhatsApp (cuando se contacta voluntariamente)</li>
+      <li>Correo electrónico (cuando se contacta voluntariamente)</li>
+    </ul>
+    <h2 style="margin:2rem 0 1rem;">Finalidades del tratamiento</h2>
+    <p class="theme-copy">Los datos personales que recabamos serán utilizados para las siguientes <strong>finalidades primarias y necesarias</strong>:</p>
+    <ul style="margin:0 0 1rem;padding-left:1.5rem;color:var(--body-text);">
+      <li>Generar y procesar cotizaciones de productos.</li>
+      <li>Coordinar la entrega o recolección de pedidos.</li>
+      <li>Comunicar el estado de su pedido.</li>
+    </ul>
+    <h2 style="margin:2rem 0 1rem;">Transferencia de datos</h2>
+    <p class="theme-copy">Sus datos personales <strong>no serán transferidos</strong> a terceros sin su consentimiento previo, salvo en los casos previstos en el artículo 37 de la LFPDPPP.</p>
+    <h2 style="margin:2rem 0 1rem;">Derechos ARCO</h2>
+    <p class="theme-copy">Usted tiene derecho a <strong>Acceder, Rectificar, Cancelar u Oponerse</strong> (derechos ARCO) al tratamiento de sus datos personales. Para ejercer estos derechos, puede contactarnos a través de:</p>
+    <ul style="margin:0 0 1rem;padding-left:1.5rem;color:var(--body-text);">
+      <li>WhatsApp: <a href="https://wa.me/${escapeHtml(config.quote_whatsapp_number ? config.quote_whatsapp_number.replace(/\D/g,"").padStart(12,"52") : "")}" style="color:var(--brand-primary);">+${escapeHtml(config.quote_whatsapp_number || "")}</a></li>
+      <li>Correo electrónico: contacto@${new URL(origin).hostname}</li>
+    </ul>
+    <h2 style="margin:2rem 0 1rem;">Cambios al aviso de privacidad</h2>
+    <p class="theme-copy">Nos reservamos el derecho de efectuar en cualquier momento modificaciones o actualizaciones al presente aviso de privacidad. Cualquier cambio será publicado en esta misma página.</p>
+    <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" })}</p>
+    <p style="margin-top:2rem;"><a href="/" style="color:var(--brand-primary);">← Volver al inicio</a></p>
+  </div>
+</div>
+  `;
+  return c.html(Layout("Aviso de Privacidad", content, config));
+});
+
+publicRoutes.get("/terminos", (c) => {
+  const config = getConfig();
+  const name = escapeHtml(config.company_name || "PIXKEY3D");
+  const content = `
+<div class="page-section welcome-section">
+  <div class="page-shell" style="max-width:800px;">
+    <h1 style="font-size:clamp(1.8rem,4vw,2.8rem);margin:0 0 2rem;">Términos y Condiciones</h1>
+    <p class="theme-copy">Al realizar un pedido o cotización con <strong>${name}</strong>, ubicados en San Luis Potosí, S.L.P., México, usted acepta los siguientes términos y condiciones.</p>
+
+    <h2 style="margin:2rem 0 1rem;">1. Pedidos y cotizaciones</h2>
+    <p class="theme-copy">Todos los pedidos se procesan mediante cotización previa. El pedido mínimo es de 25 piezas. Los precios están sujetos a cambios sin previo aviso hasta que se confirme la cotización por escrito vía WhatsApp o correo electrónico. La cotización tiene una vigencia de 7 días naturales.</p>
+
+    <h2 style="margin:2rem 0 1rem;">2. Producción y entrega</h2>
+    <p class="theme-copy">Los tiempos de producción son estimados y pueden variar según el volumen del pedido y la complejidad del diseño. ${name} no se responsabiliza por retrasos causados por el transportista una vez que el paquete ha sido entregado a la paquetería. El tiempo de tránsito depende del destino dentro de la república mexicana.</p>
+
+    <h2 style="margin:2rem 0 1rem;">3. Diseños personalizados</h2>
+    <p class="theme-copy">El cliente es responsable de contar con los derechos necesarios sobre los diseños o imágenes que solicite imprimir. ${name} no asume responsabilidad por el uso de diseños que infrinjan derechos de terceros. Los archivos de diseño proporcionados por el cliente no serán compartidos con terceros.</p>
+
+    <h2 style="margin:2rem 0 1rem;">4. Pagos</h2>
+    <p class="theme-copy">Se requiere pago anticipado del 50% para iniciar la producción y el saldo restante antes del envío, salvo acuerdo distinto por escrito. Aceptamos transferencia bancaria (SPEI), depósito en OXXO y efectivo para clientes locales en San Luis Potosí.</p>
+
+    <h2 style="margin:2rem 0 1rem;">5. Devoluciones y garantías</h2>
+    <p class="theme-copy">Si el producto presenta defectos de fabricación imputables a ${name}, se procederá a la reposición de las piezas afectadas sin costo adicional. El cliente debe reportar cualquier defecto dentro de los 5 días hábiles posteriores a la recepción del pedido, adjuntando fotografías del daño. No se aceptan devoluciones por cambio de diseño o error en las especificaciones proporcionadas por el cliente.</p>
+
+    <h2 style="margin:2rem 0 1rem;">6. Modificaciones</h2>
+    <p class="theme-copy">${name} se reserva el derecho de modificar estos términos en cualquier momento. Los cambios entrarán en vigor al publicarse en esta página. El uso continuado de nuestros servicios implica la aceptación de los términos vigentes.</p>
+
+    <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" })}</p>
+    <p style="margin-top:2rem;"><a href="/" style="color:var(--brand-primary);">← Volver al inicio</a></p>
+  </div>
+</div>
+  `;
+  return c.html(Layout("Términos y Condiciones", content, config));
+});
+
 publicRoutes.post("/api/quotes", async (c) => {
   try {
     if (quoteRateLimited(quoteClientIp(c))) {
@@ -1104,7 +1822,7 @@ publicRoutes.post("/api/quotes", async (c) => {
     return c.json({ error: "No se pudo guardar la cotización." }, 500);
   }
 });
-publicRoutes.get("/catalogo", (c) => c.html(renderInteractiveCatalog()));
+publicRoutes.get("/catalogo", (c) => c.html(renderInteractiveCatalog(resolveOrigin(c, getConfig()))));
 publicRoutes.get("/imprimir", (c) => c.html(renderPrintableCatalog(c.req.query("embed") !== "1")));
 
 // ── PWA: assets en scope raíz ────────────────────────────────────────────
