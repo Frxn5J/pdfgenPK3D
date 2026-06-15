@@ -1610,14 +1610,16 @@ PLA de alta calidad (estándar), PETG (piezas que requieren mayor flexibilidad).
   return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
 });
 
-publicRoutes.get("/aviso-privacidad", (c) => {
-  const config = getConfig();
-  const name = escapeHtml(config.company_name || "PIXKEY3D");
-  const origin = resolveOrigin(c, config);
-  const content = `
+const legalPageShell = (title: string, body: string) => `
 <div class="page-section welcome-section">
   <div class="page-shell" style="max-width:800px;">
-    <h1 style="font-size:clamp(1.8rem,4vw,2.8rem);margin:0 0 2rem;">Aviso de Privacidad</h1>
+    <h1 style="font-size:clamp(1.8rem,4vw,2.8rem);margin:0 0 2rem;">${title}</h1>
+    ${body}
+    <p style="margin-top:2rem;"><a href="/" style="color:var(--brand-primary);">← Volver al inicio</a></p>
+  </div>
+</div>`;
+
+const defaultAviso = (name: string, wa: string, hostname: string, date: string) => `
     <p class="theme-copy">De conformidad con lo establecido en la <strong>Ley Federal de Protección de Datos Personales en Posesión de los Particulares</strong> (LFPDPPP) y su Reglamento, <strong>${name}</strong>, con domicilio en San Luis Potosí, S.L.P., México, en adelante <strong>"el Responsable"</strong>, pone a su disposición el presente Aviso de Privacidad.</p>
     <h2 style="margin:2rem 0 1rem;">Datos personales recabados</h2>
     <p class="theme-copy">Para llevar a cabo las finalidades descritas en el presente aviso, podemos recabar los siguientes datos personales:</p>
@@ -1637,54 +1639,52 @@ publicRoutes.get("/aviso-privacidad", (c) => {
     <h2 style="margin:2rem 0 1rem;">Transferencia de datos</h2>
     <p class="theme-copy">Sus datos personales <strong>no serán transferidos</strong> a terceros sin su consentimiento previo, salvo en los casos previstos en el artículo 37 de la LFPDPPP.</p>
     <h2 style="margin:2rem 0 1rem;">Derechos ARCO</h2>
-    <p class="theme-copy">Usted tiene derecho a <strong>Acceder, Rectificar, Cancelar u Oponerse</strong> (derechos ARCO) al tratamiento de sus datos personales. Para ejercer estos derechos, puede contactarnos a través de:</p>
+    <p class="theme-copy">Usted tiene derecho a <strong>Acceder, Rectificar, Cancelar u Oponerse</strong> (derechos ARCO) al tratamiento de sus datos personales. Para ejercer estos derechos puede contactarnos:</p>
     <ul style="margin:0 0 1rem;padding-left:1.5rem;color:var(--body-text);">
-      <li>WhatsApp: <a href="https://wa.me/${escapeHtml(config.quote_whatsapp_number ? config.quote_whatsapp_number.replace(/\D/g,"").padStart(12,"52") : "")}" style="color:var(--brand-primary);">+${escapeHtml(config.quote_whatsapp_number || "")}</a></li>
-      <li>Correo electrónico: contacto@${new URL(origin).hostname}</li>
+      <li>WhatsApp: <a href="https://wa.me/${wa}" style="color:var(--brand-primary);">+${wa}</a></li>
+      <li>Correo: contacto@${hostname}</li>
     </ul>
-    <h2 style="margin:2rem 0 1rem;">Cambios al aviso de privacidad</h2>
-    <p class="theme-copy">Nos reservamos el derecho de efectuar en cualquier momento modificaciones o actualizaciones al presente aviso de privacidad. Cualquier cambio será publicado en esta misma página.</p>
-    <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" })}</p>
-    <p style="margin-top:2rem;"><a href="/" style="color:var(--brand-primary);">← Volver al inicio</a></p>
-  </div>
-</div>
-  `;
-  return c.html(Layout("Aviso de Privacidad", content, config));
+    <h2 style="margin:2rem 0 1rem;">Cambios al aviso</h2>
+    <p class="theme-copy">Nos reservamos el derecho de actualizar este aviso en cualquier momento. Los cambios se publicarán en esta página.</p>
+    <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${date}</p>`;
+
+const defaultTerminos = (name: string, provider: string, date: string) => `
+    <p class="theme-copy">Al realizar un pedido o cotización con <strong>${name}</strong>, ubicados en San Luis Potosí, S.L.P., México, usted acepta los siguientes términos y condiciones.</p>
+    <h2 style="margin:2rem 0 1rem;">1. Pedidos y cotizaciones</h2>
+    <p class="theme-copy">Todos los pedidos se procesan mediante cotización previa. El pedido mínimo es de 25 piezas. Los precios están sujetos a cambios sin previo aviso hasta confirmar la cotización por escrito. La cotización tiene vigencia de 7 días naturales.</p>
+    <h2 style="margin:2rem 0 1rem;">2. Producción y entrega</h2>
+    <p class="theme-copy">Los tiempos de producción son estimados y pueden variar según el volumen y la complejidad del diseño. ${name} no se responsabiliza por retrasos del transportista una vez entregado el paquete a la paquetería. El tránsito depende del destino dentro de la república mexicana.</p>
+    <h2 style="margin:2rem 0 1rem;">3. Diseños personalizados</h2>
+    <p class="theme-copy">El cliente es responsable de contar con los derechos sobre los diseños o imágenes que solicite imprimir. ${name} no asume responsabilidad por diseños que infrinjan derechos de terceros. Los archivos del cliente no serán compartidos con terceros.</p>
+    <h2 style="margin:2rem 0 1rem;">4. Pagos</h2>
+    <p class="theme-copy">Se requiere pago anticipado del 50% para iniciar la producción y el saldo restante antes del envío, salvo acuerdo distinto por escrito. Aceptamos transferencia bancaria (SPEI), depósito en OXXO y efectivo para clientes locales en San Luis Potosí.</p>
+    <h2 style="margin:2rem 0 1rem;">5. Devoluciones y garantías</h2>
+    <p class="theme-copy">Si el producto presenta defectos de fabricación imputables a ${name}, se procederá a la reposición de las piezas afectadas sin costo adicional. El cliente debe reportar cualquier defecto dentro de los 5 días hábiles posteriores a la recepción del pedido, adjuntando fotografías. No se aceptan devoluciones por error en las especificaciones proporcionadas por el cliente.</p>
+    <h2 style="margin:2rem 0 1rem;">6. Modificaciones</h2>
+    <p class="theme-copy">${name} se reserva el derecho de modificar estos términos en cualquier momento. Los cambios entrarán en vigor al publicarse en esta página.</p>
+    <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${date}</p>`;
+
+publicRoutes.get("/aviso-privacidad", (c) => {
+  const config = getConfig();
+  const origin = resolveOrigin(c, config);
+  const name = escapeHtml(config.company_name || "PIXKEY3D");
+  const date = new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" });
+  const wa = (config.quote_whatsapp_number || "").replace(/\D/g, "").padStart(12, "52");
+  const body = cleanText(config.aviso_privacidad_content)
+    ? renderAdminHtml(config.aviso_privacidad_content)
+    : defaultAviso(name, wa, new URL(origin).hostname, date);
+  return c.html(Layout("Aviso de Privacidad", legalPageShell("Aviso de Privacidad", body), config));
 });
 
 publicRoutes.get("/terminos", (c) => {
   const config = getConfig();
   const name = escapeHtml(config.company_name || "PIXKEY3D");
-  const content = `
-<div class="page-section welcome-section">
-  <div class="page-shell" style="max-width:800px;">
-    <h1 style="font-size:clamp(1.8rem,4vw,2.8rem);margin:0 0 2rem;">Términos y Condiciones</h1>
-    <p class="theme-copy">Al realizar un pedido o cotización con <strong>${name}</strong>, ubicados en San Luis Potosí, S.L.P., México, usted acepta los siguientes términos y condiciones.</p>
-
-    <h2 style="margin:2rem 0 1rem;">1. Pedidos y cotizaciones</h2>
-    <p class="theme-copy">Todos los pedidos se procesan mediante cotización previa. El pedido mínimo es de 25 piezas. Los precios están sujetos a cambios sin previo aviso hasta que se confirme la cotización por escrito vía WhatsApp o correo electrónico. La cotización tiene una vigencia de 7 días naturales.</p>
-
-    <h2 style="margin:2rem 0 1rem;">2. Producción y entrega</h2>
-    <p class="theme-copy">Los tiempos de producción son estimados y pueden variar según el volumen del pedido y la complejidad del diseño. ${name} no se responsabiliza por retrasos causados por el transportista una vez que el paquete ha sido entregado a la paquetería. El tiempo de tránsito depende del destino dentro de la república mexicana.</p>
-
-    <h2 style="margin:2rem 0 1rem;">3. Diseños personalizados</h2>
-    <p class="theme-copy">El cliente es responsable de contar con los derechos necesarios sobre los diseños o imágenes que solicite imprimir. ${name} no asume responsabilidad por el uso de diseños que infrinjan derechos de terceros. Los archivos de diseño proporcionados por el cliente no serán compartidos con terceros.</p>
-
-    <h2 style="margin:2rem 0 1rem;">4. Pagos</h2>
-    <p class="theme-copy">Se requiere pago anticipado del 50% para iniciar la producción y el saldo restante antes del envío, salvo acuerdo distinto por escrito. Aceptamos transferencia bancaria (SPEI), depósito en OXXO y efectivo para clientes locales en San Luis Potosí.</p>
-
-    <h2 style="margin:2rem 0 1rem;">5. Devoluciones y garantías</h2>
-    <p class="theme-copy">Si el producto presenta defectos de fabricación imputables a ${name}, se procederá a la reposición de las piezas afectadas sin costo adicional. El cliente debe reportar cualquier defecto dentro de los 5 días hábiles posteriores a la recepción del pedido, adjuntando fotografías del daño. No se aceptan devoluciones por cambio de diseño o error en las especificaciones proporcionadas por el cliente.</p>
-
-    <h2 style="margin:2rem 0 1rem;">6. Modificaciones</h2>
-    <p class="theme-copy">${name} se reserva el derecho de modificar estos términos en cualquier momento. Los cambios entrarán en vigor al publicarse en esta página. El uso continuado de nuestros servicios implica la aceptación de los términos vigentes.</p>
-
-    <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" })}</p>
-    <p style="margin-top:2rem;"><a href="/" style="color:var(--brand-primary);">← Volver al inicio</a></p>
-  </div>
-</div>
-  `;
-  return c.html(Layout("Términos y Condiciones", content, config));
+  const date = new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" });
+  const provider = escapeHtml(getShippingSettings(config).provider);
+  const body = cleanText(config.terminos_content)
+    ? renderAdminHtml(config.terminos_content)
+    : defaultTerminos(name, provider, date);
+  return c.html(Layout("Términos y Condiciones", legalPageShell("Términos y Condiciones", body), config));
 });
 
 publicRoutes.post("/api/quotes", async (c) => {
