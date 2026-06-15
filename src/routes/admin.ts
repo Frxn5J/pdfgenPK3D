@@ -1591,6 +1591,7 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                     <button type="button" data-config-tab="ia-prompts" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">IA · Prompts</button>
                     <button type="button" data-config-tab="integraciones" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Integraciones</button>
                     <button type="button" data-config-tab="acceso" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Acceso & Servidor</button>
+                    <button type="button" data-config-tab="legal" class="config-tab whitespace-nowrap py-2 px-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 text-sm font-medium" aria-selected="false">Legal</button>
                 </nav>
             </div>
 
@@ -2216,6 +2217,31 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                 </div>
             </section>
 
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <!-- TAB: LEGAL                                                    -->
+            <!-- ═════════════════════════════════════════════════════════════ -->
+            <section data-config-pane="legal" class="space-y-6 hidden">
+                <p class="text-sm text-gray-500">Contenido de las páginas <code>/aviso-privacidad</code> y <code>/terminos</code>. Acepta HTML. Si se deja vacío se muestra el texto predeterminado.</p>
+
+                <div class="border border-gray-200 rounded-lg p-4 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Aviso de Privacidad</h3>
+                        <a href="/aviso-privacidad" target="_blank" class="text-xs text-blue-600 underline">Ver página →</a>
+                    </div>
+                    <p class="text-xs text-gray-500">Se muestra dentro de la sección principal. Puedes escribir HTML o texto plano con saltos de línea.</p>
+                    <textarea name="aviso_privacidad_content" rows="14" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="Deja vacío para usar el texto predeterminado (LFPDPPP)…">${configValue(config, "aviso_privacidad_content")}</textarea>
+                </div>
+
+                <div class="border border-gray-200 rounded-lg p-4 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-md font-semibold">Términos y Condiciones</h3>
+                        <a href="/terminos" target="_blank" class="text-xs text-blue-600 underline">Ver página →</a>
+                    </div>
+                    <p class="text-xs text-gray-500">Se muestra dentro de la sección principal. Puedes escribir HTML o texto plano con saltos de línea.</p>
+                    <textarea name="terminos_content" rows="14" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="Deja vacío para usar el texto predeterminado…">${configValue(config, "terminos_content")}</textarea>
+                </div>
+            </section>
+
             <!-- Save button -->
             <div class="pt-4 border-t flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <p class="text-xs text-gray-500">Un solo "Guardar" persiste los valores de <strong>todas</strong> las pestañas a la vez.</p>
@@ -2332,6 +2358,8 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
     "quote_whatsapp_number",
     "welcome_text",
     "contact_text",
+    "aviso_privacidad_content",
+    "terminos_content",
     "design_creator_prompt",
     "catalog_image_prompt",
     "catalog_description_prompt",
