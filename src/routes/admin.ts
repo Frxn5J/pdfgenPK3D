@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, updateQuoteScheduler, getQuoteFilaments, replaceQuoteFilaments, subtractFilamentStock, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
@@ -1655,7 +1655,37 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
             <!-- TAB: LANDING (homepage configurable)                          -->
             <!-- ═════════════════════════════════════════════════════════════ -->
             <section data-config-pane="landing" class="space-y-8 hidden">
-                <p class="text-sm text-gray-500">Esta es la página de inicio (<code>/</code>). Configura su contenido por secciones. El catálogo sigue en <code>/catalogo</code>. El SEO (título, descripción, Open Graph, datos estructurados) se genera automáticamente — aquí solo editas el contenido.</p>
+                <p class="text-sm text-gray-500">Esta es la página de inicio (<code>/</code>). Configura su contenido por secciones. El catálogo sigue en <code>/catalogo</code>.</p>
+
+                <!-- SEO DE LA LANDING -->
+                <div class="border border-blue-200 bg-blue-50 rounded-lg p-4 space-y-4">
+                    <h3 class="text-md font-semibold text-blue-800">SEO — Título, descripción e imagen social</h3>
+                    <p class="text-xs text-blue-600">Estos campos sobreescriben la generación automática. Si se dejan vacíos, el SEO se genera desde el contenido del hero.</p>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Título SEO <span class="text-gray-400 font-normal">(max 60 caracteres · recomendado: incluir "San Luis Potosí")</span></label>
+                        <input type="text" name="seo_title_landing" value="${configValue(config, "seo_title_landing")}" maxlength="70" placeholder="Llaveros y Figuras 3D Personalizados en San Luis Potosí | PIXKEY3D" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm">
+                        <p class="text-xs text-gray-400 mt-1">Caracteres: <span id="seo-title-count">${(config.seo_title_landing || "").length}</span> / 60</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Meta descripción <span class="text-gray-400 font-normal">(max 155 caracteres · incluir ciudad y CTA)</span></label>
+                        <textarea name="seo_description_landing" rows="2" maxlength="160" placeholder="Llaveros y figuras 3D bajo pedido en San Luis Potosí. Precios desde $25 MXN · Mín. 25 piezas · Envíos a todo México. Cotiza por WhatsApp." class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm">${configValue(config, "seo_description_landing")}</textarea>
+                        <p class="text-xs text-gray-400 mt-1">Caracteres: <span id="seo-desc-count">${(config.seo_description_landing || "").length}</span> / 155</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Imagen Open Graph / social <span class="text-gray-400 font-normal">(1200×630 px recomendado — para WhatsApp, Facebook, etc.)</span></label>
+                        <input type="text" name="og_image_landing_url" value="${configValue(config, "og_image_landing")}" placeholder="URL de imagen 1200×630px o deja vacío para usar la imagen del hero" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
+                        <input type="file" name="og_image_landing_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                        ${config.og_image_landing ? `<p class="text-xs text-gray-500 mt-1">Actual: <a href="${escapeHtml(config.og_image_landing)}" target="_blank" class="text-blue-600 underline">ver imagen</a> · <button type="button" onclick="document.querySelector('[name=og_image_landing_url]').value=''" class="text-red-500 underline">quitar</button></p>` : ""}
+                    </div>
+                    <script>
+                    document.querySelector('[name=seo_title_landing]')?.addEventListener('input', function() {
+                        document.getElementById('seo-title-count').textContent = this.value.length;
+                    });
+                    document.querySelector('[name=seo_description_landing]')?.addEventListener('input', function() {
+                        document.getElementById('seo-desc-count').textContent = this.value.length;
+                    });
+                    </script>
+                </div>
 
                 <!-- HERO -->
                 <div class="border border-gray-200 rounded-lg p-4 space-y-4">
@@ -1687,6 +1717,12 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                             <label class="block text-sm font-medium text-gray-700">Imagen del hero (URL o subir)</label>
                             <input type="text" name="landing_hero_image_url" value="${configValue(config, "landing_hero_image")}" placeholder="Por defecto usa el logo" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
                             <input type="file" name="landing_hero_image_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Icono / logo en la landing <span class="text-gray-400 font-normal">(navbar y footer — usa el logo principal si se deja vacío)</span></label>
+                            <input type="text" name="landing_logo_url" value="${configValue(config, "landing_logo")}" placeholder="URL o deja vacío para usar el logo principal" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
+                            <input type="file" name="landing_logo_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                            ${config.landing_logo ? `<p class="text-xs text-gray-500 mt-1">Actual: <a href="${escapeHtml(config.landing_logo)}" target="_blank" class="text-blue-600 underline">ver imagen</a> · <button type="button" onclick="document.querySelector('[name=landing_logo_url]').value=''" class="text-red-500 underline">quitar</button></p>` : ""}
                         </div>
                     </div>
                 </div>
@@ -2442,6 +2478,20 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
   } else if ("landing_hero_image_url" in body) {
     updates.landing_hero_image = formString(body.landing_hero_image_url);
   }
+  const landingLogoFile = formFile(body.landing_logo_file);
+  if (landingLogoFile) {
+    updates.landing_logo = await saveImageUpload(landingLogoFile, "", "landing-logo");
+  } else if ("landing_logo_url" in body) {
+    updates.landing_logo = formString(body.landing_logo_url);
+  }
+  const ogImageLandingFile = formFile(body.og_image_landing_file);
+  if (ogImageLandingFile) {
+    updates.og_image_landing = await saveImageUpload(ogImageLandingFile, "", "og-landing");
+  } else if ("og_image_landing_url" in body) {
+    updates.og_image_landing = formString(body.og_image_landing_url);
+  }
+  if ("seo_title_landing" in body) updates.seo_title_landing = formString(body.seo_title_landing).slice(0, 70);
+  if ("seo_description_landing" in body) updates.seo_description_landing = formString(body.seo_description_landing).slice(0, 160);
   const aboutImageFile = formFile(body.landing_about_image_file);
   if (aboutImageFile) {
     updates.landing_about_image = await saveImageUpload(aboutImageFile, "", "landing-about");
@@ -4570,7 +4620,7 @@ adminRoutes.get("/production-settings", (c) => {
               </thead>
               <tbody class="divide-y divide-gray-200">
                 ${filaments.map(f => {
-                  const stockPct = Math.min(100, (f.stock_grams / 1000) * 100);
+                  const stockPct = Math.max(0, Math.min(100, (f.stock_grams / 1000) * 100));
                   const stockColor = f.stock_grams < 100 ? 'bg-red-500' : f.stock_grams < 300 ? 'bg-yellow-500' : 'bg-green-500';
                   return `
                   <tr>
@@ -5075,19 +5125,8 @@ adminRoutes.post("/production/:id/schedule", requireRole(["superusuario", "admin
     }
   }
 
-  // Restore stock from previous filament assignments before replacing
-  const previousFilaments = getQuoteFilaments(id);
-  for (const pf of previousFilaments) {
-    subtractFilamentStock(pf.filament_id, -pf.grams_used); // negative = add back
-  }
-
-  updateQuoteScheduler(id, printerId, scheduledStart);
-  replaceQuoteFilaments(id, entries);
-
-  // Subtract stock for new filament assignments
-  for (const entry of entries) {
-    subtractFilamentStock(entry.filament_id, entry.grams_used);
-  }
+  // Reprograma + ajusta stock de filamento de forma atómica (ver applyQuoteSchedule).
+  applyQuoteSchedule(id, printerId, scheduledStart, entries);
 
   return c.redirect("/admin/production?tab=produccion");
 });

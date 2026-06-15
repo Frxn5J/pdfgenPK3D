@@ -39,6 +39,12 @@ app.use("*", secureHeaders({
     baseUri: ["'self'"],
     frameAncestors: ["'none'"],
   },
+  permissionsPolicy: {
+    camera: [],
+    microphone: [],
+    geolocation: [],
+    payment: [],
+  },
 }));
 
 // Ensure upload directory exists

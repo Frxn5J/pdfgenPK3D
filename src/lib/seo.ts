@@ -131,6 +131,8 @@ const deriveCompany = (config: Record<string, string>) => cleanText(config.compa
 
 const deriveTitle = (input: SeoInput, company: string): string => {
   if (input.pageType === "landing") {
+    // seo_title_landing sobreescribe todo cuando está configurado
+    if (cleanText(input.config.seo_title_landing)) return clamp(cleanText(input.config.seo_title_landing)!, TITLE_MAX);
     const headline = cleanText(input.config.landing_hero_title) || cleanText(input.config.cover_subtitle) || "Catálogo de Productos";
     return clamp(`${company} | ${headline}`, TITLE_MAX);
   }
@@ -138,17 +140,26 @@ const deriveTitle = (input: SeoInput, company: string): string => {
 };
 
 const deriveDescription = (input: SeoInput, company: string): string => {
-  const base = `${company} fabrica llaveros y figuras 3D personalizados al mayoreo en San Luis Potosí. Precios por volumen y envíos a todo México.`;
-  let candidate = "";
+  const base = `${company} — llaveros y figuras 3D personalizados al mayoreo en San Luis Potosí. Precios por volumen y envíos a todo México.`;
   if (input.pageType === "landing") {
-    candidate = cleanText(input.config.landing_hero_subtitle) || firstSentence(input.config.welcome_text || "");
-  } else {
-    candidate = firstSentence(input.config.welcome_text || "");
+    if (cleanText(input.config.seo_description_landing)) return clamp(cleanText(input.config.seo_description_landing)!, DESC_MAX);
+    const candidate = cleanText(input.config.landing_hero_subtitle) || firstSentence(input.config.welcome_text || "");
+    return clamp(candidate || base, DESC_MAX);
   }
+  const candidate = firstSentence(input.config.welcome_text || "");
   return clamp(candidate || base, DESC_MAX);
 };
 
 const deriveImage = (input: SeoInput): string => {
+  // Landing: preferir og_image_landing > landing_hero_image > landing_logo > company_logo
+  if (input.pageType === "landing") {
+    const og = toAbsolute(input.config.og_image_landing, input.origin);
+    if (og) return og;
+    const hero = toAbsolute(input.config.landing_hero_image, input.origin);
+    if (hero) return hero;
+    const landingLogo = toAbsolute(input.config.landing_logo, input.origin);
+    if (landingLogo) return landingLogo;
+  }
   const logo = toAbsolute(input.config.company_logo, input.origin);
   if (logo) return logo;
   for (const p of input.products || []) {
