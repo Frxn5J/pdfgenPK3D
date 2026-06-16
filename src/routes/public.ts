@@ -530,7 +530,7 @@ const toSeoProducts = (
       name: product.name,
       description: product.description,
       image_url: product.image_url,
-      priceLow: prices.length ? Math.min(...prices) : null,
+      priceLow: prices.length ? prices[0] : null,
       priceHigh: prices.length ? Math.max(...prices) : null,
     };
   });
@@ -1592,7 +1592,7 @@ Recolección en persona disponible para clientes locales.
 
 ## Contacto
 
-- WhatsApp: ${origin}/#ubicacion
+- WhatsApp: https://wa.me/${normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304")}
 - Email: contacto@${new URL(origin).hostname}
 - Web: ${origin}
 
