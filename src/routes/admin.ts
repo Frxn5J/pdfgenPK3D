@@ -1720,6 +1720,26 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                             <input type="file" name="landing_hero_image_file" accept="image/*" class="block w-full text-sm text-gray-500">
                         </div>
                         <div>
+                            <label class="block text-sm font-medium text-gray-700">Modo del hero</label>
+                            <select name="landing_hero_mode" onchange="document.getElementById('hero-carousel-slots').style.display=this.value==='carousel'?'':'none'" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md bg-white">
+                                <option value="image" ${configValue(config, "landing_hero_mode") !== "carousel" ? "selected" : ""}>Imagen única</option>
+                                <option value="carousel" ${configValue(config, "landing_hero_mode") === "carousel" ? "selected" : ""}>Carrusel (hasta 5 imágenes)</option>
+                            </select>
+                        </div>
+                        <div id="hero-carousel-slots" class="sm:col-span-2 space-y-3 border border-gray-200 rounded-lg p-4 bg-gray-50" style="display:${configValue(config, "landing_hero_mode") === "carousel" ? "" : "none"}">
+                            <p class="text-sm font-medium text-gray-700">Imágenes del carrusel</p>
+                            <div>
+                                <label class="block text-xs text-gray-500">Intervalo entre imágenes (ms)</label>
+                                <input type="number" name="landing_hero_carousel_interval" value="${configValue(config, "landing_hero_carousel_interval", "4000")}" min="1000" step="500" class="mt-1 block w-40 px-3 py-2 border border-gray-300 rounded-md">
+                            </div>
+                            ${[1, 2, 3, 4, 5].map((i) => `
+                            <div class="border border-gray-100 rounded p-3 bg-white">
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Imagen ${i}</label>
+                                <input type="text" name="landing_hero_carousel_image_${i}_url" value="${configValue(config, `landing_hero_carousel_image_${i}`)}" placeholder="Vacío para omitir" class="block w-full px-3 py-2 border border-gray-300 rounded-md mb-1 text-sm">
+                                <input type="file" name="landing_hero_carousel_image_${i}_file" accept="image/*" class="block w-full text-sm text-gray-500">
+                            </div>`).join("")}
+                        </div>
+                        <div>
                             <label class="block text-sm font-medium text-gray-700">Icono / logo en la landing <span class="text-gray-400 font-normal">(navbar y footer — usa el logo principal si se deja vacío)</span></label>
                             <input type="text" name="landing_logo_url" value="${configValue(config, "landing_logo")}" placeholder="URL o deja vacío para usar el logo principal" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md mb-2">
                             <input type="file" name="landing_logo_file" accept="image/*" class="block w-full text-sm text-gray-500">
@@ -2000,6 +2020,78 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                             <option value="cover" ${config.product_image_fit === 'cover' ? 'selected' : ''}>Cubrir</option>
                             <option value="contain" ${config.product_image_fit === 'contain' ? 'selected' : ''}>Contener</option>
                         </select>
+                    </div>
+                </div>
+
+                <h4 class="text-md font-semibold mt-2">Modo Oscuro</h4>
+                <div class="flex items-center gap-3 p-3 border border-gray-200 rounded-lg bg-gray-50">
+                    <input type="checkbox" name="dark_mode_enabled" id="dark_mode_enabled" value="1" ${config.dark_mode_enabled !== '0' ? 'checked' : ''} class="h-4 w-4 text-blue-600 border-gray-300 rounded">
+                    <label for="dark_mode_enabled" class="text-sm font-medium text-gray-700">Activar toggle sol/luna en el nav del landing <span class="text-gray-400 font-normal">(respeta prefers-color-scheme del navegador por defecto)</span></label>
+                </div>
+
+                <h4 class="text-md font-semibold mt-4">Colores — Modo Oscuro</h4>
+                <p class="text-xs text-gray-500 -mt-2">Estos colores se aplican cuando el visitante activa el modo oscuro. Independientes del modo claro.</p>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Portada/Hero</label>
+                        <input type="color" name="dark_bg_cover" value="${configValue(config, "dark_bg_cover", "#0c1117")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                        <p class="text-xs text-gray-400 mt-1">Hero, nav, footer</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Portada/Hero</label>
+                        <input type="color" name="dark_color_cover_text" value="${configValue(config, "dark_color_cover_text", "#f1f5f9")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                        <p class="text-xs text-gray-400 mt-1">Texto en hero, nav, footer</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Banner CTA</label>
+                        <input type="color" name="dark_bg_cta" value="${configValue(config, "dark_bg_cta", "#1e3a5f")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                        <p class="text-xs text-gray-400 mt-1">Sección "¿Listo para tu pedido?"</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Sección Media</label>
+                        <input type="color" name="dark_bg_welcome" value="${configValue(config, "dark_bg_welcome", "#111827")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                        <p class="text-xs text-gray-400 mt-1">Ubicación, Sobre nosotros</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Sección Clara</label>
+                        <input type="color" name="dark_bg_products" value="${configValue(config, "dark_bg_products", "#1f2937")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                        <p class="text-xs text-gray-400 mt-1">Productos destacados, body</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Sección Oscura</label>
+                        <input type="color" name="dark_bg_section_dark" value="${configValue(config, "dark_bg_section_dark", "#0f172a")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                        <p class="text-xs text-gray-400 mt-1">Precios, Proceso, FAQ</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Tarjetas</label>
+                        <input type="color" name="dark_bg_card" value="${configValue(config, "dark_bg_card", "#1e293b")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                        <p class="text-xs text-gray-400 mt-1">Tabla de precios, pasos</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Borde Tarjetas</label>
+                        <input type="color" name="dark_color_card_border" value="${configValue(config, "dark_color_card_border", "#374151")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Fondo Encabezado Tabla</label>
+                        <input type="color" name="dark_bg_table_header" value="${configValue(config, "dark_bg_table_header", "#374151")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Encabezado Tabla</label>
+                        <input type="color" name="dark_color_table_header_text" value="${configValue(config, "dark_color_table_header_text", "#d1d5db")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-3 mt-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Principal</label>
+                        <input type="color" name="dark_color_body_text" value="${configValue(config, "dark_color_body_text", "#e2e8f0")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Encabezados</label>
+                        <input type="color" name="dark_color_heading_text" value="${configValue(config, "dark_color_heading_text", "#f8fafc")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Texto Secundario</label>
+                        <input type="color" name="dark_color_muted_text" value="${configValue(config, "dark_color_muted_text", "#94a3b8")}" class="mt-1 block w-full h-10 px-1 py-1 border border-gray-300 rounded-md">
                     </div>
                 </div>
 
@@ -2392,11 +2484,26 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
     "decorative_shape_opacity",
     "decorative_shape_blur",
     "custom_css",
+    "dark_bg_cover",
+    "dark_color_cover_text",
+    "dark_bg_cta",
+    "dark_bg_welcome",
+    "dark_bg_products",
+    "dark_bg_card",
+    "dark_color_card_border",
+    "dark_color_body_text",
+    "dark_color_heading_text",
+    "dark_color_muted_text",
+    "dark_bg_table_header",
+    "dark_color_table_header_text",
+    "dark_bg_section_dark",
     // ── Landing (contenido de marketing) ──────────────────────────────
     "landing_hero_title",
     "landing_hero_subtitle",
     "landing_hero_cta_label",
     "landing_hero_cta_target",
+    "landing_hero_mode",
+    "landing_hero_carousel_interval",
     "landing_benefits_title",
     "landing_featured_title",
     "landing_about_title",
@@ -2471,6 +2578,7 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
   // Checkbox: el marcador garantiza que el form fue enviado, así que la
   // ausencia se interpreta como "desmarcado".
   updates.decorative_shapes_enabled = body.decorative_shapes_enabled ? "1" : "0";
+  updates.dark_mode_enabled = body.dark_mode_enabled ? "1" : "0";
 
   // ── Landing: toggles de sección (mismo patrón checkbox) ──────────────
   // Solo se procesan cuando el form del landing fue enviado (el pane siempre
@@ -2505,6 +2613,15 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
     updates.landing_hero_image = await saveImageUpload(heroImageFile, "", "landing-hero");
   } else if ("landing_hero_image_url" in body) {
     updates.landing_hero_image = formString(body.landing_hero_image_url);
+  }
+  for (let i = 1; i <= 5; i++) {
+    const key = `landing_hero_carousel_image_${i}`;
+    const file = formFile(body[`${key}_file`]);
+    if (file) {
+      updates[key] = await saveImageUpload(file, "", `carousel-${i}`);
+    } else if (`${key}_url` in body) {
+      updates[key] = formString(body[`${key}_url`]);
+    }
   }
   const landingLogoFile = formFile(body.landing_logo_file);
   if (landingLogoFile) {

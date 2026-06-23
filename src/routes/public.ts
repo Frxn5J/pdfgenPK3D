@@ -472,6 +472,50 @@ const buildThemeCss = (config: Record<string, string>) => {
       .subcategory-title { break-after: avoid; page-break-after: avoid; break-inside: avoid; }
     }
 
+    :root[data-theme="dark"] {
+      --cover-bg: ${cssValue(config.dark_bg_cover, "#0c1117")};
+      --cover-text: ${cssValue(config.dark_color_cover_text, "#f1f5f9")};
+      --welcome-bg: ${cssValue(config.dark_bg_welcome, "#111827")};
+      --products-bg: ${cssValue(config.dark_bg_products, "#1f2937")};
+      --card-bg: ${cssValue(config.dark_bg_card, "#1e293b")};
+      --card-border: ${cssValue(config.dark_color_card_border, "#374151")};
+      --table-header-bg: ${cssValue(config.dark_bg_table_header, "#374151")};
+      --table-header-text: ${cssValue(config.dark_color_table_header_text, "#d1d5db")};
+      --body-text: ${cssValue(config.dark_color_body_text, "#e2e8f0")};
+      --heading-text: ${cssValue(config.dark_color_heading_text, "#f8fafc")};
+      --muted-text: ${cssValue(config.dark_color_muted_text, "#94a3b8")};
+    }
+
+    [data-theme="dark"] .ln-cta-banner {
+      background: ${cssValue(config.dark_bg_cta, "#1e3a5f")};
+    }
+
+    [data-theme="dark"] .ln-section-dark {
+      background: ${cssValue(config.dark_bg_section_dark, "#0f172a")};
+      border-top-color: ${cssValue(config.dark_color_card_border, "#374151")};
+      color: ${cssValue(config.dark_color_body_text, "#e2e8f0")};
+    }
+    [data-theme="dark"] .ln-table-wrap { background: var(--card-bg); border-color: var(--card-border); }
+    [data-theme="dark"] .ln-table thead tr { background: var(--table-header-bg); }
+    [data-theme="dark"] .ln-table th { color: var(--table-header-text); border-bottom-color: var(--card-border); }
+    [data-theme="dark"] .ln-table td { color: var(--body-text); border-top-color: var(--card-border); }
+    [data-theme="dark"] .ln-table tr:hover td { background: var(--table-header-bg); }
+    [data-theme="dark"] .ln-step { background: var(--card-bg); border-color: var(--card-border); }
+    [data-theme="dark"] .ln-step h3 { color: var(--heading-text); }
+    [data-theme="dark"] .ln-step p { color: var(--muted-text); }
+    [data-theme="dark"] details.ln-faq-item { border-bottom-color: var(--card-border); }
+    [data-theme="dark"] details.ln-faq-item:first-child { border-top-color: var(--card-border); }
+    [data-theme="dark"] details.ln-faq-item summary { color: var(--heading-text); }
+    [data-theme="dark"] details.ln-faq-item summary::after { border-color: var(--card-border); }
+    [data-theme="dark"] .ln-faq-answer { color: var(--muted-text); }
+    [data-theme="dark"] .ln-table-note { color: var(--muted-text); }
+    [data-theme="dark"] .ln-table-note strong { color: var(--heading-text); }
+
+    .ln-carousel { position: relative; overflow: hidden; }
+    .ln-carousel-slide { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 0.7s ease; }
+    .ln-carousel-slide.active { opacity: 1; position: relative; }
+    .ln-carousel-slide:first-child { position: relative; }
+
     ${customCss(config.custom_css)}
   `.trim();
 };
@@ -512,6 +556,13 @@ const Layout = (
     ${extraHead || ""}
 </head>
 <body class="catalog-body density-${density} card-style-${cardStyle} image-fit-${imageFit}">
+    ${config.dark_mode_enabled !== "0" ? `<script>(function(){
+  var s=localStorage.getItem('theme');
+  var d=window.matchMedia('(prefers-color-scheme:dark)').matches;
+  var t=s||(d?'dark':'light');
+  document.documentElement.setAttribute('data-theme',t);
+  console.log('[dm] init: ls='+s+' prefers='+d+' applied='+t);
+})();</script>` : ""}
     ${content}
     ${pwaRegisterScript()}
 </body>
@@ -841,6 +892,19 @@ const renderLandingNav = (config: Record<string, string>) => {
     <a class="ln-nav-cta" href="${escapeHtml(waHref(config))}" target="_blank" rel="noopener noreferrer">
       Cotizar por WhatsApp
     </a>
+    ${config.dark_mode_enabled !== "0" ? `<button id="dm-toggle" aria-label="Cambiar tema" style="background:none;border:0;cursor:pointer;color:var(--cover-text);padding:.5rem;display:flex;align-items:center;line-height:1" onclick="(function(){
+  var cur=document.documentElement.getAttribute('data-theme');
+  var t=cur==='dark'?'light':'dark';
+  console.log('[dm] toggle: '+cur+' → '+t);
+  document.documentElement.setAttribute('data-theme',t);
+  localStorage.setItem('theme',t);
+  var after=document.documentElement.getAttribute('data-theme');
+  console.log('[dm] html[data-theme] after='+after);
+  var cs=getComputedStyle(document.documentElement);
+  console.log('[dm] --welcome-bg='+cs.getPropertyValue('--welcome-bg').trim());
+  console.log('[dm] --body-text='+cs.getPropertyValue('--body-text').trim());
+  this.querySelector('span').textContent=t==='dark'?'light_mode':'dark_mode';
+}).call(this)">${msi("dark_mode")}</button>` : ""}
   </div>
 </header>`;
 };
@@ -852,6 +916,28 @@ const renderLandingHero = (config: Record<string, string>) => {
   const ctaHref = landingTarget(config, config.landing_hero_cta_target);
   const ctaLabel = config.landing_hero_cta_label || "Ver catálogo completo ↓";
   const isExternal = ctaHref.startsWith("http");
+
+  const isCarousel = config.landing_hero_mode === "carousel";
+  const carouselImgs = isCarousel
+    ? [1, 2, 3, 4, 5].map((i) => config[`landing_hero_carousel_image_${i}`]).filter(Boolean)
+    : [];
+  const carouselInterval = parseInt(config.landing_hero_carousel_interval || "4000", 10) || 4000;
+
+  const imgColumn = isCarousel
+    ? `<div class="ln-hero-img-wrap ln-carousel" id="ln-carousel" aria-hidden="true">
+      ${carouselImgs.length === 0
+        ? `<div class="ln-hero-logo-fallback">3D</div>`
+        : carouselImgs.map((src, i) =>
+            `<img src="${escapeHtml(src)}" alt="" class="ln-carousel-slide${i === 0 ? " active" : ""}" decoding="async" ${i === 0 ? 'fetchpriority="high" loading="eager"' : 'loading="lazy"'} width="800" height="600">`
+          ).join("")}
+    </div>
+    ${carouselImgs.length > 1 ? `<script>(function(){var s=document.querySelectorAll('#ln-carousel .ln-carousel-slide'),c=0;setInterval(function(){s[c].classList.remove('active');c=(c+1)%s.length;s[c].classList.add('active');},${carouselInterval});})();</script>` : ""}`
+    : `<div class="ln-hero-img-wrap" aria-hidden="true">
+      ${heroImg
+        ? `<img src="${escapeHtml(heroImg)}" alt="" decoding="async" fetchpriority="high" loading="eager" width="800" height="600">`
+        : `<div class="ln-hero-logo-fallback">3D</div>`}
+    </div>`;
+
   return `
 <section class="ln-hero" id="inicio">
   <div class="ln-hero-grid-bg" aria-hidden="true"></div>
@@ -873,11 +959,7 @@ const renderLandingHero = (config: Record<string, string>) => {
         <div class="ln-trust-item">${msi("schedule", "msi")} <span>Lun–Sáb 9–18h</span></div>
       </div>
     </div>
-    <div class="ln-hero-img-wrap" aria-hidden="true">
-      ${heroImg
-        ? `<img src="${escapeHtml(heroImg)}" alt="" decoding="async" fetchpriority="high" loading="eager" width="800" height="600">`
-        : `<div class="ln-hero-logo-fallback">3D</div>`}
-    </div>
+    ${imgColumn}
   </div>
 </section>`;
 };
