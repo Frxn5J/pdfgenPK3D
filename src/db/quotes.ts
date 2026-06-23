@@ -45,6 +45,11 @@ export interface Quote {
   whatsapp_number: string | null;
   message: string | null;
   created_at: string;
+  client_token: string | null;
+  client_account_id: number | null;
+  shipping_tracking_number: string | null;
+  shipping_tracking_url: string | null;
+  service_type: string;
 }
 
 export interface QuoteItem {
@@ -61,6 +66,7 @@ export interface QuoteItem {
   custom_image_url: string | null;
   override_filament_grams: number | null;
   override_print_time_mins: number | null;
+  printed_quantity: number;
 }
 
 export type QuoteItemWithProduct = QuoteItem & {

@@ -4,6 +4,7 @@ import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegis
 import { imgTag } from "../lib/html";
 import { cleanText } from "../lib/text";
 import { buildHeadMeta, buildJsonLd, resolveOrigin, escXml, type SeoProduct } from "../lib/seo";
+import { verifyClientSession } from "../db/portal";
 
 const publicRoutes = new Hono();
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
@@ -530,7 +531,7 @@ const renderShapes = (config: Record<string, string>) => {
 // y jsonLd el bloque structured-data. Cuando falta (solo /imprimir), se emite un
 // <title> legacy + noindex para no indexar la vista imprimible (contenido duplicado).
 // `lcpImage` precarga la imagen principal (logo/hero) para mejorar LCP.
-const Layout = (
+export const Layout = (
   title: string,
   content: string,
   config: Record<string, string>,
@@ -872,7 +873,7 @@ const waHref = (config: Record<string, string>, msg = "") => {
   return `https://wa.me/${num}${msg ? `?text=${encodeURIComponent(msg)}` : ""}`;
 };
 
-const renderLandingNav = (config: Record<string, string>) => {
+const renderLandingNav = (config: Record<string, string>, loggedIn = false) => {
   const logo = config.landing_logo || config.company_logo;
   const name = escapeHtml(config.company_name || "PIXKEY3D");
   return `
@@ -889,6 +890,9 @@ const renderLandingNav = (config: Record<string, string>) => {
       <a href="#ubicacion">Ubicación</a>
       <a href="#faq">FAQ</a>
     </nav>
+    <a href="/portal/${loggedIn ? "me" : "login"}" style="display:inline-flex;align-items:center;gap:.35rem;font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:color-mix(in srgb,var(--cover-text) 70%,transparent);text-decoration:none;white-space:nowrap;transition:color .15s" onmouseover="this.style.color='var(--cover-text)'" onmouseout="this.style.color=''">
+      ${msi("person")} ${loggedIn ? "Mi pedido" : "Iniciar sesión"}
+    </a>
     <a class="ln-nav-cta" href="${escapeHtml(waHref(config))}" target="_blank" rel="noopener noreferrer">
       Cotizar por WhatsApp
     </a>
@@ -1205,7 +1209,7 @@ const renderLandingFooter = (config: Record<string, string>) => {
 </footer>`;
 };
 
-const renderLanding = (origin: string) => {
+const renderLanding = (origin: string, loggedIn = false) => {
   const config = getConfig();
   const defaultPriceTiers = getDefaultPriceTiers();
   const featured = getFeaturedProducts().map((product) => ({
@@ -1215,7 +1219,7 @@ const renderLanding = (origin: string) => {
   const seoProducts = toSeoProducts(featured);
 
   const content = `
-    ${renderLandingNav(config)}
+    ${renderLandingNav(config, loggedIn)}
     <main class="ln-main">
       ${renderLandingHero(config)}
       ${renderLandingPricing(config, defaultPriceTiers)}
@@ -1580,7 +1584,14 @@ const renderInteractiveCatalog = (origin: string) => {
 };
 
 // El landing es ahora la homepage en "/". El catálogo se conserva en "/catalogo".
-publicRoutes.get("/", (c) => c.html(renderLanding(resolveOrigin(c, getConfig()))));
+publicRoutes.get("/", async (c) => {
+  const config = getConfig();
+  const raw = c.req.header("cookie") ?? "";
+  const values = [...raw.matchAll(/client_session=([^;,\s]+)/g)].map((m) => m[1]);
+  let session = null;
+  for (const v of values) { session = await verifyClientSession(v); if (session) break; }
+  return c.html(renderLanding(resolveOrigin(c, config), !!session));
+});
 publicRoutes.get("/robots.txt", (c) => {
   const origin = resolveOrigin(c, getConfig());
   const body = [

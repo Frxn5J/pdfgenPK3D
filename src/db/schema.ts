@@ -7,3 +7,4 @@ export * from "./catalog";
 export * from "./quotes";
 export * from "./finance";
 export * from "./users";
+export * from "./portal";

@@ -179,6 +179,9 @@ export function initDb() {
   try {
     db.run(`ALTER TABLE quote_items ADD COLUMN override_print_time_mins INTEGER`);
   } catch {}
+  try {
+    db.run(`ALTER TABLE quote_items ADD COLUMN printed_quantity INTEGER DEFAULT 0`);
+  } catch {}
 
   // Extra tables for printer and filament settings
   db.run(`
@@ -226,6 +229,23 @@ export function initDb() {
   try {
     db.run(`ALTER TABLE quotes ADD COLUMN payment_proof_url_final TEXT`);
   } catch {}
+  // Portal de cliente
+  try { db.run(`ALTER TABLE quotes ADD COLUMN client_token TEXT`); } catch {}
+  try { db.run(`ALTER TABLE quotes ADD COLUMN shipping_tracking_number TEXT`); } catch {}
+  try { db.run(`ALTER TABLE quotes ADD COLUMN shipping_tracking_url TEXT`); } catch {}
+  try { db.run(`ALTER TABLE quotes ADD COLUMN service_type TEXT DEFAULT 'mayorista'`); } catch {}
+  try { db.run(`ALTER TABLE quotes ADD COLUMN client_account_id INTEGER REFERENCES client_accounts(id)`); } catch {}
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS client_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      session_version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  try { db.run(`ALTER TABLE client_accounts ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1`); } catch {}
 
   // Junction table: multiple filaments per quote with grams used
   db.run(`
@@ -504,6 +524,7 @@ export function initDb() {
 
   // Índices sobre columnas de FK/filtro. Evitan full-scans en los N+1 de la
   // lista de cotizaciones, el panel de producción y el resumen financiero.
+  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_quotes_client_token ON quotes(client_token) WHERE client_token IS NOT NULL`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_quote_items_quote ON quote_items(quote_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_quote_filaments_quote ON quote_filaments(quote_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_product_tiers_product ON product_price_tiers(product_id)`);

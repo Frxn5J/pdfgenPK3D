@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { setCookie, deleteCookie } from "hono/cookie";
 import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
+import { generateClientToken, updatePrintedQuantities, updateShippingInfo } from "../db/portal";
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
@@ -3957,6 +3958,17 @@ adminRoutes.get("/quotes/:id", (c) => {
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="md:col-span-1 space-y-6">
+          ${quote.client_token ? `
+          <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-2">
+            <h2 class="text-xs font-bold text-blue-800 uppercase tracking-wider">Link del portal para el cliente</h2>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 text-xs bg-white border border-blue-200 rounded px-2 py-1.5 text-blue-900 truncate" id="portal-link-val">/portal/${escapeHtml(quote.client_token)}</code>
+              <button type="button" onclick="navigator.clipboard.writeText(location.origin+document.getElementById('portal-link-val').textContent);this.textContent='✓ Copiado'" class="text-xs bg-blue-600 hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded whitespace-nowrap transition-colors">Copiar</button>
+            </div>
+            <p class="text-[10px] text-blue-600">Envía este link al cliente para que vea el progreso de su pedido.</p>
+          </div>
+          ` : ""}
+
           <div class="bg-white shadow rounded-lg p-6 space-y-4">
             <h2 class="text-lg font-bold text-gray-800 border-b pb-2">Información del Cliente</h2>
             <div>
@@ -4252,8 +4264,10 @@ adminRoutes.post("/quotes/:id/status", requireRole(["superusuario", "admin", "ed
     return c.text("Estado de cotización no válido.", 400);
   }
   updateQuoteStatus(id, status);
-  // When dispatching, go straight to the production pipeline
-  if (status === "despachado") return c.redirect("/admin/production?tab=pagos");
+  if (status === "despachado") {
+    generateClientToken(id);
+    return c.redirect("/admin/production?tab=pagos");
+  }
   return c.redirect(`/admin/quotes/${id}`);
 });
 
@@ -5139,8 +5153,35 @@ adminRoutes.get("/production", (c) => {
             <div class="pt-3 border-t space-y-2">
               <span class="text-xs text-green-700 font-bold bg-green-50 border border-green-200 px-3 py-1 rounded-full">&#10003; Finalizada</span>
               ${quote.payment_proof_url_final ? `<div class="mt-2"><a href="${escapeHtml(quote.payment_proof_url_final)}" target="_blank" class="text-xs text-blue-600 hover:underline">Ver comprobante de liquidación</a></div>` : ""}
+              <form action="/admin/production/${quote.id}/tracking" method="post" class="mt-3 pt-3 border-t border-dashed border-gray-200 space-y-2">
+                <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Datos de envío (portal del cliente)</div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label class="block text-[10px] text-gray-500 mb-0.5">Número de guía</label>
+                    <input type="text" name="tracking_number" value="${escapeHtml(quote.shipping_tracking_number ?? "")}" placeholder="Ej. 1234567890" class="block w-full text-xs bg-white border border-gray-300 rounded px-2 py-1.5">
+                  </div>
+                  <div>
+                    <label class="block text-[10px] text-gray-500 mb-0.5">URL de rastreo del carrier</label>
+                    <input type="text" name="tracking_url" value="${escapeHtml(quote.shipping_tracking_url ?? "")}" placeholder="https://rastreo.estafeta.com/..." class="block w-full text-xs bg-white border border-gray-300 rounded px-2 py-1.5">
+                  </div>
+                </div>
+                <button type="submit" class="bg-gray-700 hover:bg-gray-800 text-white font-bold text-xs px-3 py-1.5 rounded transition-colors">Guardar datos de envío</button>
+              </form>
             </div>
           ` : `
+            <div class="pt-3 border-t space-y-3">
+              <form action="/admin/production/${quote.id}/progress" method="post" class="space-y-2">
+                <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Progreso de impresión (portal del cliente)</div>
+                ${items.map((item) => `
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs text-gray-700 flex-1 truncate">${escapeHtml(item.product_name)}</span>
+                    <input type="number" name="qty_${item.id}" value="${item.printed_quantity ?? 0}" min="0" max="${item.quantity}" class="w-20 border border-gray-300 rounded px-1.5 py-0.5 text-xs bg-white text-right">
+                    <span class="text-[10px] text-gray-400">/ ${item.quantity}</span>
+                  </div>
+                `).join("")}
+                <button type="submit" class="bg-blue-100 hover:bg-blue-200 text-blue-800 font-bold text-xs px-3 py-1.5 rounded transition-colors">Actualizar progreso</button>
+              </form>
+            </div>
             <div class="pt-3 border-t space-y-3">
               <div class="text-xs text-purple-800 font-bold uppercase tracking-wider flex items-center gap-1">
                 <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -5301,6 +5342,25 @@ adminRoutes.post("/production/:id/finish", requireRole(["superusuario", "admin",
   }
 
   updateQuoteStatus(id, "finalizado");
+  return c.redirect("/admin/production?tab=finalizadas");
+});
+
+adminRoutes.post("/production/:id/progress", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const updates: { id: number; qty: number }[] = [];
+  for (const [key, val] of Object.entries(body)) {
+    const m = key.match(/^qty_(\d+)$/);
+    if (m) updates.push({ id: parseInt(m[1], 10), qty: parseInt(String(val), 10) || 0 });
+  }
+  updatePrintedQuantities(id, updates);
+  return c.redirect("/admin/production?tab=produccion");
+});
+
+adminRoutes.post("/production/:id/tracking", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  updateShippingInfo(id, formString(body.tracking_number), formString(body.tracking_url));
   return c.redirect("/admin/production?tab=finalizadas");
 });
 
