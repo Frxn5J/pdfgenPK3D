@@ -365,6 +365,28 @@ export function initDb() {
   seedConfig("landing_hero_image", "");
   seedConfig("landing_hero_cta_label", "Ver catálogo");
   seedConfig("landing_hero_cta_target", "/catalogo");
+  seedConfig("dark_mode_enabled", "1");
+  // Colores modo oscuro (independientes del modo claro)
+  seedConfig("dark_bg_cover", "#0c1117");
+  seedConfig("dark_color_cover_text", "#f1f5f9");
+  seedConfig("dark_bg_cta", "#1e3a5f");
+  seedConfig("dark_bg_welcome", "#111827");
+  seedConfig("dark_bg_products", "#1f2937");
+  seedConfig("dark_bg_card", "#1e293b");
+  seedConfig("dark_color_card_border", "#374151");
+  seedConfig("dark_color_body_text", "#e2e8f0");
+  seedConfig("dark_color_heading_text", "#f8fafc");
+  seedConfig("dark_color_muted_text", "#94a3b8");
+  seedConfig("dark_bg_table_header", "#374151");
+  seedConfig("dark_color_table_header_text", "#d1d5db");
+  seedConfig("dark_bg_section_dark", "#0f172a");
+  seedConfig("landing_hero_mode", "image");
+  seedConfig("landing_hero_carousel_image_1", "");
+  seedConfig("landing_hero_carousel_image_2", "");
+  seedConfig("landing_hero_carousel_image_3", "");
+  seedConfig("landing_hero_carousel_image_4", "");
+  seedConfig("landing_hero_carousel_image_5", "");
+  seedConfig("landing_hero_carousel_interval", "4000");
   // Beneficios (lista JSON [{icon,title,text}])
   seedConfig("landing_benefits_title", "¿Por qué elegirnos?");
   seedConfig(
