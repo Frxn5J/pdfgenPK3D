@@ -163,7 +163,7 @@ export function getFinancialSummary(from?: string, to?: string): FinancialSummar
   `).get(...fProd.params)?.total || 0;
 
   const fQuotes = dateFilter("created_at");
-  const quoteCount = db.query<{ count: number }, string[]>(`SELECT COUNT(*) as count FROM quotes WHERE status != 'spam' ${fQuotes.clause}`).get(...fQuotes.params)?.count || 0;
+  const quoteCount = db.query<{ count: number }, string[]>(`SELECT COUNT(*) as count FROM quotes WHERE status NOT IN ('spam', 'draft') ${fQuotes.clause}`).get(...fQuotes.params)?.count || 0;
   const fPaid = dateFilter("created_at");
   const paidQuoteCount = db.query<{ count: number }, string[]>(`SELECT COUNT(*) as count FROM quotes WHERE status IN ('despachado', 'produccion', 'finalizado') ${fPaid.clause}`).get(...fPaid.params)?.count || 0;
   const fPending = dateFilter("created_at");

@@ -24,6 +24,12 @@ export interface QuoteInput {
   whatsapp_number: string;
   message: string;
   items: QuoteItemInput[];
+  cond_entrega?: string;
+  cond_pago?: string;
+  cond_prioritario?: string;
+  forma_pago?: string;
+  source?: string;
+  status?: string;
 }
 
 export interface Quote {
@@ -45,6 +51,11 @@ export interface Quote {
   whatsapp_number: string | null;
   message: string | null;
   created_at: string;
+  cond_entrega: string | null;
+  cond_pago: string | null;
+  cond_prioritario: string | null;
+  forma_pago: string | null;
+  source: string | null;
 }
 
 export interface QuoteItem {
@@ -105,8 +116,9 @@ export function createQuote(input: QuoteInput) {
   const insertQuote = db.prepare(`
     INSERT INTO quotes (
       customer_name, postal_code, total_pieces, subtotal, shipping_provider, shipping_cost,
-      shipping_free_threshold, grand_total, whatsapp_number, message
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+      shipping_free_threshold, grand_total, whatsapp_number, message,
+      cond_entrega, cond_pago, cond_prioritario, forma_pago, source, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
   `);
   const insertItem = db.prepare(`
     INSERT INTO quote_items (
@@ -126,6 +138,12 @@ export function createQuote(input: QuoteInput) {
       quote.grand_total,
       quote.whatsapp_number,
       quote.message,
+      quote.cond_entrega ?? "",
+      quote.cond_pago ?? "",
+      quote.cond_prioritario ?? "",
+      quote.forma_pago ?? "",
+      quote.source ?? "admin",
+      quote.status ?? "new",
     ) as { id: number };
 
     for (const item of quote.items) {
@@ -157,8 +175,88 @@ export function updateQuoteStatus(id: number, status: string) {
   db.run(`UPDATE quotes SET status = ? WHERE id = ?`, [status, id]);
 }
 
+export function updateQuote(
+  id: number,
+  data: Partial<{
+    customer_name: string;
+    postal_code: string;
+    shipping_provider: string;
+    shipping_cost: number;
+    shipping_free_threshold: number | null;
+    whatsapp_number: string;
+    cond_entrega: string;
+    cond_pago: string;
+    cond_prioritario: string;
+    forma_pago: string;
+  }>,
+) {
+  const fields: string[] = [];
+  const values: any[] = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (value !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.run(`UPDATE quotes SET ${fields.join(", ")} WHERE id = ?`, values);
+}
+
+export function updateQuoteItem(
+  itemId: number,
+  data: { quantity?: number; unit_price?: number; subtotal?: number; custom_image_url?: string | null },
+) {
+  const fields: string[] = [];
+  const values: any[] = [];
+  if (data.quantity !== undefined) { fields.push("quantity = ?"); values.push(data.quantity); }
+  if (data.unit_price !== undefined) { fields.push("unit_price = ?"); values.push(data.unit_price); }
+  if (data.subtotal !== undefined) { fields.push("subtotal = ?"); values.push(data.subtotal); }
+  if (data.custom_image_url !== undefined) { fields.push("custom_image_url = ?"); values.push(data.custom_image_url); }
+  if (fields.length === 0) return;
+  values.push(itemId);
+  db.run(`UPDATE quote_items SET ${fields.join(", ")} WHERE id = ?`, values);
+}
+
+export function addQuoteItem(quoteId: number, item: QuoteItemInput) {
+  db.run(
+    `INSERT INTO quote_items (quote_id, product_id, product_name, quantity, unit_price, subtotal, pricing_min_volume, pricing_max_volume, delivery_time, custom_image_url)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      quoteId,
+      item.product_id,
+      item.product_name,
+      item.quantity,
+      item.unit_price,
+      item.subtotal,
+      item.pricing_min_volume,
+      item.pricing_max_volume,
+      item.delivery_time,
+      item.custom_image_url ?? null,
+    ],
+  );
+}
+
+export function deleteQuoteItem(itemId: number) {
+  db.run(`DELETE FROM quote_items WHERE id = ?`, [itemId]);
+}
+
+export function recalculateQuoteTotals(quoteId: number) {
+  const items = db.query<{ subtotal: number }, [number]>(`SELECT subtotal FROM quote_items WHERE quote_id = ?`).all(quoteId);
+  const subtotal = items.reduce((s, i) => s + i.subtotal, 0);
+  const quote = getQuote(quoteId);
+  if (!quote) return;
+  const shippingCost = quote.shipping_cost || 0;
+  const grandTotal = subtotal + shippingCost;
+  db.run(`UPDATE quotes SET subtotal = ?, total_pieces = (SELECT COALESCE(SUM(quantity), 0) FROM quote_items WHERE quote_id = ?), grand_total = ? WHERE id = ?`, [subtotal, quoteId, grandTotal, quoteId]);
+}
+
 export function getQuotes(limit = 100) {
   return db.query<Quote, [number]>(`SELECT * FROM quotes ORDER BY id DESC LIMIT ?`).all(limit);
+}
+
+export function getQuotesBySource(source: string, limit = 50) {
+  return db.query<Quote, [string, number]>(`SELECT * FROM quotes WHERE source = ? ORDER BY id DESC LIMIT ?`).all(source, limit);
 }
 
 export function getQuote(id: number) {

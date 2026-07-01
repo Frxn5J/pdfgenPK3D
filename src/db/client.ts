@@ -227,6 +227,23 @@ export function initDb() {
     db.run(`ALTER TABLE quotes ADD COLUMN payment_proof_url_final TEXT`);
   } catch {}
 
+  // Migrate quotes: condiciones y forma de pago para PDF
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN cond_entrega TEXT DEFAULT ''`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN cond_pago TEXT DEFAULT ''`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN cond_prioritario TEXT DEFAULT ''`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN forma_pago TEXT DEFAULT ''`);
+  } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN source TEXT DEFAULT 'admin'`);
+  } catch {}
+
   // Junction table: multiple filaments per quote with grams used
   db.run(`
     CREATE TABLE IF NOT EXISTS quote_filaments (

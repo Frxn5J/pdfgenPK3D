@@ -24,6 +24,9 @@ export const renderStatusBadge = (status: string) => {
   if (status === "spam") {
     return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-red-100 text-red-800 border border-red-200">Spam</span>`;
   }
+  if (status === "draft") {
+    return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-gray-100 text-gray-700 border border-gray-300">Borrador</span>`;
+  }
   return `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">No despachada</span>`;
 };
 

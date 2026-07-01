@@ -6,6 +6,7 @@ import { initDb } from "./db/schema";
 import { ensureSessionSecret } from "./lib/session";
 import { publicRoutes } from "./routes/public";
 import { adminRoutes } from "./routes/admin";
+import { n8nRoutes } from "./routes/n8n";
 import { getCookie, setCookie } from "hono/cookie";
 import { join } from "path";
 import * as fs from "fs";
@@ -60,6 +61,7 @@ app.use("/uploads/*", serveStatic({ root: "./data/" }));
 app.use("/styles.css", serveStatic({ path: "./src/public/styles.css" }));
 
 app.route("/", publicRoutes);
+app.route("/", n8nRoutes);
 app.route("/admin", adminRoutes);
 
 export { app };

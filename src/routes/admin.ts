@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuotesBySource, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, updateQuote, updateQuoteItem, addQuoteItem, deleteQuoteItem, recalculateQuoteTotals, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
@@ -1160,6 +1160,7 @@ adminRoutes.get("/quotes", (c) => {
 
       <div class="flex border-b border-gray-200 mb-6 bg-gray-50 p-1.5 rounded-lg gap-1.5 max-w-xl">
         <a href="/admin/quotes?status=todos" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'todos' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">Todas</a>
+        <a href="/admin/quotes?status=draft" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'draft' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">Borradores</a>
         <a href="/admin/quotes?status=no_despachado" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'no_despachado' ? 'bg-yellow-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">No despachadas</a>
         <a href="/admin/quotes?status=despachado" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'despachado' ? 'bg-green-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">Despachadas</a>
         <a href="/admin/quotes?status=produccion" class="px-4 py-2 text-xs font-bold rounded-md transition-all ${currentStatus === 'produccion' ? 'bg-blue-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}">En Producción</a>
@@ -3946,8 +3947,15 @@ adminRoutes.get("/quotes/:id", (c) => {
 
   const defaultDelivery = `10 días hábiles para el envío por ${quote.shipping_provider || 'paquetería'} despues del pago del anticipo`;
 
+  const sentOk = c.req.query("sent") === "ok";
+
   return c.html(AdminLayout(`Detalle Cotización #${quote.id}`, `
     <div class="space-y-6">
+      ${sentOk ? `
+      <div class="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg flex items-center gap-2 text-sm font-semibold">
+        ✅ Cotización enviada a WhatsApp del cliente exitosamente
+      </div>
+      ` : ""}
       <div class="flex items-center justify-between">
         <a href="/admin/quotes" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-md text-sm font-semibold transition-colors">
           ← Volver a lista
@@ -3990,16 +3998,35 @@ adminRoutes.get("/quotes/:id", (c) => {
             <div class="pt-3 border-t">
               <span class="text-xs text-gray-500 block uppercase font-semibold mb-3">Cambiar estado</span>
               <form action="/admin/quotes/${quote.id}/status" method="post" class="flex flex-col gap-2">
+                ${quote.status === 'draft' ? `
+                <button type="submit" name="status" value="draft" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
+                  📝 Mantener como Borrador
+                </button>
+                ` : ''}
                 <button type="submit" name="status" value="despachado" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
                   ✓ Marcar como Despachada
                 </button>
                 <button type="submit" name="status" value="no_despachado" class="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
                   ⚠ Marcar como No Despachada
                 </button>
+                <button type="submit" name="status" value="produccion" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
+                  🔧 Marcar como En Producción
+                </button>
+                <button type="submit" name="status" value="finalizado" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
+                  ✅ Marcar como Finalizada
+                </button>
                 <button type="submit" name="status" value="spam" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
                   ✕ Marcar como Spam
                 </button>
               </form>
+            </div>
+            <div class="pt-3 border-t">
+              <form action="/admin/quotes/${quote.id}/send-whatsapp" method="post" onsubmit="return confirm('¿Enviar esta cotización a WhatsApp del cliente?')">
+                <button type="submit" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
+                  📤 Enviar a WhatsApp del Cliente
+                </button>
+              </form>
+              <p class="text-[10px] text-gray-400 mt-1 text-center">Envía el PDF vía n8n webhook</p>
             </div>
           </div>
         </div>
@@ -4029,6 +4056,127 @@ adminRoutes.get("/quotes/:id", (c) => {
             <div class="text-base font-bold text-gray-900 border-t pt-1 w-48 text-right">Total: <span>${money(quote.grand_total)}</span></div>
           </div>
         </div>
+      </div>
+
+      ${/* ── Editor completo de cotización (visible siempre, expandido por defecto en drafts) ── */ ""}
+      <div class="bg-white shadow rounded-lg p-6 ${quote.status === 'draft' ? '' : 'print-hidden'}">
+        <details ${quote.status === 'draft' ? 'open' : ''} class="group">
+          <summary class="flex items-center justify-between cursor-pointer select-none">
+            <h2 class="text-lg font-bold text-gray-800 border-b pb-2 border-transparent group-open:border-gray-200 group-open:pb-3 group-open:mb-4">
+              ${quote.status === 'draft' ? '✏️ Editar Borrador' : '✏️ Editar Cotización'}
+              ${quote.status === 'draft' ? '<span class="ml-2 text-xs bg-red-100 text-red-700 font-bold px-2 py-0.5 rounded-full">Revisa antes de despachar</span>' : ''}
+            </h2>
+            <span class="text-xs text-gray-400 group-open:hidden">Expandir ▼</span>
+            <span class="text-xs text-gray-400 hidden group-open:inline">Contraer ▲</span>
+          </summary>
+          <form action="/admin/quotes/${quote.id}/update" method="post" class="space-y-6">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Cliente</label>
+                <input type="text" name="customer_name" value="${escapeHtml(quote.customer_name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Código Postal</label>
+                <input type="text" name="postal_code" value="${escapeHtml(quote.postal_code)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">WhatsApp</label>
+                <input type="text" name="whatsapp_number" value="${escapeHtml(quote.whatsapp_number || '')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Proveedor Envío</label>
+                <input type="text" name="shipping_provider" value="${escapeHtml(quote.shipping_provider)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Costo Envío ($)</label>
+                <input type="number" name="shipping_cost" value="${quote.shipping_cost}" step="0.01" min="0" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Envío Gratis Desde (pzs)</label>
+                <input type="number" name="shipping_free_threshold" value="${quote.shipping_free_threshold ?? ''}" step="1" min="0" placeholder="N/A" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Condiciones de Entrega</label>
+                <input type="text" name="cond_entrega" value="${escapeHtml(quote.cond_entrega || '')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Condiciones de Pago</label>
+                <input type="text" name="cond_pago" value="${escapeHtml(quote.cond_pago || '')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Condición Prioritario</label>
+                <input type="text" name="cond_prioritario" value="${escapeHtml(quote.cond_prioritario || '')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Forma de Pago</label>
+                <input type="text" name="forma_pago" value="${escapeHtml(quote.forma_pago || '')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 pt-2 border-t">
+              <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-2 rounded-md text-sm transition-colors">
+                💾 Guardar cambios
+              </button>
+            </div>
+          </form>
+
+          <hr class="my-6">
+
+          <h3 class="text-md font-bold text-gray-800 mb-4">Productos (editar cantidades, precios y diseño)</h3>
+          <div class="space-y-3">
+            ${items.map((item) => {
+              const designImg = item.custom_image_url || item.product_image_url || "";
+              return `
+              <div class="p-3 bg-gray-50 rounded-lg border">
+                <form action="/admin/quotes/${quote.id}/items/${item.id}/update" method="post" class="flex flex-wrap items-center gap-2">
+                  <input type="hidden" name="return_to" value="/admin/quotes/${quote.id}">
+                  ${designImg ? `<img src="${escapeHtml(designImg)}" class="w-10 h-10 object-cover rounded border" alt="diseño">` : `<div class="w-10 h-10 bg-gray-200 rounded border flex items-center justify-center text-gray-400 text-[10px]">Sin img</div>`}
+                  <span class="font-semibold text-sm min-w-[140px]">${escapeHtml(item.product_name)}</span>
+                  <label class="text-xs text-gray-500">Cant:</label>
+                  <input type="number" name="quantity" value="${item.quantity}" min="1" class="w-16 border border-gray-300 rounded px-2 py-1 text-sm">
+                  <label class="text-xs text-gray-500">P/U:</label>
+                  <input type="number" name="unit_price" value="${item.unit_price}" step="0.01" min="0" class="w-20 border border-gray-300 rounded px-2 py-1 text-sm">
+                  <label class="text-xs text-gray-500">Subtotal:</label>
+                  <input type="number" name="subtotal" value="${item.subtotal}" step="0.01" min="0" class="w-20 border border-gray-300 rounded px-2 py-1 text-sm">
+                  <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-2.5 py-1.5 rounded transition-colors">Guardar</button>
+                  <button type="submit" formaction="/admin/quotes/${quote.id}/items/${item.id}/delete" class="bg-red-500 hover:bg-red-600 text-white font-bold text-xs px-2.5 py-1.5 rounded transition-colors" onclick="return confirm('¿Eliminar este producto?')">✕</button>
+                </form>
+                <form action="/admin/quotes/${quote.id}/items/${item.id}/upload-image" method="post" enctype="multipart/form-data" class="mt-2 flex flex-wrap items-center gap-2 border-t pt-2 border-gray-200">
+                  <label class="text-xs font-semibold text-gray-500">Diseño:</label>
+                  <input type="file" name="design_image" accept="image/png,image/jpeg,image/webp,image/gif" class="text-xs w-40">
+                  <span class="text-xs text-gray-400">o</span>
+                  <input type="url" name="design_image_url" placeholder="URL de la imagen" value="${escapeHtml(item.custom_image_url || '')}" class="flex-1 min-w-[200px] border border-gray-300 rounded px-2 py-1 text-xs">
+                  <button type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold text-xs px-2.5 py-1.5 rounded transition-colors">Subir</button>
+                </form>
+              </div>
+            `;
+            }).join("")}
+          </div>
+
+          <details class="mt-4">
+            <summary class="text-sm text-blue-600 font-semibold cursor-pointer hover:text-blue-800">+ Agregar producto manual</summary>
+            <form action="/admin/quotes/${quote.id}/items/add" method="post" class="mt-3 flex flex-wrap items-end gap-3 p-3 bg-gray-50 rounded-lg border">
+              <div>
+                <label class="block text-xs font-semibold text-gray-600">Producto</label>
+                <input type="text" name="product_name" placeholder="Nombre del producto" required class="mt-1 px-3 py-2 border border-gray-300 rounded-md text-sm w-48">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600">Cant</label>
+                <input type="number" name="quantity" value="1" min="1" class="mt-1 w-16 border border-gray-300 rounded px-2 py-1 text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600">P/U ($)</label>
+                <input type="number" name="unit_price" value="0" step="0.01" min="0" class="mt-1 w-20 border border-gray-300 rounded px-2 py-1 text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600">ID Producto (opcional)</label>
+                <input type="number" name="product_id" placeholder="0" class="mt-1 w-20 border border-gray-300 rounded px-2 py-1 text-sm">
+              </div>
+              <button type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-2 rounded-md text-sm transition-colors">+ Agregar</button>
+            </form>
+          </details>
+        </details>
       </div>
 
       <div class="bg-white shadow rounded-lg p-6">
@@ -4242,7 +4390,7 @@ adminRoutes.get("/quotes/:id", (c) => {
   `, c.get("session") as SessionData | undefined));
 });
 
-const VALID_QUOTE_STATUSES = ["no_despachado", "despachado", "produccion", "finalizado", "spam"];
+const VALID_QUOTE_STATUSES = ["draft", "no_despachado", "despachado", "produccion", "finalizado", "spam"];
 
 adminRoutes.post("/quotes/:id/status", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const id = parseInt(c.req.param("id"), 10);
@@ -4268,6 +4416,152 @@ adminRoutes.post("/quotes/:id/items/:itemId/print-values", requireRole(["superus
   const returnTo = /^\/(?!\/)/.test(rawReturn) ? rawReturn : `/admin/quotes/${quoteId}`;
   updateQuoteItemPrintValues(itemId, filamentGrams, printTimeMins);
   return c.redirect(returnTo);
+});
+
+// ── Edición completa de cotización (borradores n8n y edición general) ─────
+adminRoutes.post("/quotes/:id/update", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const quote = getQuote(id);
+  if (!quote) return c.notFound();
+
+  const body = await c.req.parseBody() as Record<string, unknown>;
+
+  updateQuote(id, {
+    customer_name: String(body.customer_name ?? "").trim().slice(0, 200) || undefined,
+    postal_code: String(body.postal_code ?? "").trim().slice(0, 10) || undefined,
+    shipping_provider: String(body.shipping_provider ?? "").trim().slice(0, 100) || undefined,
+    shipping_cost: body.shipping_cost !== "" ? parseFloat(String(body.shipping_cost)) : undefined,
+    shipping_free_threshold: body.shipping_free_threshold !== "" ? parseInt(String(body.shipping_free_threshold), 10) : null,
+    whatsapp_number: String(body.whatsapp_number ?? "").trim().slice(0, 20) || undefined,
+    cond_entrega: String(body.cond_entrega ?? "").trim().slice(0, 500) || undefined,
+    cond_pago: String(body.cond_pago ?? "").trim().slice(0, 500) || undefined,
+    cond_prioritario: String(body.cond_prioritario ?? "").trim().slice(0, 500) || undefined,
+    forma_pago: String(body.forma_pago ?? "").trim().slice(0, 500) || undefined,
+  });
+
+  recalculateQuoteTotals(id);
+  return c.redirect(`/admin/quotes/${id}`);
+});
+
+adminRoutes.post("/quotes/:id/items/add", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const quote = getQuote(id);
+  if (!quote) return c.notFound();
+
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const productId = parseInt(String(body.product_id ?? "0"), 10) || null;
+  const quantity = Math.max(1, parseInt(String(body.quantity ?? "1"), 10) || 1);
+  const unitPrice = parseFloat(String(body.unit_price ?? "0")) || 0;
+
+  addQuoteItem(id, {
+    product_id: productId,
+    product_name: String(body.product_name ?? "Producto").trim().slice(0, 200),
+    quantity,
+    unit_price: unitPrice,
+    subtotal: unitPrice * quantity,
+    pricing_min_volume: null,
+    pricing_max_volume: null,
+    delivery_time: null,
+    custom_image_url: String(body.custom_image_url ?? "").trim() || null,
+  });
+
+  recalculateQuoteTotals(id);
+  return c.redirect(`/admin/quotes/${id}`);
+});
+
+adminRoutes.post("/quotes/:id/items/:itemId/update", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const quoteId = parseInt(c.req.param("id"), 10);
+  const itemId = parseInt(c.req.param("itemId"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+
+  const quantity = Math.max(1, parseInt(String(body.quantity ?? "1"), 10) || 1);
+  const unitPrice = parseFloat(String(body.unit_price ?? "0")) || 0;
+  const subtotal = body.subtotal !== "" ? parseFloat(String(body.subtotal)) : unitPrice * quantity;
+
+  updateQuoteItem(itemId, { quantity, unit_price: unitPrice, subtotal });
+  recalculateQuoteTotals(quoteId);
+  return c.redirect(`/admin/quotes/${quoteId}`);
+});
+
+adminRoutes.post("/quotes/:id/items/:itemId/delete", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const quoteId = parseInt(c.req.param("id"), 10);
+  const itemId = parseInt(c.req.param("itemId"), 10);
+  deleteQuoteItem(itemId);
+  recalculateQuoteTotals(quoteId);
+  return c.redirect(`/admin/quotes/${quoteId}`);
+});
+
+// ── Subir imagen de diseño para un item de la cotización ──────────────────
+adminRoutes.post("/quotes/:id/items/:itemId/upload-image", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const quoteId = parseInt(c.req.param("id"), 10);
+  const itemId = parseInt(c.req.param("itemId"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const file = formFile(body.design_image);
+  if (file) {
+    const url = await saveImageUpload(file, "quote-items", `q${quoteId}-i${itemId}`);
+    updateQuoteItem(itemId, { custom_image_url: url });
+  } else {
+    const url = String(body.design_image_url ?? "").trim();
+    if (url) updateQuoteItem(itemId, { custom_image_url: url });
+  }
+  return c.redirect(`/admin/quotes/${quoteId}`);
+});
+
+// ── Enviar cotización a WhatsApp del cliente vía webhook n8n ─────────────
+adminRoutes.post("/quotes/:id/send-whatsapp", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const quote = getQuote(id);
+  if (!quote) return c.notFound();
+  const config = getConfig();
+
+  const webhookUrl = process.env.N8N_WEBHOOK_WHATSAPP_URL || config.n8n_webhook_whatsapp_url || "";
+  if (!webhookUrl) {
+    return c.text("Webhook de WhatsApp no configurado. Define N8N_WEBHOOK_WHATSAPP_URL en .env o en Configuración.", 400);
+  }
+
+  const apiKey = (process.env.N8N_API_KEY || "").trim();
+  const baseUrl = `${c.req.url.split("/").slice(0, 3).join("/")}`; // https://dominio.com
+  const pdfUrl = `${baseUrl}/api/n8n/pdf/${id}`;
+  const items = getQuoteItemsWithProducts(id);
+  const lines = items.map((item) => `- ${item.product_name} x${item.quantity}: $${item.unit_price.toFixed(2)} c/u`).join("\n");
+
+  const payload = {
+    folio: `COT-${String(quote.id).padStart(3, "0")}`,
+    customerName: quote.customer_name,
+    phone: `52${quote.postal_code}`, // no, debe ser el whatsapp_number
+    phone: quote.whatsapp_number || "",
+    message: quote.message || "",
+    totalPieces: quote.total_pieces,
+    subtotal: quote.subtotal,
+    shippingCost: quote.shipping_cost,
+    grandTotal: quote.grand_total,
+    pdfUrl,
+    apiKey,
+    items: items.map((i) => ({
+      productName: i.product_name,
+      quantity: i.quantity,
+      unitPrice: i.unit_price,
+      subtotal: i.subtotal,
+      imageUrl: i.custom_image_url || i.product_image_url || null,
+    })),
+  };
+
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      console.error("[whatsapp] n8n webhook responded", res.status, await res.text().catch(() => ""));
+      return c.text(`Error al enviar: webhook respondió ${res.status}`, 500);
+    }
+    return c.redirect(`/admin/quotes/${id}?sent=ok`);
+  } catch (err) {
+    console.error("[whatsapp] n8n webhook failed", err);
+    return c.text("Error de conexión con el webhook de n8n.", 500);
+  }
 });
 
 adminRoutes.get("/quotes/:id/pdf", (c) => {
@@ -5886,6 +6180,89 @@ adminRoutes.get("/finanzas/reportes", requireRole(["superusuario", "admin"]), (c
           </tbody>
         </table>
       </div>
+    </div>
+  `, c.get("session") as SessionData | undefined));
+});
+
+// ── Cotizaciones n8n (borradores con imágenes) ──────────────────────────────
+adminRoutes.get("/n8n-quotes", (c) => {
+  const quotes = getQuotesBySource("n8n", 50);
+  const config = getConfig();
+
+  const rows = quotes.map((q) => {
+    const items = getQuoteItemsWithProducts(q.id);
+    const firstImage = items.find((i) => i.custom_image_url);
+    const itemList = items.map((i) => {
+      const img = i.custom_image_url
+        ? `<img src="${escapeHtml(i.custom_image_url)}" alt="${escapeHtml(i.product_name)}" class="w-12 h-12 object-cover rounded border">`
+        : `<div class="w-12 h-12 bg-gray-100 rounded border flex items-center justify-center text-gray-400 text-[10px]">${escapeHtml(i.product_name.slice(0, 2))}</div>`;
+      return `<div class="flex items-center gap-2 py-1 border-b border-gray-100 last:border-0">
+        ${img}
+        <div class="text-xs flex-1 min-w-0">
+          <div class="font-semibold truncate">${escapeHtml(i.product_name)}</div>
+          <div class="text-gray-500">${i.quantity} pza(s) · $${plainMoney(i.subtotal)}</div>
+        </div>
+      </div>`;
+    }).join("");
+
+    const imageCount = items.filter((i) => i.custom_image_url).length;
+
+    return `<tr class="hover:bg-gray-50 transition-colors">
+      <td class="px-3 py-2 text-xs font-mono font-bold text-red-600 whitespace-nowrap">${escapeHtml(quoteFolio(q))}</td>
+      <td class="px-3 py-2">
+        <div class="font-semibold text-sm">${escapeHtml(q.customer_name)}</div>
+        <div class="text-[11px] text-gray-500">CP ${escapeHtml(q.postal_code)} · ${formatDate(q.created_at)}</div>
+      </td>
+      <td class="px-3 py-2">${renderStatusBadge(q.status)}</td>
+      <td class="px-3 py-2 text-xs">${q.total_pieces} pza(s)</td>
+      <td class="px-3 py-2 text-xs font-mono text-right">${money(q.grand_total)}</td>
+      <td class="px-3 py-2 max-w-[200px]">${itemList}</td>
+      <td class="px-3 py-2 text-center text-xs text-gray-400">${imageCount > 0 ? `🖼 ${imageCount}` : "—"}</td>
+      <td class="px-3 py-2 whitespace-nowrap">
+        <a href="/admin/quotes/${q.id}" class="inline-block bg-blue-600 hover:bg-blue-700 text-white text-[11px] px-2.5 py-1 rounded font-semibold transition-colors">Editar</a>
+      </td>
+    </tr>`;
+  }).join("");
+
+  return c.html(AdminLayout("Cotizaciones n8n · PixKey3D", `
+    <div class="max-w-7xl mx-auto">
+      <div class="flex items-center justify-between mb-6">
+        <div>
+          <h1 class="text-2xl font-black text-gray-900">Cotizaciones n8n</h1>
+          <p class="text-sm text-gray-500">Recibidas automáticamente desde WhatsApp · <span class="font-semibold text-yellow-700">Revisa y edita cada borrador antes de despachar</span></p>
+        </div>
+        <div class="flex items-center gap-2 text-sm text-gray-500">
+          <span class="font-semibold">${quotes.length}</span> cotización(es)
+        </div>
+      </div>
+
+      ${rows.length === 0 ? `
+        <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
+          <div class="text-4xl mb-3">📭</div>
+          <h2 class="text-lg font-bold text-gray-900 mb-1">Sin cotizaciones</h2>
+          <p class="text-sm text-gray-500">Aún no hay cotizaciones creadas desde n8n. Cuando un cliente pida una cotización por WhatsApp, aparecerá aquí.</p>
+        </div>
+      ` : `
+      <div class="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead>
+            <tr class="bg-gray-50 border-b border-gray-200 text-[11px] text-gray-500 uppercase font-bold">
+              <th class="px-3 py-2.5 text-left">Folio</th>
+              <th class="px-3 py-2.5 text-left">Cliente</th>
+              <th class="px-3 py-2.5 text-left">Estado</th>
+              <th class="px-3 py-2.5 text-left">Piezas</th>
+              <th class="px-3 py-2.5 text-right">Total</th>
+              <th class="px-3 py-2.5 text-left">Productos</th>
+              <th class="px-3 py-2.5 text-center">Img</th>
+              <th class="px-3 py-2.5 text-center">Acción</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            ${rows}
+          </tbody>
+        </table>
+      </div>
+      `}
     </div>
   `, c.get("session") as SessionData | undefined));
 });
