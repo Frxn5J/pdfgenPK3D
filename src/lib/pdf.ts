@@ -1,12 +1,8 @@
+import { chromium } from "playwright";
 import { getQuote } from "../db/schema";
 import { signSession } from "./session";
-import { join } from "path";
 
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
-
-function qs(v: string | null | undefined): string {
-  return encodeURIComponent(v ?? "");
-}
 
 export async function renderQuotePdf(quoteId: number): Promise<Uint8Array> {
   const quote = getQuote(quoteId);
@@ -20,24 +16,52 @@ export async function renderQuotePdf(quoteId: number): Promise<Uint8Array> {
     exp: Date.now() + 60_000,
   });
 
-  const workerPath = join(import.meta.dir, "pdf-worker.mjs");
+  const params = new URLSearchParams({
+    cond_entrega: quote.cond_entrega ?? "",
+    cond_pago: quote.cond_pago ?? "",
+    cond_prioritario: quote.cond_prioritario ?? "",
+    forma_pago: quote.forma_pago ?? "",
+  });
+  const url = `http://localhost:${PORT}/admin/quotes/${quoteId}/pdf?${params}`;
 
-  // Pasar los campos extra como argumentos para que el worker los ponga en la URL
-  const extra = [
-    "cond_entrega", qs(quote.cond_entrega),
-    "cond_pago", qs(quote.cond_pago),
-    "cond_prioritario", qs(quote.cond_prioritario),
-    "forma_pago", qs(quote.forma_pago),
-  ];
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.context().addCookies([
+      {
+        name: "admin_session",
+        value: token,
+        domain: "localhost",
+        path: "/",
+        httpOnly: true,
+        sameSite: "Lax",
+      },
+    ]);
 
-  const proc = Bun.spawn(["node", workerPath, String(quoteId), token, String(PORT), ...extra]);
-  const exitCode = await proc.exited;
+    await page.goto(url, { waitUntil: "networkidle", timeout: 20_000 });
 
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw new Error(`PDF worker failed (exit ${exitCode}): ${stderr}`);
+    // Esperar a que el script numeroALetras complete
+    try {
+      await page.waitForSelector("#grand-total-letters", { timeout: 10_000 });
+      await page.waitForFunction(
+        `(() => {
+          const el = document.getElementById("grand-total-letters");
+          return !!el && el.textContent !== "..." && el.textContent !== "";
+        })()`,
+        undefined,
+        { timeout: 10_000 },
+      );
+    } catch {
+      // Si no se encuentra el selector, continuar de todas formas
+    }
+
+    const pdfBuf = await page.pdf({
+      format: "Letter",
+      printBackground: true,
+      margin: { top: "0.4in", bottom: "0.4in", left: "0.4in", right: "0.4in" },
+    });
+    return pdfBuf;
+  } finally {
+    await browser.close();
   }
-
-  const buf = await new Response(proc.stdout).arrayBuffer();
-  return new Uint8Array(buf);
 }

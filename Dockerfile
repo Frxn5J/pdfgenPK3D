@@ -18,6 +18,11 @@ WORKDIR /app
 # Copy built assets
 COPY --from=builder /app .
 
+# Ruta fija para el navegador de Playwright: se instala aquí como root (build)
+# y se lee desde acá en runtime como usuario "bun" (vía gosu), sin depender de $HOME.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN bunx playwright install --with-deps chromium && rm -rf /var/lib/apt/lists/*
+
 # Create volume mount point for sqlite and uploads, propiedad del usuario bun
 RUN mkdir -p /app/data/uploads && chown -R bun:bun /app/data
 

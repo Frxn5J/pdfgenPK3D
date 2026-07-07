@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { timingSafeEqual } from "crypto";
-import { createQuote, getConfig, getProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage } from "../db/schema";
+import { createQuote, getConfig, getProducts, getCategories, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage } from "../db/schema";
 import { sendPushToAll } from "../pwa";
 import { join } from "path";
 import * as fs from "fs";
@@ -139,18 +139,47 @@ const isValidApiKey = (received: string, expected: string): boolean => {
   return timingSafeEqual(receivedBuf, expectedBuf);
 };
 
+// Devuelve una Response de error si la auth falla, o null si el request puede continuar.
+const checkN8nAuth = (c: any) => {
+  const apiKey = (process.env.N8N_API_KEY || "").trim();
+  if (!apiKey) return c.json({ error: "n8n API no configurada." }, 503);
+
+  const authHeader = c.req.header("authorization") || "";
+  const [scheme, token] = authHeader.split(" ");
+  if (scheme !== "Bearer" || !token || !isValidApiKey(token, apiKey)) {
+    return c.json({ error: "No autorizado." }, 401);
+  }
+  return null;
+};
+
+// ── Catálogo para que el agente/LLM de n8n resuelva nombre de producto → ID ─
+n8nRoutes.get("/api/n8n/products", (c) => {
+  const authError = checkN8nAuth(c);
+  if (authError) return authError;
+
+  const { productsWithTiers } = getCatalogData();
+  const categoryById = new Map(getCategories().map((cat) => [cat.id, cat.name]));
+
+  const products = productsWithTiers.map(({ product, priceTiers }) => ({
+    id: product.id,
+    name: product.name,
+    description: product.description,
+    category: product.category_id ? categoryById.get(product.category_id) || null : null,
+    priceTiers: priceTiers.map((tier) => ({
+      minVolume: tier.min_volume,
+      maxVolume: tier.max_volume,
+      price: tier.price,
+      deliveryTime: tier.delivery_time,
+    })),
+  }));
+
+  return c.json({ products });
+});
+
 n8nRoutes.post("/api/n8n/quotes", async (c) => {
   try {
-    const apiKey = (process.env.N8N_API_KEY || "").trim();
-    if (!apiKey) {
-      return c.json({ error: "n8n API no configurada." }, 503);
-    }
-
-    const authHeader = c.req.header("authorization") || "";
-    const [scheme, token] = authHeader.split(" ");
-    if (scheme !== "Bearer" || !token || !isValidApiKey(token, apiKey)) {
-      return c.json({ error: "No autorizado." }, 401);
-    }
+    const authError = checkN8nAuth(c);
+    if (authError) return authError;
 
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const customerName = String(body.customerName ?? body.customer_name ?? "").trim().slice(0, 200);
@@ -345,14 +374,8 @@ n8nRoutes.post("/api/n8n/quotes", async (c) => {
 // ── Descargar PDF de cotización (autenticado con bearer token) ────────────
 n8nRoutes.get("/api/n8n/pdf/:id", async (c) => {
   try {
-    const apiKey = (process.env.N8N_API_KEY || "").trim();
-    if (!apiKey) return c.json({ error: "n8n API no configurada." }, 503);
-
-    const authHeader = c.req.header("authorization") || "";
-    const [scheme, token] = authHeader.split(" ");
-    if (scheme !== "Bearer" || !token || !isValidApiKey(token, apiKey)) {
-      return c.json({ error: "No autorizado." }, 401);
-    }
+    const authError = checkN8nAuth(c);
+    if (authError) return authError;
 
     const id = Number.parseInt(c.req.param("id"), 10);
     if (!Number.isFinite(id)) return c.json({ error: "ID inválido." }, 400);

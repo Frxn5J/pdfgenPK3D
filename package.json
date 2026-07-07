@@ -23,6 +23,8 @@
     "cookie-signature": "^1.2.2",
     "dotenv": "^17.4.2",
     "hono": "^4.12.21",
+    "pdfmake": "^0.3.11",
+    "playwright": "^1.61.1",
     "sqlite-vss": "^0.1.2",
     "web-push": "^3.6.7",
     "zod": "^4.4.3"
