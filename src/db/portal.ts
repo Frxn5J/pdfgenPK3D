@@ -34,6 +34,37 @@ export function getQuotesByAccountId(accountId: number): Quote[] {
 
 export interface ClientSession { accountId: number; email: string; exp: number; sv: number; }
 
+export interface ClientProfile {
+  full_name: string;
+  phone: string;
+  address: string;
+  notify_whatsapp: number;
+  notify_email: number;
+}
+
+export function getClientProfile(accountId: number): ClientProfile {
+  const row = db.query<ClientProfile, [number]>(
+    `SELECT full_name, phone, address, notify_whatsapp, notify_email FROM client_accounts WHERE id = ?`
+  ).get(accountId);
+  return row ?? { full_name: "", phone: "", address: "", notify_whatsapp: 1, notify_email: 1 };
+}
+
+export function updateClientProfile(accountId: number, profile: Partial<ClientProfile>): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [k, v] of Object.entries(profile)) {
+    fields.push(`${k} = ?`);
+    values.push(v);
+  }
+  if (fields.length === 0) return;
+  values.push(accountId);
+  db.run(`UPDATE client_accounts SET ${fields.join(", ")} WHERE id = ?`, values as any[]);
+}
+
+export function updateClientPassword(accountId: number, newHash: string): void {
+  db.run(`UPDATE client_accounts SET password_hash = ? WHERE id = ?`, [newHash, accountId]);
+}
+
 export function revokeClientSessions(accountId: number): void {
   db.run(`UPDATE client_accounts SET session_version = session_version + 1 WHERE id = ?`, [accountId]);
 }

@@ -246,6 +246,12 @@ export function initDb() {
     )
   `);
   try { db.run(`ALTER TABLE client_accounts ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1`); } catch {}
+  // Perfil de cliente (portal rediseñado)
+  try { db.run(`ALTER TABLE client_accounts ADD COLUMN full_name TEXT DEFAULT ''`); } catch {}
+  try { db.run(`ALTER TABLE client_accounts ADD COLUMN phone TEXT DEFAULT ''`); } catch {}
+  try { db.run(`ALTER TABLE client_accounts ADD COLUMN address TEXT DEFAULT ''`); } catch {}
+  try { db.run(`ALTER TABLE client_accounts ADD COLUMN notify_whatsapp INTEGER DEFAULT 1`); } catch {}
+  try { db.run(`ALTER TABLE client_accounts ADD COLUMN notify_email INTEGER DEFAULT 1`); } catch {}
 
   // Junction table: multiple filaments per quote with grams used
   db.run(`
