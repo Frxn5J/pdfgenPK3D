@@ -1232,7 +1232,10 @@ const renderLanding = (origin: string) => {
     headMeta: buildHeadMeta({ pageType: "landing", config, origin, path: "/", products: seoProducts }),
     jsonLd: buildJsonLd({ pageType: "landing", config, origin, path: "/", products: seoProducts }),
   };
-  const extraHead = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">`;
+  // ponytail: icon_names subsetea Material Symbols (~5KB vs 3.8MB); agregar aquí cada icono nuevo que use la landing
+  const montserratCss = "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap";
+  const iconsCss = "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&icon_names=chat,dark_mode,info,inventory_2,local_shipping,location_on,map,open_in_new,phone,schedule&display=block";
+  const extraHead = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="${montserratCss}" rel="stylesheet" media="print" onload="this.media='all'"><link href="${iconsCss}" rel="stylesheet" media="print" onload="this.media='all'"><noscript><link href="${montserratCss}" rel="stylesheet"><link href="${iconsCss}" rel="stylesheet"></noscript>`;
   return Layout(config.company_name || "PIXKEY3D", content, config, seo, config.landing_hero_image || config.company_logo || undefined, extraHead);
 };
 
@@ -1672,11 +1675,18 @@ San Luis Potosí, S.L.P., México
 Lunes a Sábado, 9:00 a 18:00 hrs
 Recolección en persona disponible para clientes locales.
 
+## Enlaces
+
+- [Página principal](${origin}/): información general, precios por volumen y proceso de pedido
+- [Catálogo de productos](${origin}/catalogo): catálogo completo con fotos y precios
+- [Aviso de privacidad](${origin}/aviso-privacidad)
+- [Términos y condiciones](${origin}/terminos)
+
 ## Contacto
 
-- WhatsApp: https://wa.me/${normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304")}
+- [WhatsApp](https://wa.me/${normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304")})
 - Email: contacto@${new URL(origin).hostname}
-- Web: ${origin}
+- [Web](${origin})
 
 ## Materiales
 
