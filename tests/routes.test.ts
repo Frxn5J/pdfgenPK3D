@@ -150,3 +150,30 @@ describe("Optimizador de imágenes /img", () => {
     expect(res.headers.get("location")).toBe("/uploads/no-existe.png");
   });
 });
+
+describe("Comprobantes de pago privados (/uploads/payments)", () => {
+  const fs = require("fs");
+  const { join } = require("path");
+  const dir = join(process.cwd(), "data", "uploads", "payments");
+  const testFile = join(dir, "test-proof.png");
+
+  test("sin sesión redirige a login (no expone el archivo)", async () => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(testFile, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const res = await app.request("/uploads/payments/test-proof.png");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/admin/login");
+  });
+
+  test("con sesión de admin sirve el archivo sin cache compartida", async () => {
+    const res = await app.request("/uploads/payments/test-proof.png", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    fs.rmSync(testFile, { force: true });
+  });
+
+  test("/img nunca sirve comprobantes", async () => {
+    const res = await app.request("/img?src=%2Fuploads%2Fpayments%2Ftest-proof.png&w=800");
+    expect(res.status).toBe(404);
+  });
+});
