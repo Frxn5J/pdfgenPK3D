@@ -43,7 +43,9 @@ export const uploadImageToCloudinary = async (bytes: Buffer | Uint8Array, folder
     .update(`folder=${targetFolder}&timestamp=${timestamp}${config.secret}`)
     .digest("hex");
   const form = new FormData();
-  form.append("file", new Blob([bytes instanceof Buffer ? new Uint8Array(bytes) : bytes]));
+  // El tercer argumento (filename) es obligatorio: sin él, FormData manda
+  // filename="" y Cloudinary responde "Missing required parameter - file".
+  form.append("file", new Blob([bytes instanceof Buffer ? new Uint8Array(bytes) : bytes]), "upload.img");
   form.append("api_key", config.key);
   form.append("timestamp", String(timestamp));
   form.append("folder", targetFolder);
