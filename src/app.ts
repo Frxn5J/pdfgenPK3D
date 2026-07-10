@@ -3,7 +3,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 import { initDb } from "./db/schema";
-import { ensureSessionSecret } from "./lib/session";
+import { ensureSessionSecret, requireAuth } from "./lib/session";
 import { publicRoutes } from "./routes/public";
 import { adminRoutes } from "./routes/admin";
 import { getCookie, setCookie } from "hono/cookie";
@@ -54,10 +54,14 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 // Serve static files
+// Comprobantes de pago: privados — solo con sesión de admin.
+app.use("/uploads/payments/*", requireAuth);
 // ponytail: nombres de upload llevan timestamp -> cache inmutable seguro
 app.use("/uploads/*", async (c, next) => {
   await next();
-  if (c.res.ok) c.res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  if (!c.res.ok) return;
+  const isPrivate = c.req.path.startsWith("/uploads/payments/");
+  c.res.headers.set("Cache-Control", isPrivate ? "private, no-store" : "public, max-age=31536000, immutable");
 });
 app.use("/public/*", serveStatic({ root: "./src/" }));
 app.use("/uploads/*", serveStatic({ root: "./data/" }));

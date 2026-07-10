@@ -67,11 +67,12 @@ export const uploadImageToCloudinary = async (bytes: Buffer | Uint8Array, folder
 // quedan locales — Cloudinary es solo para imágenes.
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+// Comprobantes de pago y recibos (quotes.payment_proof_url, expenses.receipt_url)
+// NO se migran: son documentos privados y se quedan en el server, protegidos
+// por sesión de admin (ver /uploads/payments en app.ts).
 const MIGRATION_TARGETS: Array<{ table: string; column: string }> = [
   { table: "products", column: "image_url" },
   { table: "quote_items", column: "custom_image_url" },
-  { table: "quotes", column: "payment_proof_url" },
-  { table: "expenses", column: "receipt_url" },
 ];
 
 const folderFromRef = (ref: string) => {

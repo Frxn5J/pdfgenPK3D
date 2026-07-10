@@ -30,6 +30,7 @@ publicRoutes.get("/img", async (c) => {
   const w = Number(c.req.query("w") || 800);
   if (!src || !IMG_WIDTHS.has(w)) return c.text("Solicitud inválida", 400);
   const isLocal = src.startsWith("/uploads/");
+  if (src.startsWith("/uploads/payments/")) return c.text("No encontrado", 404); // privados: nunca via /img
   if (!isLocal) {
     if (!/^https?:\/\//i.test(src)) return c.text("Solicitud inválida", 400);
     const isProductImage = getProducts().some((p) => p.image_url === src);
