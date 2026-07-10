@@ -2,6 +2,7 @@ import { join, resolve, sep } from "path";
 import * as fs from "fs";
 import { lookup } from "dns/promises";
 import { isIP } from "net";
+import { isCloudinaryEnabled, uploadImageToCloudinary } from "./cloudinary";
 
 // ── Anti-SSRF ──────────────────────────────────────────────────────────────
 // Rechaza IPs internas/privadas para que un fetch a una URL controlada por el
@@ -63,13 +64,20 @@ export const imageExtensionFromMime = (mime: string) => {
   return "png";
 };
 
-export const saveImageBuffer = (buffer: ArrayBuffer | Uint8Array, mime = "image/png", prefix = "enhanced") => {
+export const saveImageBuffer = async (buffer: ArrayBuffer | Uint8Array, mime = "image/png", prefix = "enhanced") => {
+  const bytes = buffer instanceof ArrayBuffer ? Buffer.from(new Uint8Array(buffer)) : Buffer.from(buffer);
+  // Estándar: Cloudinary primero; fallback local si falla o no está configurado.
+  if (isCloudinaryEnabled()) {
+    try {
+      return await uploadImageToCloudinary(bytes, "products");
+    } catch (error) {
+      console.error("[cloudinary] subida falló, guardando local:", error);
+    }
+  }
   const uploadDir = join(process.cwd(), "data", "uploads", "products");
   fs.mkdirSync(uploadDir, { recursive: true });
   const filename = `${prefix}-${Date.now()}.${imageExtensionFromMime(mime)}`;
-  const uploadPath = join(uploadDir, filename);
-  const bytes = buffer instanceof ArrayBuffer ? Buffer.from(new Uint8Array(buffer)) : Buffer.from(buffer);
-  fs.writeFileSync(uploadPath, bytes);
+  fs.writeFileSync(join(uploadDir, filename), bytes);
   return `/uploads/products/${filename}`;
 };
 
@@ -85,7 +93,7 @@ export const looksLikeBase64Image = (value: string) =>
 export const persistImageReference = async (value: string) => {
   const candidate = value.trim();
   const dataImage = dataImageToBuffer(candidate);
-  if (dataImage) return saveImageBuffer(dataImage.buffer, dataImage.mime, "enhanced");
+  if (dataImage) return await saveImageBuffer(dataImage.buffer, dataImage.mime, "enhanced");
 
   if (/^https?:\/\//i.test(candidate)) {
     try {
@@ -93,7 +101,7 @@ export const persistImageReference = async (value: string) => {
       const response = await fetch(candidate, { headers: { "user-agent": "Mozilla/5.0 PIXKEY3D Image Enhancer" } });
       const mime = response.headers.get("content-type") || "";
       if (response.ok && mime.startsWith("image/")) {
-        return saveImageBuffer(await response.arrayBuffer(), mime, "enhanced");
+        return await saveImageBuffer(await response.arrayBuffer(), mime, "enhanced");
       }
     } catch {
       // If the generated URL cannot be downloaded, keep the provider URL.
@@ -102,7 +110,7 @@ export const persistImageReference = async (value: string) => {
   }
 
   if (looksLikeBase64Image(candidate)) {
-    return saveImageBuffer(Buffer.from(candidate.replace(/\s+/g, ""), "base64"), "image/png", "enhanced");
+    return await saveImageBuffer(Buffer.from(candidate.replace(/\s+/g, ""), "base64"), "image/png", "enhanced");
   }
 
   throw new Error("El endpoint de mejora no devolvió una imagen válida.");

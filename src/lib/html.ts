@@ -1,5 +1,6 @@
 import { join } from "path";
 import * as fs from "fs";
+import { isCloudinaryEnabled, uploadImageToCloudinary } from "./cloudinary";
 
 export const formString = (value: unknown): string => {
   if (typeof value === "string") return value;
@@ -56,6 +57,15 @@ export const saveImageUpload = async (file: File, folder: string, prefix: string
   const bytes = Buffer.from(await file.arrayBuffer());
   const ext = sniffImageExtension(bytes);
   if (!ext) throw new Error("Archivo de imagen no válido. Usa PNG, JPG, WebP o GIF.");
+  // Estándar: las imágenes viven en Cloudinary. Si falla la subida (o no está
+  // configurado), cae al almacenamiento local para no bloquear al admin.
+  if (isCloudinaryEnabled()) {
+    try {
+      return await uploadImageToCloudinary(bytes, folder);
+    } catch (error) {
+      console.error("[cloudinary] subida falló, guardando local:", error);
+    }
+  }
   const uploadDir = join(process.cwd(), "data", "uploads", folder);
   fs.mkdirSync(uploadDir, { recursive: true });
   const filename = `${prefix}-${Date.now()}.${ext}`;

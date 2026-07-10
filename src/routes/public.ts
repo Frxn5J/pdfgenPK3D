@@ -9,6 +9,7 @@ import { imgTag } from "../lib/html";
 import { cleanText } from "../lib/text";
 import { buildHeadMeta, buildJsonLd, resolveOrigin, escXml, type SeoProduct } from "../lib/seo";
 import { resolveImageBytes } from "../lib/images";
+import { isCloudinaryUrl, cloudinaryTransformed } from "../lib/cloudinary";
 
 const publicRoutes = new Hono();
 
@@ -20,7 +21,9 @@ const publicRoutes = new Hono();
 const IMG_WIDTHS = new Set([400, 800]);
 const imgCacheDir = join(process.cwd(), "data", "cache", "img");
 const optimizedImageSrc = (src: string, w: 400 | 800) =>
-  /^(\/uploads\/|https?:\/\/)/i.test(src) ? `/img?src=${encodeURIComponent(src)}&w=${w}` : src;
+  isCloudinaryUrl(src)
+    ? cloudinaryTransformed(src, w) // Cloudinary transforma en su CDN, sin pasar por /img
+    : /^(\/uploads\/|https?:\/\/)/i.test(src) ? `/img?src=${encodeURIComponent(src)}&w=${w}` : src;
 
 publicRoutes.get("/img", async (c) => {
   const src = (c.req.query("src") || "").trim();
