@@ -6274,13 +6274,32 @@ adminRoutes.post("/database/restore", async (c) => {
   const file = body.dbfile as File | undefined;
   if (!file || !(file instanceof File)) return c.text("Archivo requerido.", 400);
   const dbPath = process.env.CATALOG_DB_PATH || join(process.cwd(), "data", "catalog.sqlite");
-  // Guardar backup previo
+  const walPath = dbPath + "-wal";
+  const shmPath = dbPath + "-shm";
+
+  // 1. Forzar checkpoint: vaciar WAL al archivo principal antes de tocarlo.
+  try { db.run("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
+  try { db.run("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
+
+  // 2. Borrar WAL/SHM viejos. Mientras existan, SQLite intenta aplicar
+  //    páginas del WAL anterior sobre el nuevo archivo → corrupción.
+  try { fs.unlinkSync(walPath); } catch {}
+  try { fs.unlinkSync(shmPath); } catch {}
+
+  // 3. Guardar backup previo del archivo principal.
   const bakPath = dbPath + ".bak." + Date.now();
   try { fs.copyFileSync(dbPath, bakPath); } catch {}
-  // Escribir nuevo
+
+  // 4. Escribir el nuevo archivo.
   const arr = await file.arrayBuffer();
   fs.writeFileSync(dbPath, Buffer.from(arr));
-  return c.redirect("/admin/login?restored=1");
+
+  // 5. Borrar WAL/SHM que el backup pudiera traer (si venía de otra instancia con WAL abierto sin checkpoint).
+  try { fs.unlinkSync(walPath); } catch {}
+  try { fs.unlinkSync(shmPath); } catch {}
+
+  // Redirigir al login.
+  return c.redirect("/admin/login");
 });
 
 export { adminRoutes };
