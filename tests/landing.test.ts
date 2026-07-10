@@ -125,7 +125,7 @@ describe("Hero mode", () => {
   test("modo imagen muestra img cuando landing_hero_image está configurado", async () => {
     updateConfig({ landing_hero_image: "/uploads/hero.jpg" });
     const { html } = await getLanding();
-    expect(html).toContain('src="/uploads/hero.jpg"');
+    expect(html).toContain('src="/img?src=%2Fuploads%2Fhero.jpg&amp;w=800"');
     expect(html).toContain('fetchpriority="high"');
   });
 
@@ -150,8 +150,8 @@ describe("Hero mode", () => {
     });
     const { html } = await getLanding();
     expect(html).toContain("ln-carousel-slide");
-    expect(html).toContain("/uploads/a.jpg");
-    expect(html).toContain("/uploads/b.jpg");
+    expect(html).toContain("%2Fuploads%2Fa.jpg");
+    expect(html).toContain("%2Fuploads%2Fb.jpg");
     // primera slide tiene fetchpriority high
     expect(html).toContain('fetchpriority="high"');
     // script de autoplay presente con más de 1 imagen

@@ -127,3 +127,26 @@ describe("Endpoints push admin (autenticación)", () => {
     expect(html).toContain("data-push-enable");
   });
 });
+
+describe("Optimizador de imágenes /img", () => {
+  test("rechaza width fuera de la whitelist", async () => {
+    const res = await app.request("/img?src=%2Fuploads%2Fx.png&w=999");
+    expect(res.status).toBe(400);
+  });
+
+  test("rechaza URL externa que no es imagen de producto (anti open-proxy)", async () => {
+    const res = await app.request("/img?src=https%3A%2F%2Fevil.com%2Fx.png&w=800");
+    expect(res.status).toBe(404);
+  });
+
+  test("rechaza src que no es /uploads ni http(s)", async () => {
+    const res = await app.request("/img?src=%2Fetc%2Fpasswd&w=800");
+    expect(res.status).toBe(400);
+  });
+
+  test("upload local inexistente redirige al original (fallback)", async () => {
+    const res = await app.request("/img?src=%2Fuploads%2Fno-existe.png&w=800");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/uploads/no-existe.png");
+  });
+});
