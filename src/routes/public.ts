@@ -1,11 +1,54 @@
 import { Hono } from "hono";
+import { createHash } from "crypto";
+import { join } from "path";
+import * as fs from "fs";
+import sharp from "sharp";
 import { createQuote, getConfig, getProducts, getFeaturedProducts, getDefaultPriceTiers, getProductPriceTiers, updateQuoteMessage, getCategories, getSubcategories, type Category, type Subcategory, type Product } from "../db/schema";
 import { buildManifest, serviceWorkerJs, renderAppIconSvg, pwaHeadTags, pwaRegisterScript, sendPushToAll } from "../pwa";
 import { imgTag } from "../lib/html";
 import { cleanText } from "../lib/text";
 import { buildHeadMeta, buildJsonLd, resolveOrigin, escXml, type SeoProduct } from "../lib/seo";
+import { resolveImageBytes } from "../lib/images";
 
 const publicRoutes = new Hono();
+
+// ── Optimizador de imágenes (/img) ──────────────────────────────────────────
+// Redimensiona y convierte a WebP con caché en disco. Acepta rutas locales de
+// /uploads y URLs externas SOLO si son la imagen de algún producto (evita que
+// el endpoint funcione como proxy abierto). Ante cualquier fallo redirige al
+// original para no romper la página.
+const IMG_WIDTHS = new Set([400, 800]);
+const imgCacheDir = join(process.cwd(), "data", "cache", "img");
+const optimizedImageSrc = (src: string, w: 400 | 800) =>
+  /^(\/uploads\/|https?:\/\/)/i.test(src) ? `/img?src=${encodeURIComponent(src)}&w=${w}` : src;
+
+publicRoutes.get("/img", async (c) => {
+  const src = (c.req.query("src") || "").trim();
+  const w = Number(c.req.query("w") || 800);
+  if (!src || !IMG_WIDTHS.has(w)) return c.text("Solicitud inválida", 400);
+  const isLocal = src.startsWith("/uploads/");
+  if (!isLocal) {
+    if (!/^https?:\/\//i.test(src)) return c.text("Solicitud inválida", 400);
+    const isProductImage = getProducts().some((p) => p.image_url === src);
+    if (!isProductImage) return c.text("No encontrado", 404);
+  }
+  const cachePath = join(imgCacheDir, `${createHash("sha1").update(`${src}|${w}`).digest("hex")}.webp`);
+  try {
+    if (!fs.existsSync(cachePath)) {
+      const { bytes } = await resolveImageBytes(src);
+      const out = await sharp(bytes).resize({ width: w, withoutEnlargement: true }).webp({ quality: 78 }).toBuffer();
+      fs.mkdirSync(imgCacheDir, { recursive: true });
+      fs.writeFileSync(cachePath, out);
+    }
+    return c.body(new Uint8Array(fs.readFileSync(cachePath)), 200, {
+      "content-type": "image/webp",
+      "cache-control": "public, max-age=31536000, immutable",
+    });
+  } catch {
+    // src ya validado (local o imagen de producto): el redirect no es abierto
+    return c.redirect(src, 302);
+  }
+});
 const defaultFontFamily = "'Central Bold', Central, Montserrat, Arial, sans-serif";
 
 // ── Rate limiting de cotizaciones públicas (en memoria) ─────────────────────
@@ -170,8 +213,19 @@ const buildThemeCss = (config: Record<string, string>) => {
       --shape-color: ${cssValue(config.decorative_shape_color, "rgba(239, 68, 68, 0.12)")};
       --shape-opacity: ${opacity(config.decorative_shape_opacity)};
       --shape-blur: ${cssValue(config.decorative_shape_blur, "0px")};
-      --ln-font-heading: 'Montserrat', sans-serif;
-      --ln-font-body: 'Montserrat', sans-serif;
+      --ln-font-heading: 'Montserrat', 'Montserrat-fallback', sans-serif;
+      --ln-font-body: 'Montserrat', 'Montserrat-fallback', sans-serif;
+    }
+
+    /* Fallback con métricas de Montserrat sobre Arial: el texto ocupa el mismo
+       espacio antes y después del swap de la webfont (anti-CLS). */
+    @font-face {
+      font-family: 'Montserrat-fallback';
+      src: local('Arial');
+      size-adjust: 112.84%;
+      ascent-override: 85.79%;
+      descent-override: 22.25%;
+      line-gap-override: 0%;
     }
 
     * { box-sizing: border-box; }
@@ -721,7 +775,7 @@ const renderCoverSection = (config: Record<string, string>) => `
       ${renderShapes(config)}
       <div class="page-shell">
           ${config.company_logo
-            ? `<img src="${escapeHtml(config.company_logo)}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image" decoding="async" fetchpriority="high" data-admin-gate>`
+            ? `<img src="${escapeHtml(optimizedImageSrc(config.company_logo, 400))}" alt="Logo ${escapeHtml(config.company_name)}" class="logo-image" decoding="async" fetchpriority="high" data-admin-gate>`
             : `<div class="logo-fallback" data-admin-gate>Logo</div>`
           }
           <h1 data-admin-gate>${escapeHtml(config.company_name || "PIXKEY3D")}</h1>
@@ -769,7 +823,7 @@ const renderProductCard = (
 ) => `
   <article class="theme-card page-break-inside-avoid">
       ${product.image_url
-        ? imgTag({ src: product.image_url, alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
+        ? imgTag({ src: optimizedImageSrc(product.image_url, 800), alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
         : `<div class="product-image-fallback">Sin imagen</div>`
       }
       <div class="product-content">
@@ -879,7 +933,7 @@ const renderLandingNav = (config: Record<string, string>) => {
 <header class="ln-nav" role="banner">
   <div class="ln-nav-inner">
     <a class="ln-brand" href="/" data-admin-gate>
-      ${logo ? `<img src="${escapeHtml(logo)}" alt="${name}" width="32" height="32">` : ""}
+      ${logo ? `<img src="${escapeHtml(optimizedImageSrc(logo, 400))}" alt="${name}" width="32" height="32">` : ""}
       ${name}
     </a>
     <nav class="ln-nav-links" aria-label="Navegación principal">
@@ -928,13 +982,13 @@ const renderLandingHero = (config: Record<string, string>) => {
       ${carouselImgs.length === 0
         ? `<div class="ln-hero-logo-fallback">3D</div>`
         : carouselImgs.map((src, i) =>
-            `<img src="${escapeHtml(src)}" alt="" class="ln-carousel-slide${i === 0 ? " active" : ""}" decoding="async" ${i === 0 ? 'fetchpriority="high" loading="eager"' : 'loading="lazy"'} width="800" height="600">`
+            `<img src="${escapeHtml(optimizedImageSrc(src as string, 800))}" alt="" class="ln-carousel-slide${i === 0 ? " active" : ""}" decoding="async" ${i === 0 ? 'fetchpriority="high" loading="eager"' : 'loading="lazy"'} width="800" height="600">`
           ).join("")}
     </div>
     ${carouselImgs.length > 1 ? `<script>(function(){var s=document.querySelectorAll('#ln-carousel .ln-carousel-slide'),c=0;setInterval(function(){s[c].classList.remove('active');c=(c+1)%s.length;s[c].classList.add('active');},${carouselInterval});})();</script>` : ""}`
     : `<div class="ln-hero-img-wrap" aria-hidden="true">
       ${heroImg
-        ? `<img src="${escapeHtml(heroImg)}" alt="" decoding="async" fetchpriority="high" loading="eager" width="800" height="600">`
+        ? `<img src="${escapeHtml(optimizedImageSrc(heroImg, 800))}" alt="" decoding="async" fetchpriority="high" loading="eager" width="800" height="600">`
         : `<div class="ln-hero-logo-fallback">3D</div>`}
     </div>`;
 
@@ -1016,7 +1070,7 @@ const renderLandingFeatured = (
       ${featured.map(({ product }) => `
       <a class="theme-card landing-featured-card" href="/catalogo">
         ${product.image_url
-          ? imgTag({ src: product.image_url, alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
+          ? imgTag({ src: optimizedImageSrc(product.image_url, 800), alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
           : `<div class="product-image-fallback">Sin imagen</div>`}
         <div class="product-content">
           <h3 class="product-title">${escapeHtml(product.name)}</h3>
@@ -1178,26 +1232,26 @@ const renderLandingFooter = (config: Record<string, string>) => {
   <div class="ln-footer-inner">
     <div class="ln-footer-brand">
       <div class="ln-footer-brand-name">
-        ${logo ? `<img src="${escapeHtml(logo)}" alt="" width="24" height="24">` : ""}
+        ${logo ? `<img src="${escapeHtml(optimizedImageSrc(logo, 400))}" alt="" width="24" height="24">` : ""}
         ${name}
       </div>
       <p class="ln-footer-tagline">Fabricación digital de precisión.<br>San Luis Potosí, México.</p>
       <p class="ln-footer-copy">© ${year} ${name}. Todos los derechos reservados.</p>
     </div>
     <div class="ln-footer-col">
-      <h4 class="ln-footer-col-title">Catálogo</h4>
+      <p class="ln-footer-col-title">Catálogo</p>
       <a href="/catalogo">Ver catálogo</a>
       <a href="#precios">Precios por volumen</a>
       <a href="#catalogo">Productos destacados</a>
     </div>
     <div class="ln-footer-col">
-      <h4 class="ln-footer-col-title">Contacto</h4>
+      <p class="ln-footer-col-title">Contacto</p>
       ${displayPhone ? `<a href="${escapeHtml(wa)}" target="_blank" rel="noopener">${msi("phone", "msi")} ${escapeHtml(displayPhone)}</a>` : ""}
       <a href="#ubicacion">${msi("location_on", "msi")} San Luis Potosí, SLP</a>
       <a href="#proceso">${msi("schedule", "msi")} Lun–Sáb 9–18h</a>
     </div>
     <div class="ln-footer-col">
-      <h4 class="ln-footer-col-title">Legal</h4>
+      <p class="ln-footer-col-title">Legal</p>
       <a href="/aviso-privacidad">Aviso de privacidad</a>
       <a href="/terminos">Términos y condiciones</a>
     </div>
