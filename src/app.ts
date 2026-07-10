@@ -54,6 +54,11 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 // Serve static files
+// ponytail: nombres de upload llevan timestamp -> cache inmutable seguro
+app.use("/uploads/*", async (c, next) => {
+  await next();
+  if (c.res.ok) c.res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+});
 app.use("/public/*", serveStatic({ root: "./src/" }));
 app.use("/uploads/*", serveStatic({ root: "./data/" }));
 // For Tailwind output
