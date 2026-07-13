@@ -31,7 +31,7 @@ app.use("*", secureHeaders({
   referrerPolicy: "strict-origin-when-cross-origin",
   contentSecurityPolicy: {
     defaultSrc: ["'self'"],
-    scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdn.tailwindcss.com"],
+    scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdn.tailwindcss.com", "https://cdn.jsdelivr.net"],
     styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com", "https://fonts.googleapis.com"],
     imgSrc: ["'self'", "data:", "blob:", "https:"],
     fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
