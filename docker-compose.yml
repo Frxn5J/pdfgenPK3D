@@ -5,7 +5,7 @@ services:
     build: .
     restart: always
     ports:
-      - "3001:3000"
+      - "${CATALOG_HOST_PORT:-3001}:3000"
     volumes:
       - catalog_data:/app/data
     environment:
