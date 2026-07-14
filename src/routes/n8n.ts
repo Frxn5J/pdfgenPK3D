@@ -183,6 +183,9 @@ n8nRoutes.post("/api/n8n/quotes", async (c) => {
 
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const customerName = String(body.customerName ?? body.customer_name ?? "").trim().slice(0, 200);
+    const customerPhoneRaw = String(body.customerPhone ?? body.customer_phone ?? "").trim();
+    const customerPhoneDigits = customerPhoneRaw.replace(/\D/g, "");
+    const customerPhone = customerPhoneDigits.length === 10 ? `52${customerPhoneDigits}` : customerPhoneDigits;
     const postalCode = String(body.postalCode ?? body.postal_code ?? "").trim().slice(0, 10);
     const requiresInvoice = Boolean(body.requiresInvoice ?? body.requires_invoice ?? false);
     const rawItems = Array.isArray(body.items) ? body.items.slice(0, 200) : [];
@@ -309,6 +312,7 @@ n8nRoutes.post("/api/n8n/quotes", async (c) => {
 
     const quoteId = createQuote({
       customer_name: customerName,
+      customer_phone: customerPhone,
       postal_code: postalCode,
       total_pieces: totalPieces,
       subtotal,
@@ -363,6 +367,7 @@ n8nRoutes.post("/api/n8n/quotes", async (c) => {
 
     return c.json({
       id: quoteId,
+      customerPhone,
       message,
       totals: {
         totalPieces,

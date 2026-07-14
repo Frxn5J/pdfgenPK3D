@@ -243,6 +243,9 @@ export function initDb() {
   try {
     db.run(`ALTER TABLE quotes ADD COLUMN source TEXT DEFAULT 'admin'`);
   } catch {}
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN customer_phone TEXT DEFAULT ''`);
+  } catch {}
 
   // Junction table: multiple filaments per quote with grams used
   db.run(`

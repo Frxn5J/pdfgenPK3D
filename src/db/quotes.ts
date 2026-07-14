@@ -14,6 +14,7 @@ export interface QuoteItemInput {
 
 export interface QuoteInput {
   customer_name: string;
+  customer_phone?: string;
   postal_code: string;
   total_pieces: number;
   subtotal: number;
@@ -35,6 +36,7 @@ export interface QuoteInput {
 export interface Quote {
   id: number;
   customer_name: string;
+  customer_phone: string | null;
   postal_code: string;
   total_pieces: number;
   subtotal: number;
@@ -115,10 +117,10 @@ export type QuoteFilamentWithDetails = QuoteFilament & {
 export function createQuote(input: QuoteInput) {
   const insertQuote = db.prepare(`
     INSERT INTO quotes (
-      customer_name, postal_code, total_pieces, subtotal, shipping_provider, shipping_cost,
+      customer_name, customer_phone, postal_code, total_pieces, subtotal, shipping_provider, shipping_cost,
       shipping_free_threshold, grand_total, whatsapp_number, message,
       cond_entrega, cond_pago, cond_prioritario, forma_pago, source, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
   `);
   const insertItem = db.prepare(`
     INSERT INTO quote_items (
@@ -129,6 +131,7 @@ export function createQuote(input: QuoteInput) {
   const transaction = db.transaction((quote: QuoteInput) => {
     const row = insertQuote.get(
       quote.customer_name,
+      quote.customer_phone ?? "",
       quote.postal_code,
       quote.total_pieces,
       quote.subtotal,
@@ -179,6 +182,7 @@ export function updateQuote(
   id: number,
   data: Partial<{
     customer_name: string;
+    customer_phone: string;
     postal_code: string;
     shipping_provider: string;
     shipping_cost: number;

@@ -1128,6 +1128,7 @@ adminRoutes.get("/quotes", (c) => {
         <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${escapeHtml(quoteFolio(quote))}</td>
         <td class="px-4 py-3 text-sm text-gray-700">
           <div class="font-medium text-gray-900">${escapeHtml(quote.customer_name)}</div>
+          ${quote.customer_phone ? `<div class="text-gray-500">Tel. ${escapeHtml(quote.customer_phone)}</div>` : ""}
           <div class="text-gray-500">CP ${escapeHtml(quote.postal_code)}</div>
           <div class="text-gray-500">${formatDate(quote.created_at)}</div>
         </td>
@@ -3442,6 +3443,10 @@ adminRoutes.get("/quotes/new", (c) => {
               <input type="text" name="customer_name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
             <div>
+              <label class="block text-sm font-semibold text-gray-700">Teléfono del cliente</label>
+              <input type="text" name="customer_phone" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
               <label class="block text-sm font-semibold text-gray-700">Código Postal *</label>
               <input type="text" name="postal_code" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
@@ -3837,6 +3842,7 @@ adminRoutes.get("/quotes/new", (c) => {
 adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const body = await c.req.parseBody({ all: true }) as Record<string, unknown>;
   const customerName = formString(body.customer_name).trim();
+  const customerPhone = formString(body.customer_phone).trim();
   const postalCode = formString(body.postal_code).trim();
   const whatsappNumber = formString(body.whatsapp_number).trim();
   const shippingProvider = formString(body.shipping_provider).trim() || "Estafeta";
@@ -3898,6 +3904,7 @@ adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"])
   const grandTotal = subtotal + shippingCost;
   const quoteId = createQuote({
     customer_name: customerName,
+    customer_phone: customerPhone,
     postal_code: postalCode,
     total_pieces: totalPieces,
     subtotal,
@@ -4022,6 +4029,7 @@ adminRoutes.get("/quotes/:id", (c) => {
               </form>
             </div>
             <div class="pt-3 border-t">
+              ${!quote.customer_phone ? `<p class="text-[11px] text-red-600 font-semibold mb-1.5 text-center">⚠ Falta el teléfono del cliente, edítalo arriba antes de enviar.</p>` : ""}
               <form action="/admin/quotes/${quote.id}/send-whatsapp" method="post" onsubmit="return confirm('¿Enviar esta cotización a WhatsApp del cliente?')">
                 <button type="submit" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2.5 px-3 rounded text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm">
                   📤 Enviar a WhatsApp del Cliente
@@ -4075,6 +4083,10 @@ adminRoutes.get("/quotes/:id", (c) => {
               <div>
                 <label class="block text-xs font-bold text-gray-600 uppercase">Cliente</label>
                 <input type="text" name="customer_name" value="${escapeHtml(quote.customer_name)}" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase">Teléfono Cliente</label>
+                <input type="text" name="customer_phone" value="${escapeHtml(quote.customer_phone || '')}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
               </div>
               <div>
                 <label class="block text-xs font-bold text-gray-600 uppercase">Código Postal</label>
@@ -4429,6 +4441,7 @@ adminRoutes.post("/quotes/:id/update", requireRole(["superusuario", "admin", "ed
 
   updateQuote(id, {
     customer_name: String(body.customer_name ?? "").trim().slice(0, 200) || undefined,
+    customer_phone: String(body.customer_phone ?? "").trim().slice(0, 20) || undefined,
     postal_code: String(body.postal_code ?? "").trim().slice(0, 10) || undefined,
     shipping_provider: String(body.shipping_provider ?? "").trim().slice(0, 100) || undefined,
     shipping_cost: body.shipping_cost !== "" ? parseFloat(String(body.shipping_cost)) : undefined,
@@ -4529,8 +4542,7 @@ adminRoutes.post("/quotes/:id/send-whatsapp", requireRole(["superusuario", "admi
   const payload = {
     folio: `COT-${String(quote.id).padStart(3, "0")}`,
     customerName: quote.customer_name,
-    phone: `52${quote.postal_code}`, // no, debe ser el whatsapp_number
-    phone: quote.whatsapp_number || "",
+    phone: quote.customer_phone || "",
     message: quote.message || "",
     totalPieces: quote.total_pieces,
     subtotal: quote.subtotal,
