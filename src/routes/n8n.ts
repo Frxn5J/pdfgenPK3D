@@ -93,7 +93,7 @@ const getCatalogData = () => {
 };
 
 type QuoteLine = {
-  productId: number;
+  productId: number | null;
   productName: string;
   quantity: number;
   unitPrice: number;
@@ -207,7 +207,7 @@ n8nRoutes.post("/api/n8n/quotes", async (c) => {
     // se mantienen como líneas separadas (cada llavero personalizado es único).
     // Si el item ya trae unitPrice pre-calculado (desde LLM), se usa directo.
     const selectedMap = new Map<string, {
-      product: typeof productsWithTiers[number]["product"],
+      product: { id: number | null; name: string },
       priceTiers: typeof productsWithTiers[number]["priceTiers"],
       quantity: number,
       imageUrl?: string,
@@ -224,17 +224,25 @@ n8nRoutes.post("/api/n8n/quotes", async (c) => {
       const overrideUnitPrice = Number(item.unitPrice ?? item.unit_price);
       const overrideSubtotal = Number(item.subtotal);
       const productEntry = productMap.get(productId);
-      if (!productEntry) continue;
+
+      // Sin match de catálogo (ej. base de productos vacía, o pieza/llavero
+      // personalizado que no corresponde a ningún producto existente): si
+      // trae nombre/descripción se acepta igual como línea "a cotizar",
+      // igual que ya soporta el panel admin al crear cotizaciones manuales.
+      const customName = String(item.productName ?? item.product_name ?? item.name ?? item.description ?? "").trim();
+      if (!productEntry && !customName) continue;
+      const entry = productEntry ?? { product: { id: null, name: customName }, priceTiers: [] as typeof productsWithTiers[number]["priceTiers"] };
 
       const hasOverride = Number.isFinite(overrideUnitPrice) && overrideUnitPrice > 0;
       const extra = hasOverride ? { overrideUnitPrice, overrideSubtotal: Number.isFinite(overrideSubtotal) ? overrideSubtotal : overrideUnitPrice * quantity } : {};
 
-      if (imageUrl) {
-        // Item con imagen → línea independiente
+      if (imageUrl || !productEntry) {
+        // Item con imagen, o sin producto de catálogo → línea independiente
+        // (cada personalizado es único, no se puede deduplicar por id)
         const key = `img_${imageItemIdx++}`;
-        selectedMap.set(key, { ...productEntry, quantity, imageUrl, ...extra });
+        selectedMap.set(key, { ...entry, quantity, imageUrl, ...extra });
       } else {
-        // Item sin imagen → deduplicar por productId
+        // Item de catálogo sin imagen → deduplicar por productId
         const existing = selectedMap.get(String(productId));
         if (existing?.overrideUnitPrice) {
           // Si el existente ya tiene precio fijo, sumar cantidades
@@ -243,9 +251,9 @@ n8nRoutes.post("/api/n8n/quotes", async (c) => {
             quantity: existing.quantity + quantity,
           });
         } else if (hasOverride) {
-          selectedMap.set(String(productId), { ...productEntry, quantity, ...extra });
+          selectedMap.set(String(productId), { ...entry, quantity, ...extra });
         } else {
-          selectedMap.set(String(productId), { ...productEntry, quantity: (existing?.quantity || 0) + quantity });
+          selectedMap.set(String(productId), { ...entry, quantity: (existing?.quantity || 0) + quantity });
         }
       }
     }
