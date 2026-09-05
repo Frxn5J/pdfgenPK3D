@@ -86,7 +86,7 @@ export const enhanceImageForCatalog = async (imageUrl: string): Promise<ImageEnh
       if (contentType.startsWith("image/")) {
         if (!response.ok) throw new Error(`El endpoint de mejora respondió con HTTP ${response.status}`);
         if (attempts.length > 0) console.log(`[Qwen image/enhance] modelo "${model}" tuvo éxito tras ${attempts.length} fallback(s)`);
-        return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, "enhanced"), prompt };
+        return { imageUrl: await saveImageBuffer(await response.arrayBuffer(), contentType, "enhanced"), prompt };
       }
 
       const rawPayload = await response.text();
@@ -190,7 +190,7 @@ export const callImageEditProvider = async (args: {
             retriable = response.status >= 500;
             attemptError = new Error(`HTTP ${response.status} con un binario de imagen.`);
           } else {
-            return { imageUrl: saveImageBuffer(await response.arrayBuffer(), contentType, args.filePrefix), prompt: args.prompt };
+            return { imageUrl: await saveImageBuffer(await response.arrayBuffer(), contentType, args.filePrefix), prompt: args.prompt };
           }
         } else {
           const rawPayload = await response.text();

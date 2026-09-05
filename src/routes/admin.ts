@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, updateQuoteIva, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
 import { generateClientToken, updatePrintedQuantities, updateShippingInfo } from "../db/portal";
 import { join } from "path";
 import * as fs from "fs";
@@ -555,6 +555,7 @@ const AdminLayout = (title: string, content: string, session?: SessionData) => {
                         </div>
                     </div>
                     <a href="/admin/config" class="nav-direct-link">Configuración</a>
+                    ${session?.role === "superusuario" ? `<a href="/admin/database" class="nav-direct-link">Base de Datos</a>` : ""}
                     ${session?.role === "superusuario" ? `<a href="/admin/usuarios" class="nav-direct-link">Usuarios</a>` : ""}
                 </div>
                 <div class="flex items-center gap-3">
@@ -3457,6 +3458,12 @@ adminRoutes.get("/quotes/new", (c) => {
               <input type="number" name="shipping_cost" min="0" step="0.01" value="${defaultShippingPrice.toFixed(2)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
               <p class="text-xs text-gray-500 mt-1">Pon 0 para envío gratis.</p>
             </div>
+            <div class="flex items-center pt-6">
+              <label class="flex items-center gap-2 text-sm font-semibold text-gray-700">
+                <input type="checkbox" name="apply_iva" value="1" class="rounded border-gray-300">
+                Agregar IVA (16%)
+              </label>
+            </div>
           </div>
         </div>
 
@@ -3477,6 +3484,7 @@ adminRoutes.get("/quotes/new", (c) => {
             <div>Subtotal: <span id="sum-subtotal" class="font-mono font-semibold">$0.00</span></div>
             <div>Piezas: <span id="sum-pieces" class="font-mono font-semibold">0</span></div>
             <div>Envío: <span id="sum-shipping" class="font-mono font-semibold">$0.00</span></div>
+            <div>IVA (16%): <span id="sum-iva" class="font-mono font-semibold">$0.00</span></div>
             <div class="text-base font-bold text-gray-900 mt-1">Total: <span id="sum-total" class="font-mono">$0.00</span></div>
           </div>
           <button type="submit" class="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-md font-bold shadow-md transition-colors">
@@ -3605,8 +3613,10 @@ adminRoutes.get("/quotes/new", (c) => {
         const sumSubtotalEl = document.getElementById('sum-subtotal');
         const sumPiecesEl = document.getElementById('sum-pieces');
         const sumShippingEl = document.getElementById('sum-shipping');
+        const sumIvaEl = document.getElementById('sum-iva');
         const sumTotalEl = document.getElementById('sum-total');
         const shippingInput = document.querySelector('input[name="shipping_cost"]');
+        const ivaInput = document.querySelector('input[name="apply_iva"]');
         const fmt = (n) => '$' + (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
 
         function recalc() {
@@ -3621,10 +3631,12 @@ adminRoutes.get("/quotes/new", (c) => {
             pieces += qty;
           });
           const shipping = parseFloat(shippingInput.value) || 0;
+          const iva = ivaInput.checked ? Math.round(subtotal * 0.16 * 100) / 100 : 0;
           sumSubtotalEl.textContent = fmt(subtotal);
           sumPiecesEl.textContent = String(pieces);
           sumShippingEl.textContent = fmt(shipping);
-          sumTotalEl.textContent = fmt(subtotal + shipping);
+          sumIvaEl.textContent = fmt(iva);
+          sumTotalEl.textContent = fmt(subtotal + iva + shipping);
         }
 
         function addItem() {
@@ -3673,8 +3685,10 @@ adminRoutes.get("/quotes/new", (c) => {
           recalc();
         }
 
-        addBtn.addEventListener('click', addItem);
+        ivaInput.addEventListener('change', recalc);
         shippingInput.addEventListener('input', recalc);
+
+        addBtn.addEventListener('click', addItem);
         addItem();
 
         // ── Design creator modal ──
@@ -3840,6 +3854,7 @@ adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"])
   const whatsappNumber = formString(body.whatsapp_number).trim();
   const shippingProvider = formString(body.shipping_provider).trim() || "Estafeta";
   const shippingCost = parseFloat(formString(body.shipping_cost)) || 0;
+  const applyIva = formString(body.apply_iva) === "1";
 
   if (!customerName || !postalCode) {
     return c.redirect("/admin/quotes/new");
@@ -3894,7 +3909,8 @@ adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"])
     return c.redirect("/admin/quotes/new");
   }
 
-  const grandTotal = subtotal + shippingCost;
+  const iva = applyIva ? Math.round(subtotal * 0.16 * 100) / 100 : 0;
+  const grandTotal = Math.round((subtotal + iva + shippingCost) * 100) / 100;
   const quoteId = createQuote({
     customer_name: customerName,
     postal_code: postalCode,
@@ -3903,6 +3919,7 @@ adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"])
     shipping_provider: shippingProvider,
     shipping_cost: shippingCost,
     shipping_free_threshold: null,
+    iva,
     grand_total: grandTotal,
     whatsapp_number: whatsappNumber,
     message: "Cotización creada manualmente desde el panel administrativo.",
@@ -4035,12 +4052,27 @@ adminRoutes.get("/quotes/:id", (c) => {
               ${itemsRows}
             </tbody>
           </table>
-          <div class="bg-gray-50 px-6 py-4 border-t border-gray-200 flex flex-col items-end space-y-1">
+        <div class="bg-gray-50 px-6 py-4 border-t border-gray-200 flex flex-col items-end space-y-1">
             <div class="text-sm text-gray-600">Subtotal: <span class="font-medium text-gray-900">${money(quote.subtotal)}</span></div>
+            <div class="text-sm text-gray-600">IVA (16%): <span class="font-medium text-gray-900">${quote.iva > 0 ? money(quote.iva) : "No aplicado"}</span></div>
             <div class="text-sm text-gray-600">Envío (${escapeHtml(quote.shipping_provider)}): <span class="font-medium text-gray-900">${quote.shipping_cost > 0 ? money(quote.shipping_cost) : "Gratis"}</span></div>
             <div class="text-base font-bold text-gray-900 border-t pt-1 w-48 text-right">Total: <span>${money(quote.grand_total)}</span></div>
           </div>
         </div>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-6">
+        <h2 class="text-lg font-bold text-gray-800 border-b pb-2 mb-4">Impuestos</h2>
+        <form action="/admin/quotes/${quote.id}/iva" method="post" class="flex flex-wrap items-center justify-between gap-4">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" name="apply_iva" value="1" ${quote.iva > 0 ? "checked" : ""} class="rounded border-gray-300">
+            Aplicar IVA del 16% sobre el subtotal (${money(quote.subtotal)})
+          </label>
+          <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm px-4 py-2 rounded transition-colors">
+            Guardar IVA
+          </button>
+        </form>
+        <p class="text-xs text-gray-500 mt-2">Al quitar la selección, el IVA se elimina y se recalcula el total.</p>
       </div>
 
       <div class="bg-white shadow rounded-lg p-6">
@@ -4271,6 +4303,13 @@ adminRoutes.post("/quotes/:id/status", requireRole(["superusuario", "admin", "ed
   return c.redirect(`/admin/quotes/${id}`);
 });
 
+adminRoutes.post("/quotes/:id/iva", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  updateQuoteIva(id, formString(body.apply_iva) === "1");
+  return c.redirect(`/admin/quotes/${id}`);
+});
+
 adminRoutes.post("/quotes/:id/items/:itemId/print-values", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const quoteId = parseInt(c.req.param("id"), 10);
   const itemId = parseInt(c.req.param("itemId"), 10);
@@ -4348,6 +4387,22 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
     `);
   }
 
+  if (quote.iva > 0) {
+    itemsHtml.push(`
+      <tr class="border-b border-gray-200">
+        <td class="px-2 py-1.5 text-center font-mono">T-001</td>
+        <td class="px-2 py-1.5">IVA (16%)</td>
+        <td class="px-2 py-1.5 text-center">1</td>
+        <td class="px-2 py-1.5 text-center">1T-001</td>
+        <td class="px-2 py-1.5 text-center">Impuesto</td>
+        <td class="px-2 py-1.5 text-center">Servicio</td>
+        <td class="px-2 py-1.5 text-right font-mono">${plainMoney(quote.iva)}</td>
+        <td class="px-2 py-1.5 text-right font-mono">0.00</td>
+        <td class="px-2 py-1.5 text-right font-mono font-semibold">${plainMoney(quote.iva)}</td>
+      </tr>
+    `);
+  }
+
   const itemsForGallery = items.map((item) => ({
     name: item.product_name,
     quantity: item.quantity,
@@ -4368,7 +4423,7 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
     </div>
   `).join("");
 
-  let totalAcumulado = quote.subtotal + quote.shipping_cost;
+  let totalAcumulado = quote.grand_total;
 
   if (hasCargoExtra && cargoExtraImporte > 0) {
     itemsHtml.push(`
@@ -4497,6 +4552,12 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
                   <span class="text-gray-500 font-normal">Subtotal:</span>
                   <span class="font-mono">${plainMoney(quote.subtotal)}</span>
                 </div>
+                ${quote.iva > 0 ? `
+                <div class="flex justify-between">
+                  <span class="text-gray-500 font-normal">IVA (16%):</span>
+                  <span class="font-mono">${plainMoney(quote.iva)}</span>
+                </div>
+                ` : ""}
                 ${quote.shipping_cost > 0 ? `
                 <div class="flex justify-between">
                   <span class="text-gray-500 font-normal">Envío:</span>
@@ -5948,6 +6009,398 @@ adminRoutes.get("/finanzas/reportes", requireRole(["superusuario", "admin"]), (c
       </div>
     </div>
   `, c.get("session") as SessionData | undefined));
+});
+
+
+// ── Base de Datos ──────────────────────────────────────────────────────────
+
+adminRoutes.get("/database", requireRole(["superusuario"]), async (c) => {
+  const session = c.get("session") as SessionData | undefined;
+  return c.html(AdminLayout("Base de Datos", `
+    <div class="p-6">
+      <div class="flex items-center gap-2 mb-6">
+        <svg class="w-7 h-7 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" stroke-width="2"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3" stroke-width="2"/></svg>
+        <h1 class="text-2xl font-bold text-gray-900">Base de Datos</h1>
+      </div>
+
+      <!-- Editor SQL -->
+      <div class="mb-6 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+          <h2 class="text-sm font-bold text-gray-600 uppercase tracking-wider flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+            Consola SQL
+          </h2>
+          <span class="text-[10px] text-gray-400 font-mono">SQLite 3</span>
+        </div>
+        <div class="flex">
+          <div class="flex flex-col items-end pr-3 pt-3 pb-3 bg-gray-900 select-none text-right text-xs font-mono text-gray-600 leading-[1.65]" id="line-numbers">1</div>
+          <div class="flex-1 relative">
+            <textarea id="sql-editor" rows="5" class="w-full border-0 p-3 font-mono text-sm bg-gray-900 text-green-300 placeholder-gray-600 focus:outline-none focus:ring-0 resize-none" placeholder="SELECT * FROM products LIMIT 10;" oninput="updateLineNumbers()" onscroll="syncLineScroll()" style="line-height:1.65;tab-size:2"></textarea>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 px-4 py-2.5 bg-gray-50 border-t border-gray-100">
+          <button onclick="runQuery()" class="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors shadow-sm">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"/></svg>
+            Ejecutar
+          </button>
+          <button onclick="clearQuery()" class="inline-flex items-center gap-1.5 bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            Limpiar
+          </button>
+          <span class="text-[10px] text-gray-400 ml-auto">Ctrl+Enter para ejecutar</span>
+        </div>
+      </div>
+      <div id="query-result" class="mb-6"></div>
+
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+        <!-- Panel izquierdo: tablas + acciones -->
+        <div class="md:col-span-1 space-y-4">
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="px-4 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center gap-2">
+              <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
+              <h2 class="text-sm font-bold text-gray-600 uppercase tracking-wider">Tablas</h2>
+            </div>
+            <div class="px-3 py-2 border-b border-gray-100">
+              <div class="relative">
+                <svg class="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                <input type="text" id="table-search" placeholder="Buscar tablas..." oninput="filterTables()" class="w-full pl-7 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400">
+              </div>
+            </div>
+            <div id="tables-list" class="divide-y divide-gray-100 max-h-[50vh] overflow-y-auto"></div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-3 space-y-2">
+            <button onclick="showDiagram()" class="w-full inline-flex items-center justify-center gap-2 bg-indigo-700 hover:bg-indigo-800 text-white px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors shadow-sm">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"/></svg>
+              Diagrama ER
+            </button>
+            <a href="/admin/database/download" class="w-full inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors shadow-sm no-underline">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+              Descargar Copia
+            </a>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+            <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Restaurar Backup</label>
+            <form action="/admin/database/restore" method="post" enctype="multipart/form-data" onsubmit="return confirm('¿Estás seguro? Esto reemplazará la base de datos actual.')">
+              <div class="relative">
+                <input type="file" name="dbfile" accept=".sqlite,.db,.sqlite3" required class="block w-full text-xs text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200 cursor-pointer">
+                <p class="text-[10px] text-gray-400 mt-1.5">.sqlite, .db, .sqlite3</p>
+              </div>
+              <button type="submit" class="w-full mt-3 inline-flex items-center justify-center gap-1.5 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors shadow-sm">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                Restaurar
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Panel derecho: datos -->
+        <div class="md:col-span-3" style="min-width:0;overflow:hidden">
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm max-w-full" style="overflow:hidden">
+            <div class="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+              <h2 class="text-sm font-bold text-gray-600 uppercase tracking-wider flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h1m0 0l3-3m-3 3l3 3"/></svg>
+                <span>Datos — </span><span id="current-table-name" class="text-indigo-600">Selecciona una tabla</span>
+              </h2>
+              <button onclick="loadTable(currentTable)" class="text-xs text-indigo-600 hover:text-indigo-800 font-semibold hidden" id="refresh-btn" title="Refrescar tabla">
+                <svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              </button>
+            </div>
+            <div id="table-data" class="min-h-[300px] flex items-center justify-center"></div>
+            <div id="pagination" class="hidden px-4 py-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between text-xs text-gray-500"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal diagrama -->
+      <div id="diagram-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl shadow-2xl max-w-5xl w-full max-h-[90vh] overflow-auto">
+          <div class="sticky top-0 bg-white border-b border-gray-100 px-6 py-4 flex justify-between items-center rounded-t-xl">
+            <h3 class="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"/></svg>
+              Diagrama Entidad-Relación
+            </h3>
+            <button onclick="closeDiagram()" class="text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 p-1 transition-colors">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div id="diagram-content" class="p-6"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({ startOnLoad: false, theme: 'default' });
+      var currentTable = '';
+      var rowsPerPage = 25;
+      var allRows = [];
+      var allColumns = [];
+
+      function updateLineNumbers() {
+        var ta = document.getElementById('sql-editor');
+        var lines = ta.value.split('\\n').length;
+        var ln = document.getElementById('line-numbers');
+        var html = '';
+        for (var i = 1; i <= Math.max(lines, 1); i++) html += i + '\\n';
+        ln.innerText = html;
+      }
+
+      function syncLineScroll() {
+        document.getElementById('line-numbers').scrollTop = document.getElementById('sql-editor').scrollTop;
+      }
+
+      document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runQuery(); }
+      });
+
+      var allTables = [];
+      async function loadTables() {
+        var res = await fetch('/admin/database/tables');
+        allTables = await res.json();
+        renderTableList(allTables);
+      }
+
+      function filterTables() {
+        var q = document.getElementById('table-search').value.toLowerCase();
+        renderTableList(allTables.filter(function(t) { return t.toLowerCase().includes(q); }));
+      }
+
+      function renderTableList(tables) {
+        var list = document.getElementById('tables-list');
+        list.innerHTML = tables.map(function(t) {
+          var isActive = t === currentTable;
+          return '<button onclick="loadTable(\\'' + escHtml(t) + '\\')" class="w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center gap-2 ' + (isActive ? 'bg-indigo-50 text-indigo-700 font-semibold border-l-[3px] border-l-indigo-500' : 'text-gray-700 hover:bg-gray-50') + '">' +
+            '<svg class="w-3.5 h-3.5 flex-shrink-0 ' + (isActive ? 'text-indigo-500' : 'text-gray-400') + '" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h1m0 0l3-3m-3 3l3 3"/></svg>' +
+            escHtml(t) + '</button>';
+        }).join('');
+      }
+
+      function renderPage(page) {
+        var container = document.getElementById('table-data');
+        var start = (page - 1) * rowsPerPage;
+        var slice = allRows.slice(start, start + rowsPerPage);
+        var html = '<table class="min-w-full divide-y divide-gray-200 text-xs"><thead class="bg-gray-50"><tr>';
+        allColumns.forEach(function(col) {
+          html += '<th class="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">' +
+            '<div class="flex items-center gap-1">' + escHtml(col) + '<svg class="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 11l5-5m0 0l5 5m-5-5v12"/></svg></div>' +
+            '</th>';
+        });
+        html += '</tr></thead><tbody class="bg-white divide-y divide-gray-100">';
+        if (slice.length === 0) {
+          html += '<tr><td colspan="' + allColumns.length + '" class="px-4 py-12 text-center text-gray-400 text-sm">Sin datos para mostrar</td></tr>';
+        }
+        slice.forEach(function(row, i) {
+          html += '<tr class="hover:bg-gray-50 transition-colors">';
+          allColumns.forEach(function(col) {
+            var val = row[col];
+            if (val === null) val = '<span class="text-gray-400 italic text-[11px]">NULL</span>';
+            else val = escHtml(String(val).substring(0, 200));
+            html += '<td class="px-4 py-2.5 text-gray-700 whitespace-nowrap">' + val + '</td>';
+          });
+          html += '</tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = '<div class="overflow-x-auto max-w-full scrollbar-thin">' + html + '</div>';
+        renderPagination(page);
+      }
+
+      function renderPagination(page) {
+        var total = Math.ceil(allRows.length / rowsPerPage);
+        var pag = document.getElementById('pagination');
+        if (total <= 1) { pag.classList.add('hidden'); return; }
+        pag.classList.remove('hidden');
+        var html = '<span>' + allRows.length + ' filas — pág ' + page + ' de ' + total + '</span>';
+        html += '<div class="flex gap-1">';
+        if (page > 1) html += '<button onclick="renderPage(' + (page - 1) + ')" class="px-2 py-1 rounded hover:bg-gray-200 text-gray-600">Ant</button>';
+        for (var p = Math.max(1, page - 2); p <= Math.min(total, page + 2); p++) {
+          html += '<button onclick="renderPage(' + p + ')" class="w-7 h-7 rounded text-xs font-semibold ' + (p === page ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-200') + '">' + p + '</button>';
+        }
+        if (page < total) html += '<button onclick="renderPage(' + (page + 1) + ')" class="px-2 py-1 rounded hover:bg-gray-200 text-gray-600">Sig</button>';
+        html += '</div>';
+        pag.innerHTML = html;
+      }
+
+      async function loadTable(name) {
+        currentTable = name;
+        var res = await fetch('/admin/database/table/' + encodeURIComponent(name));
+        var data = await res.json();
+        document.getElementById('current-table-name').textContent = name;
+        document.getElementById('refresh-btn').classList.remove('hidden');
+        if (!data.columns || !data.rows) {
+          document.getElementById('table-data').innerHTML = '<div class="py-16 text-center text-gray-400 text-sm">Tabla vacia o no encontrada.</div>';
+          document.getElementById('pagination').classList.add('hidden');
+          renderTableList(allTables);
+          return;
+        }
+        allColumns = data.columns;
+        allRows = data.rows;
+        renderTableList(allTables);
+        renderPage(1);
+      }
+
+      async function runQuery() {
+        var sql = document.getElementById('sql-editor').value.trim();
+        if (!sql) return;
+        var container = document.getElementById('query-result');
+        container.innerHTML = '<div class="bg-white rounded-xl border border-gray-200 p-4 text-gray-500 text-sm flex items-center gap-2"><svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Ejecutando...</div>';
+        try {
+          var res = await fetch('/admin/database/query', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sql: sql })
+          });
+          var data = await res.json();
+          if (data.error) {
+            container.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 text-sm font-mono whitespace-pre-wrap">' + escHtml(data.error) + '</div>';
+            return;
+          }
+          if (data.columns && data.rows) {
+            allColumns = data.columns;
+            allRows = data.rows;
+            currentTable = '[consulta]';
+            document.getElementById('current-table-name').textContent = 'Resultado SQL';
+            document.getElementById('refresh-btn').classList.add('hidden');
+            document.getElementById('table-data').innerHTML = '';
+            renderTableList(allTables);
+            renderPage(1);
+            container.innerHTML = '<div class="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-2 text-emerald-700 text-xs font-semibold">' + data.rows.length + ' fila(s) retornada(s)</div>';
+          } else {
+            container.innerHTML = '<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-emerald-700 text-sm">' + escHtml(data.message || 'OK') + '</div>';
+          }
+        } catch (e) {
+          container.innerHTML = '<div class="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 text-sm">' + escHtml(e.message) + '</div>';
+        }
+      }
+
+      function clearQuery() {
+        document.getElementById('sql-editor').value = '';
+        document.getElementById('query-result').innerHTML = '';
+        document.getElementById('line-numbers').innerText = '1';
+      }
+
+      async function showDiagram() {
+        var modal = document.getElementById('diagram-modal');
+        var content = document.getElementById('diagram-content');
+        modal.classList.remove('hidden');
+        content.innerHTML = '<div class="flex items-center justify-center py-12 text-gray-500 text-sm gap-2"><svg class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Generando diagrama...</div>';
+        try {
+          var res = await fetch('/admin/database/diagram');
+          var data = await res.json();
+          var result = await mermaid.render('mermaid-diagram', data.mermaid);
+          content.innerHTML = result.svg;
+        } catch (e) {
+          content.innerHTML = '<div class="text-red-500 text-sm text-center py-8">Error generando diagrama: ' + escHtml(e.message) + '</div>';
+        }
+      }
+
+      function closeDiagram() { document.getElementById('diagram-modal').classList.add('hidden'); }
+
+      function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+      loadTables();
+      updateLineNumbers();
+    </script>
+  `, session));
+});
+
+adminRoutes.post("/database/query", requireRole(["superusuario"]), async (c) => {
+  const body = await c.req.json() as { sql: string };
+  if (!body.sql?.trim()) return c.json({ error: "SQL vacío." });
+  try {
+    const isSelect = /^\s*SELECT|^\s*PRAGMA|^\s*EXPLAIN/i.test(body.sql.trim());
+    if (isSelect) {
+      const rows = db.query(body.sql.trim()).all() as Record<string, unknown>[];
+      const columns = rows.length > 0 ? Object.keys(rows[0]!) : [];
+      return c.json({ columns, rows });
+    } else {
+      db.run(body.sql.trim());
+      const changes = db.query<{ total_changes: number }, []>(`SELECT total_changes()`).get()?.total_changes ?? 0;
+      return c.json({ message: `OK. ${changes} fila(s) afectada(s).` });
+    }
+  } catch (e: any) {
+    return c.json({ error: e.message || String(e) });
+  }
+});
+
+adminRoutes.get("/database/tables", requireRole(["superusuario"]), async (c) => {
+  const rows = db.query<{ name: string }, []>(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' UNION SELECT name FROM sqlite_temp_master WHERE type='table' ORDER BY name`
+  ).all();
+  return c.json(rows.map(r => r.name));
+});
+
+adminRoutes.get("/database/table/:name", requireRole(["superusuario"]), async (c) => {
+  const name = c.req.param("name");
+  if (!/^[a-zA-Z_]\w*$/.test(name)) return c.json({ error: "Nombre de tabla inválido." });
+  try {
+    const rows = db.query(`SELECT * FROM "${name}" LIMIT 1000`).all() as Record<string, unknown>[];
+    const columns = rows.length > 0 ? Object.keys(rows[0]!) : [];
+    return c.json({ columns, rows });
+  } catch (e: any) {
+    return c.json({ error: e.message || String(e) });
+  }
+});
+
+adminRoutes.get("/database/diagram", requireRole(["superusuario"]), async (c) => {
+  const tables = db.query<{ name: string, sql: string }, []>(
+    `SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+  ).all();
+  let mermaid = "erDiagram\n";
+  for (const t of tables) {
+    const cols = db.query(`SELECT * FROM "${t.name}" LIMIT 1`).all() as Record<string, unknown>[];
+    const colNames = cols.length > 0 ? Object.keys(cols[0]!) : [];
+    mermaid += `  ${t.name} {\n`;
+    for (const c of colNames) {
+      mermaid += `    TEXT ${c}\n`;
+    }
+    mermaid += "  }\n";
+  }
+  // Detect foreign keys from table SQL
+  for (const t of tables) {
+    const fkRegex = /FOREIGN KEY\s*\(([^)]+)\)\s*REFERENCES\s+(\w+)\s*\(([^)]+)\)/gi;
+    let match;
+    while ((match = fkRegex.exec(t.sql || "")) !== null) {
+      const cols = match[1]!;
+      const ref = match[2]!;
+      mermaid += `  ${t.name} ||--o{ ${ref} : "${cols.trim().replace(/"/g,'')}"\n`;
+    }
+  }
+  return c.json({ mermaid });
+});
+
+adminRoutes.get("/database/download", requireRole(["superusuario"]), async (c) => {
+  const dbPath = process.env.CATALOG_DB_PATH || join(process.cwd(), "data", "catalog.sqlite");
+  const walPath = dbPath + "-wal";
+  const shmPath = dbPath + "-shm";
+  // Checkpoint WAL to main file
+  try { db.run("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
+  try { db.run("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
+
+  // Small delay to let filesystem flush
+  await new Promise(r => setTimeout(r, 100));
+
+  // Read the main database file
+  const buf = fs.readFileSync(dbPath);
+  const date = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const filename = `backup-${date}.sqlite`;
+  c.header("Content-Type", "application/octet-stream");
+  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  return c.body(buf as any);
+});
+
+adminRoutes.post("/database/restore", requireRole(["superusuario"]), async (c) => {
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  const file = body.dbfile as File | undefined;
+  if (!file || !(file instanceof File)) return c.text("Archivo requerido.", 400);
+  const dbPath = process.env.CATALOG_DB_PATH || join(process.cwd(), "data", "catalog.sqlite");
+  // Guardar backup previo
+  const bakPath = dbPath + ".bak." + Date.now();
+  try { fs.copyFileSync(dbPath, bakPath); } catch {}
+  // Escribir nuevo
+  const arr = await file.arrayBuffer();
+  fs.writeFileSync(dbPath, Buffer.from(arr));
+  return c.redirect("/admin/login?restored=1");
 });
 
 export { adminRoutes };

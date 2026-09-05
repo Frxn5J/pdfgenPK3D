@@ -20,6 +20,7 @@ export interface QuoteInput {
   shipping_provider: string;
   shipping_cost: number;
   shipping_free_threshold: number | null;
+  iva?: number;
   grand_total: number;
   whatsapp_number: string;
   message: string;
@@ -35,6 +36,7 @@ export interface Quote {
   shipping_provider: string;
   shipping_cost: number;
   shipping_free_threshold: number | null;
+  iva: number;
   grand_total: number;
   status: string;
   payment_proof_url: string | null;
@@ -111,8 +113,8 @@ export function createQuote(input: QuoteInput) {
   const insertQuote = db.prepare(`
     INSERT INTO quotes (
       customer_name, postal_code, total_pieces, subtotal, shipping_provider, shipping_cost,
-      shipping_free_threshold, grand_total, whatsapp_number, message
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+      shipping_free_threshold, iva, grand_total, whatsapp_number, message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
   `);
   const insertItem = db.prepare(`
     INSERT INTO quote_items (
@@ -129,6 +131,7 @@ export function createQuote(input: QuoteInput) {
       quote.shipping_provider,
       quote.shipping_cost,
       quote.shipping_free_threshold,
+      Math.round((quote.iva || 0) * 100) / 100,
       quote.grand_total,
       quote.whatsapp_number,
       quote.message,
@@ -161,6 +164,14 @@ export function updateQuoteMessage(id: number, message: string) {
 
 export function updateQuoteStatus(id: number, status: string) {
   db.run(`UPDATE quotes SET status = ? WHERE id = ?`, [status, id]);
+}
+
+export function updateQuoteIva(id: number, enabled: boolean) {
+  const quote = getQuote(id);
+  if (!quote) return;
+  const iva = enabled ? Math.round(quote.subtotal * 0.16 * 100) / 100 : 0;
+  const grandTotal = Math.round((quote.subtotal + iva + quote.shipping_cost) * 100) / 100;
+  db.run(`UPDATE quotes SET iva = ?, grand_total = ? WHERE id = ?`, [iva, grandTotal, id]);
 }
 
 export function getQuotes(limit = 100) {

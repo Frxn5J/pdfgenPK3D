@@ -137,6 +137,7 @@ export function initDb() {
       shipping_provider TEXT NOT NULL,
       shipping_cost REAL NOT NULL,
       shipping_free_threshold INTEGER,
+      iva REAL NOT NULL DEFAULT 0,
       grand_total REAL NOT NULL,
       status TEXT NOT NULL DEFAULT 'new',
       whatsapp_number TEXT,
@@ -149,6 +150,12 @@ export function initDb() {
     db.run(`ALTER TABLE quotes ADD COLUMN status TEXT NOT NULL DEFAULT 'new'`);
   } catch {
     // Column already exists in databases initialized with the current schema.
+  }
+
+  try {
+    db.run(`ALTER TABLE quotes ADD COLUMN iva REAL NOT NULL DEFAULT 0`);
+  } catch {
+    // Column already exists.
   }
 
   db.run(`

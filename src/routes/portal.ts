@@ -805,7 +805,7 @@ function prtSidebar(token: string, session: ClientSession, profile: { full_name:
           <div class="prt-user-avatar">${(esc(session.email)[0] || "?").toUpperCase()}</div>
           <div style="overflow:hidden"><div style="font-size:.8rem;font-weight:600;color:#e2e8f0">${esc(profile.full_name || session.email)}</div><div style="font-size:.68rem;color:#64748b">${esc(session.email)}</div></div>
         </div>
-        <a href="/portal/logout" style="display:block;text-align:center;padding:.5rem;border-radius:.5rem;background:#0f172a;border:1px solid #1e293b;color:#ef4444;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;text-decoration:none" onmouseover="this.style.background='rgba(239,68,68,.1)'" onmouseout="this.style.background='#0f172a'"><i class="fas fa-sign-out-alt" style="margin-right:.35rem"></i> Cerrar Sesi&oacute;n</a>
+        <a href="/portal/logout" style="display:block;text-align:center;padding:.5rem;border-radius:.5rem;background:#0f172a;border:1px solid #1e293b;color:#ef4444;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;text-decoration:none" onmouseover="this.style.background='rgba(239,68,68,.1)'" onmouseout="this.style.background='#0f172a'"><i class="fas fa-sign-out-alt" style="margin-right:.35rem"></i> Cerrar sesión</a>
       </div>
     </aside>`;
 }
