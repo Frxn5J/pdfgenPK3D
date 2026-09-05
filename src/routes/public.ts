@@ -1916,6 +1916,7 @@ publicRoutes.post("/api/quotes", async (c) => {
       shipping_provider: shipping.provider,
       shipping_cost: shipping.cost,
       shipping_free_threshold: shipping.freeMinPieces,
+      iva,
       grand_total: grandTotal,
       whatsapp_number: whatsappNumber,
       message: messageWithoutFolio,

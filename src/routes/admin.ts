@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { setCookie, deleteCookie } from "hono/cookie";
-import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
+import { db, getConfig, updateConfig, getProducts, getProduct, getDefaultPriceTiers, getProductPriceTiers, replaceDefaultPriceTiers, replaceProductPriceTiers, getQuotes, getQuote, getQuoteItemsWithProducts, updateQuoteStatus, updateQuoteIva, getPrinters, createPrinter, deletePrinter, getFilaments, createFilament, deleteFilament, updateQuotePaymentProof, getQuoteFilaments, applyQuoteSchedule, getExpenseCategories, createExpenseCategory, deleteExpenseCategory, getExpenses, createExpense, deleteExpense, getPayments, createPayment, deletePayment, getFinancialSummary, createQuote, getCategories, getCategory, createCategory, updateCategory, deleteCategory, getSubcategories, getSubcategoriesByCategory, getSubcategory, createSubcategory, updateSubcategory, deleteSubcategory, addPushSubscription, deletePushSubscription, countPushSubscriptions, getUsers, getUserById, getUserByUsername, createUser, updateUser, deleteUser, updateQuoteItemPrintValues, type PriceTier, type QuoteItemWithProduct, type Quote, type Printer, type Filament, type QuoteFilamentWithDetails, type QuoteItemInput, type Category, type Subcategory, type UserRole, type AppUser } from "../db/schema";
 import { join } from "path";
 import * as fs from "fs";
 import { pwaHeadTags, pwaRegisterScript, getVapidPublicKey, sendPushToAll } from "../pwa";
@@ -3457,6 +3457,12 @@ adminRoutes.get("/quotes/new", (c) => {
               <input type="number" name="shipping_cost" min="0" step="0.01" value="${defaultShippingPrice.toFixed(2)}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
               <p class="text-xs text-gray-500 mt-1">Pon 0 para envío gratis.</p>
             </div>
+            <div class="flex items-center pt-6">
+              <label class="flex items-center gap-2 text-sm font-semibold text-gray-700">
+                <input type="checkbox" name="apply_iva" value="1" class="rounded border-gray-300">
+                Agregar IVA (16%)
+              </label>
+            </div>
           </div>
         </div>
 
@@ -3477,6 +3483,7 @@ adminRoutes.get("/quotes/new", (c) => {
             <div>Subtotal: <span id="sum-subtotal" class="font-mono font-semibold">$0.00</span></div>
             <div>Piezas: <span id="sum-pieces" class="font-mono font-semibold">0</span></div>
             <div>Envío: <span id="sum-shipping" class="font-mono font-semibold">$0.00</span></div>
+            <div>IVA (16%): <span id="sum-iva" class="font-mono font-semibold">$0.00</span></div>
             <div class="text-base font-bold text-gray-900 mt-1">Total: <span id="sum-total" class="font-mono">$0.00</span></div>
           </div>
           <button type="submit" class="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-md font-bold shadow-md transition-colors">
@@ -3605,8 +3612,10 @@ adminRoutes.get("/quotes/new", (c) => {
         const sumSubtotalEl = document.getElementById('sum-subtotal');
         const sumPiecesEl = document.getElementById('sum-pieces');
         const sumShippingEl = document.getElementById('sum-shipping');
+        const sumIvaEl = document.getElementById('sum-iva');
         const sumTotalEl = document.getElementById('sum-total');
         const shippingInput = document.querySelector('input[name="shipping_cost"]');
+        const ivaInput = document.querySelector('input[name="apply_iva"]');
         const fmt = (n) => '$' + (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
 
         function recalc() {
@@ -3621,10 +3630,12 @@ adminRoutes.get("/quotes/new", (c) => {
             pieces += qty;
           });
           const shipping = parseFloat(shippingInput.value) || 0;
+          const iva = ivaInput.checked ? Math.round(subtotal * 0.16 * 100) / 100 : 0;
           sumSubtotalEl.textContent = fmt(subtotal);
           sumPiecesEl.textContent = String(pieces);
           sumShippingEl.textContent = fmt(shipping);
-          sumTotalEl.textContent = fmt(subtotal + shipping);
+          sumIvaEl.textContent = fmt(iva);
+          sumTotalEl.textContent = fmt(subtotal + iva + shipping);
         }
 
         function addItem() {
@@ -3673,8 +3684,10 @@ adminRoutes.get("/quotes/new", (c) => {
           recalc();
         }
 
-        addBtn.addEventListener('click', addItem);
+        ivaInput.addEventListener('change', recalc);
         shippingInput.addEventListener('input', recalc);
+
+        addBtn.addEventListener('click', addItem);
         addItem();
 
         // ── Design creator modal ──
@@ -3840,6 +3853,7 @@ adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"])
   const whatsappNumber = formString(body.whatsapp_number).trim();
   const shippingProvider = formString(body.shipping_provider).trim() || "Estafeta";
   const shippingCost = parseFloat(formString(body.shipping_cost)) || 0;
+  const applyIva = formString(body.apply_iva) === "1";
 
   if (!customerName || !postalCode) {
     return c.redirect("/admin/quotes/new");
@@ -3894,7 +3908,8 @@ adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"])
     return c.redirect("/admin/quotes/new");
   }
 
-  const grandTotal = subtotal + shippingCost;
+  const iva = applyIva ? Math.round(subtotal * 0.16 * 100) / 100 : 0;
+  const grandTotal = Math.round((subtotal + iva + shippingCost) * 100) / 100;
   const quoteId = createQuote({
     customer_name: customerName,
     postal_code: postalCode,
@@ -3903,6 +3918,7 @@ adminRoutes.post("/quotes/new", requireRole(["superusuario", "admin", "editor"])
     shipping_provider: shippingProvider,
     shipping_cost: shippingCost,
     shipping_free_threshold: null,
+    iva,
     grand_total: grandTotal,
     whatsapp_number: whatsappNumber,
     message: "Cotización creada manualmente desde el panel administrativo.",
@@ -4024,12 +4040,27 @@ adminRoutes.get("/quotes/:id", (c) => {
               ${itemsRows}
             </tbody>
           </table>
-          <div class="bg-gray-50 px-6 py-4 border-t border-gray-200 flex flex-col items-end space-y-1">
+        <div class="bg-gray-50 px-6 py-4 border-t border-gray-200 flex flex-col items-end space-y-1">
             <div class="text-sm text-gray-600">Subtotal: <span class="font-medium text-gray-900">${money(quote.subtotal)}</span></div>
+            <div class="text-sm text-gray-600">IVA (16%): <span class="font-medium text-gray-900">${quote.iva > 0 ? money(quote.iva) : "No aplicado"}</span></div>
             <div class="text-sm text-gray-600">Envío (${escapeHtml(quote.shipping_provider)}): <span class="font-medium text-gray-900">${quote.shipping_cost > 0 ? money(quote.shipping_cost) : "Gratis"}</span></div>
             <div class="text-base font-bold text-gray-900 border-t pt-1 w-48 text-right">Total: <span>${money(quote.grand_total)}</span></div>
           </div>
         </div>
+      </div>
+
+      <div class="bg-white shadow rounded-lg p-6">
+        <h2 class="text-lg font-bold text-gray-800 border-b pb-2 mb-4">Impuestos</h2>
+        <form action="/admin/quotes/${quote.id}/iva" method="post" class="flex flex-wrap items-center justify-between gap-4">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" name="apply_iva" value="1" ${quote.iva > 0 ? "checked" : ""} class="rounded border-gray-300">
+            Aplicar IVA del 16% sobre el subtotal (${money(quote.subtotal)})
+          </label>
+          <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm px-4 py-2 rounded transition-colors">
+            Guardar IVA
+          </button>
+        </form>
+        <p class="text-xs text-gray-500 mt-2">Al quitar la selección, el IVA se elimina y se recalcula el total.</p>
       </div>
 
       <div class="bg-white shadow rounded-lg p-6">
@@ -4258,6 +4289,13 @@ adminRoutes.post("/quotes/:id/status", requireRole(["superusuario", "admin", "ed
   return c.redirect(`/admin/quotes/${id}`);
 });
 
+adminRoutes.post("/quotes/:id/iva", requireRole(["superusuario", "admin", "editor"]), async (c) => {
+  const id = parseInt(c.req.param("id"), 10);
+  const body = await c.req.parseBody() as Record<string, unknown>;
+  updateQuoteIva(id, formString(body.apply_iva) === "1");
+  return c.redirect(`/admin/quotes/${id}`);
+});
+
 adminRoutes.post("/quotes/:id/items/:itemId/print-values", requireRole(["superusuario", "admin", "editor"]), async (c) => {
   const quoteId = parseInt(c.req.param("id"), 10);
   const itemId = parseInt(c.req.param("itemId"), 10);
@@ -4335,6 +4373,22 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
     `);
   }
 
+  if (quote.iva > 0) {
+    itemsHtml.push(`
+      <tr class="border-b border-gray-200">
+        <td class="px-2 py-1.5 text-center font-mono">T-001</td>
+        <td class="px-2 py-1.5">IVA (16%)</td>
+        <td class="px-2 py-1.5 text-center">1</td>
+        <td class="px-2 py-1.5 text-center">1T-001</td>
+        <td class="px-2 py-1.5 text-center">Impuesto</td>
+        <td class="px-2 py-1.5 text-center">Servicio</td>
+        <td class="px-2 py-1.5 text-right font-mono">${plainMoney(quote.iva)}</td>
+        <td class="px-2 py-1.5 text-right font-mono">0.00</td>
+        <td class="px-2 py-1.5 text-right font-mono font-semibold">${plainMoney(quote.iva)}</td>
+      </tr>
+    `);
+  }
+
   const itemsForGallery = items.map((item) => ({
     name: item.product_name,
     quantity: item.quantity,
@@ -4355,7 +4409,7 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
     </div>
   `).join("");
 
-  let totalAcumulado = quote.subtotal + quote.shipping_cost;
+  let totalAcumulado = quote.grand_total;
 
   if (hasCargoExtra && cargoExtraImporte > 0) {
     itemsHtml.push(`
@@ -4484,6 +4538,12 @@ adminRoutes.get("/quotes/:id/pdf", (c) => {
                   <span class="text-gray-500 font-normal">Subtotal:</span>
                   <span class="font-mono">${plainMoney(quote.subtotal)}</span>
                 </div>
+                ${quote.iva > 0 ? `
+                <div class="flex justify-between">
+                  <span class="text-gray-500 font-normal">IVA (16%):</span>
+                  <span class="font-mono">${plainMoney(quote.iva)}</span>
+                </div>
+                ` : ""}
                 ${quote.shipping_cost > 0 ? `
                 <div class="flex justify-between">
                   <span class="text-gray-500 font-normal">Envío:</span>
