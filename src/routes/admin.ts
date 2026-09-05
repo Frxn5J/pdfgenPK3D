@@ -554,7 +554,7 @@ const AdminLayout = (title: string, content: string, session?: SessionData) => {
                         </div>
                     </div>
                     <a href="/admin/config" class="nav-direct-link">Configuración</a>
-                    <a href="/admin/database" class="nav-direct-link">Base de Datos</a>
+                    ${session?.role === "superusuario" ? `<a href="/admin/database" class="nav-direct-link">Base de Datos</a>` : ""}
                     ${session?.role === "superusuario" ? `<a href="/admin/usuarios" class="nav-direct-link">Usuarios</a>` : ""}
                 </div>
                 <div class="flex items-center gap-3">
@@ -5894,7 +5894,7 @@ adminRoutes.get("/finanzas/reportes", requireRole(["superusuario", "admin"]), (c
 
 // ── Base de Datos ──────────────────────────────────────────────────────────
 
-adminRoutes.get("/database", async (c) => {
+adminRoutes.get("/database", requireRole(["superusuario"]), async (c) => {
   const session = c.get("session") as SessionData | undefined;
   return c.html(AdminLayout("Base de Datos", `
     <div class="p-6">
@@ -6184,7 +6184,7 @@ adminRoutes.get("/database", async (c) => {
   `, session));
 });
 
-adminRoutes.post("/database/query", async (c) => {
+adminRoutes.post("/database/query", requireRole(["superusuario"]), async (c) => {
   const body = await c.req.json() as { sql: string };
   if (!body.sql?.trim()) return c.json({ error: "SQL vacío." });
   try {
@@ -6203,14 +6203,14 @@ adminRoutes.post("/database/query", async (c) => {
   }
 });
 
-adminRoutes.get("/database/tables", async (c) => {
+adminRoutes.get("/database/tables", requireRole(["superusuario"]), async (c) => {
   const rows = db.query<{ name: string }, []>(
     `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' UNION SELECT name FROM sqlite_temp_master WHERE type='table' ORDER BY name`
   ).all();
   return c.json(rows.map(r => r.name));
 });
 
-adminRoutes.get("/database/table/:name", async (c) => {
+adminRoutes.get("/database/table/:name", requireRole(["superusuario"]), async (c) => {
   const name = c.req.param("name");
   if (!/^[a-zA-Z_]\w*$/.test(name)) return c.json({ error: "Nombre de tabla inválido." });
   try {
@@ -6222,7 +6222,7 @@ adminRoutes.get("/database/table/:name", async (c) => {
   }
 });
 
-adminRoutes.get("/database/diagram", async (c) => {
+adminRoutes.get("/database/diagram", requireRole(["superusuario"]), async (c) => {
   const tables = db.query<{ name: string, sql: string }, []>(
     `SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
   ).all();
@@ -6249,7 +6249,7 @@ adminRoutes.get("/database/diagram", async (c) => {
   return c.json({ mermaid });
 });
 
-adminRoutes.get("/database/download", async (c) => {
+adminRoutes.get("/database/download", requireRole(["superusuario"]), async (c) => {
   const dbPath = process.env.CATALOG_DB_PATH || join(process.cwd(), "data", "catalog.sqlite");
   const walPath = dbPath + "-wal";
   const shmPath = dbPath + "-shm";
@@ -6269,7 +6269,7 @@ adminRoutes.get("/database/download", async (c) => {
   return c.body(buf as any);
 });
 
-adminRoutes.post("/database/restore", async (c) => {
+adminRoutes.post("/database/restore", requireRole(["superusuario"]), async (c) => {
   const body = await c.req.parseBody() as Record<string, unknown>;
   const file = body.dbfile as File | undefined;
   if (!file || !(file instanceof File)) return c.text("Archivo requerido.", 400);

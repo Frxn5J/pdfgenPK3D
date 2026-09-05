@@ -128,6 +128,43 @@ describe("Endpoints push admin (autenticación)", () => {
   });
 });
 
+describe("Autorización de base de datos", () => {
+  test("el rol visor no puede acceder a la consola ni a los backups", async () => {
+    const token = await signSession({ id: 99, username: "visor", role: "visor", exp: Date.now() + 3600_000 });
+    const headers = { Cookie: `admin_session=${token}` };
+
+    for (const path of [
+      "/admin/database",
+      "/admin/database/tables",
+      "/admin/database/table/products",
+      "/admin/database/diagram",
+      "/admin/database/download",
+    ]) {
+      const res = await app.request(path, { headers });
+      expect(res.status).toBe(403);
+    }
+
+    const query = await app.request("/admin/database/query", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ sql: "SELECT 1" }),
+    });
+    expect(query.status).toBe(403);
+
+    const restore = await app.request("/admin/database/restore", {
+      method: "POST",
+      headers,
+      body: new FormData(),
+    });
+    expect(restore.status).toBe(403);
+  });
+
+  test("el superusuario conserva acceso a las tablas", async () => {
+    const res = await app.request("/admin/database/tables", { headers: AUTH });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("Optimizador de imágenes /img", () => {
   test("rechaza width fuera de la whitelist", async () => {
     const res = await app.request("/img?src=%2Fuploads%2Fx.png&w=999");
