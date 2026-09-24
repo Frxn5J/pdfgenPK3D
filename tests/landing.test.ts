@@ -222,4 +222,26 @@ describe("Contenido comercial", () => {
     expect(body).toContain("mínimo 25 piezas");
     expect(body.toLowerCase()).not.toContain("alta calidad");
   });
+
+  test("501+ se cotiza como proyecto, sin precio cerrado", async () => {
+    const { html } = await getLanding();
+    expect(html.toLowerCase()).toContain("se cotiza el proyecto");
+    expect(html).not.toContain("$21.00");
+  });
+
+  test("botones de WhatsApp usan el número real", async () => {
+    const { html } = await getLanding();
+    expect(html).toContain("wa.me/524961266304");
+    expect(html).not.toContain("000 000 0000");
+  });
+
+  test("catálogo unificado: menudeo, cotización 501+ y 3 envíos", async () => {
+    const res = await app.request("/catalogo");
+    const html = await res.text();
+    expect(html).toContain("1 a 24");
+    expect(html.toLowerCase()).toContain("se cotiza el proyecto");
+    expect(html).not.toContain("$21.00");
+    expect(html).toContain("antes de IVA");
+    expect(html.toLowerCase()).toContain("correos");
+  });
 });

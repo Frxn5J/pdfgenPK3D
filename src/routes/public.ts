@@ -193,10 +193,31 @@ const shippingForPieces = (config: Record<string, string>, totalPieces: number, 
   return { ...settings, method: effective, provider: shippingMethodLabel(settings, effective), cost };
 };
 
+const RETAIL_TIER = { min_volume: 1, max_volume: 24, price: 50, delivery_time: "4 a 7 días hábiles" };
+
+const shippingLine = (config: Record<string, string>) => {
+  const s = getShippingSettings(config);
+  const correos = s.correosMaxPieces
+    ? `Correos de México $${s.correosPrice.toFixed(2)} (menos de ${s.correosMaxPieces} piezas)`
+    : `Correos de México $${s.correosPrice.toFixed(2)}`;
+  return `${s.provider} normal $${s.price.toFixed(2)} · ${s.provider} express $${s.expressPrice.toFixed(2)} · ${correos}${s.freeMinPieces ? ` · Gratis desde ${s.freeMinPieces} piezas` : ""}`;
+};
+
+const displayTiers = <T extends { min_volume: number; max_volume: number | null; price: number; delivery_time: string }>(tiers: T[]) => {
+  const normalized = tiers.map((t) => ({ ...t, max_volume: t.max_volume ?? null }));
+  if (normalized.some((t) => t.min_volume === 1)) return normalized;
+  return [{ ...RETAIL_TIER } as T, ...normalized];
+};
+
 const tierForQuantity = <T extends { min_volume: number; max_volume: number | null }>(tiers: T[], totalPieces: number) => {
   const sorted = [...tiers].sort((a, b) => a.min_volume - b.min_volume);
   if (sorted.length === 0) return null;
-  return sorted.find((tier) => totalPieces >= tier.min_volume && (!tier.max_volume || totalPieces <= tier.max_volume)) || sorted[0];
+  const inRange = sorted.find((tier) => totalPieces >= tier.min_volume && (!tier.max_volume || totalPieces <= tier.max_volume));
+  if (inRange) return inRange;
+  // Fuera de rango por arriba (501+ con max null se cotiza): no hay precio cerrado.
+  const last = sorted[sorted.length - 1];
+  if (!last.max_volume && totalPieces > last.min_volume) return null;
+  return sorted[0];
 };
 
 const buildThemeCss = (config: Record<string, string>) => {
@@ -810,18 +831,6 @@ const renderCoverSection = (config: Record<string, string>) => `
 
 const withIva = (price: number) => Math.round(price * 1.16 * 100) / 100;
 
-const retailTierRow = (tiers: Array<{ min_volume: number; max_volume: number | null; price: number; delivery_time: string }>) => {
-  const hasRetail = tiers.some((t) => t.min_volume === 1);
-  if (hasRetail) return "";
-  return `
-                      <tr>
-                          <td>1 a 24 piezas</td>
-                          <td class="price-text">$50.00 MXN</td>
-                          <td class="price-text">$58.00 MXN</td>
-                          <td>4 a 7 días hábiles</td>
-                      </tr>`;
-};
-
 const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers: ReturnType<typeof getDefaultPriceTiers>) => `
   <section class="page-section welcome-section page-break">
       ${renderShapes(config)}
@@ -838,12 +847,14 @@ const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers:
                           <th>Tiempo de Entrega</th>
                       </tr>
                   </thead>
-                  <tbody>${retailTierRow(defaultPriceTiers)}
-                      ${defaultPriceTiers.map((tier) => `
+                  <tbody>
+                      ${displayTiers(defaultPriceTiers).map((tier) => `
                       <tr>
                           <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
-                          <td class="price-text">$${tier.price.toFixed(2)} MXN</td>
-                          <td class="price-text">$${withIva(Number(tier.price)).toFixed(2)} MXN</td>
+                          ${tier.max_volume === null
+                            ? `<td colspan="2" class="price-text" style="text-align:center">Se cotiza el proyecto</td>`
+                            : `<td class="price-text">$${Number(tier.price).toFixed(2)} MXN</td>
+                          <td class="price-text">$${withIva(Number(tier.price)).toFixed(2)} MXN</td>`}
                           <td>${escapeHtml(tier.delivery_time)}</td>
                       </tr>
                       `).join("")}
@@ -861,7 +872,9 @@ const renderProductCard = (
   product: ReturnType<typeof getProducts>[number],
   priceTiers: ReturnType<typeof getDefaultPriceTiers>,
   interactive = false,
-) => `
+) => {
+  const cardTiers = displayTiers(priceTiers);
+  return `
   <article class="theme-card page-break-inside-avoid">
       ${product.image_url
         ? imgTag({ src: optimizedImageSrc(product.image_url, 800), alt: product.name, w: 400, h: 260, className: "product-image", lazy: true })
@@ -881,11 +894,13 @@ const renderProductCard = (
                       </tr>
                   </thead>
                   <tbody>
-                      ${priceTiers.map((tier) => `
+                      ${cardTiers.map((tier) => `
                       <tr>
                           <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
-                          <td class="price-text">$${tier.price.toFixed(2)}</td>
-                          <td class="price-text">$${withIva(Number(tier.price)).toFixed(2)}</td>
+                          ${tier.max_volume === null
+                            ? `<td colspan="2" class="price-text" style="text-align:center">Se cotiza el proyecto</td>`
+                            : `<td class="price-text">$${Number(tier.price).toFixed(2)}</td>
+                          <td class="price-text">$${withIva(Number(tier.price)).toFixed(2)}</td>`}
                       </tr>
                       `).join("")}
                   </tbody>
@@ -900,7 +915,8 @@ const renderProductCard = (
           ` : ""}
       </div>
   </article>
-`;
+  `;
+};
 
 const renderProductsSection = (
   config: Record<string, string>,
@@ -943,6 +959,7 @@ const renderProductsSection = (
       ${renderShapes(config)}
       <div class="page-shell">
           <h2 class="section-title">${escapeHtml(config.products_title || "Nuestros Productos")}</h2>
+          <p class="quote-note" style="text-align:center;margin:0 0 1.5rem">Precios por pieza antes de IVA. El IVA del 16% se suma solo si solicitas factura. Envíos: ${escapeHtml(shippingLine(config))}</p>
           ${productsWithTiers.length === 0
             ? '<p class="empty-products">No hay productos en el catálogo aún.</p>'
             : groups.map((g, i) => groupedRender(g, i === 0)).join("")}
@@ -1064,21 +1081,14 @@ const renderLandingHero = (config: Record<string, string>) => {
 
 const renderLandingPricing = (config: Record<string, string>, tiers: ReturnType<typeof getDefaultPriceTiers>) => {
   const shipping = getShippingSettings(config);
-  const sortedTiers = [...tiers].sort((a, b) => a.min_volume - b.min_volume);
-  const retailHtml = sortedTiers.some((t) => t.min_volume === 1) ? "" : `
-      <tr>
-        <td class="ln-price-hi">1 a 24 piezas</td>
-        <td class="ln-price-hi">${currency.format(50)}</td>
-        <td class="ln-price-hi">${currency.format(withIva(50))}</td>
-        <td>4 a 7 días hábiles</td>
-      </tr>`;
+  const sortedTiers = displayTiers(tiers).sort((a, b) => a.min_volume - b.min_volume);
   const tiersHtml = sortedTiers.length === 0
     ? `<tr><td colspan="4" style="text-align:center;padding:2rem;color:inherit;opacity:.5">Sin niveles configurados.</td></tr>`
-    : `${retailHtml}${sortedTiers.map((t) => `
+    : `${sortedTiers.map((t) => `
       <tr>
         <td class="ln-price-hi">${escapeHtml(formatVolume(t.min_volume, t.max_volume))}</td>
-        <td class="ln-price-hi">${t.max_volume === null ? `<span class="ln-price-lo">Cotizar proyecto</span>` : `${currency.format(Number(t.price))}`}</td>
-        <td class="ln-price-hi">${t.max_volume === null ? `<span class="ln-price-lo">Cotizar proyecto</span>` : `${currency.format(withIva(Number(t.price)))}`}</td>
+        <td class="ln-price-hi">${t.max_volume === null ? `<span class="ln-price-lo">Se cotiza el proyecto</span>` : `${currency.format(Number(t.price))}`}</td>
+        <td class="ln-price-hi">${t.max_volume === null ? `<span class="ln-price-lo">Se cotiza el proyecto</span>` : `${currency.format(withIva(Number(t.price)))}`}</td>
         <td>${escapeHtml(t.delivery_time || "—")}</td>
       </tr>`).join("")}`;
 
@@ -1411,7 +1421,12 @@ const renderShopScript = (products: Array<{
   const tierForQuantity = (tiers, totalPieces) => {
     const sorted = [...(tiers || [])].sort((a, b) => a.min_volume - b.min_volume);
     if (sorted.length === 0) return null;
-    return sorted.find((tier) => totalPieces >= tier.min_volume && (!tier.max_volume || totalPieces <= tier.max_volume)) || sorted[0];
+    const withRetail = sorted.some((t) => t.min_volume === 1)
+      ? sorted
+      : [{ min_volume: 1, max_volume: 24, price: 50, delivery_time: '4 a 7 días hábiles' }, ...sorted];
+    const inRange = withRetail.find((tier) => totalPieces >= tier.min_volume && (!tier.max_volume || totalPieces <= tier.max_volume));
+    if (inRange) return inRange;
+    return null;
   };
 
   const shippingCostForPieces = (totalPieces) => {
@@ -1468,8 +1483,11 @@ const renderShopScript = (products: Array<{
     if (shippingAmountEl) shippingAmountEl.textContent = details.lines.length ? (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') : '$0.00';
     if (totalAmountEl) totalAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.grandTotal);
     if (!cartLines) return;
+    const quoteHint = details.hasMissingPrice
+      ? '<p class="quote-note" style="margin:.5rem 0 0">Pedidos de 501+ piezas se cotizan como proyecto: te confirmamos precio y entrega por WhatsApp.</p>'
+      : '';
     cartLines.innerHTML = details.lines.map((line) => {
-      const tierText = line.tier ? (line.tier.min_volume + (line.tier.max_volume ? ' a ' + line.tier.max_volume : ' o más') + ' piezas') : 'Sin tabla';
+      const tierText = line.tier ? (line.tier.min_volume + (line.tier.max_volume ? ' a ' + line.tier.max_volume : ' o más') + ' piezas') : 'Se cotiza el proyecto';
       const subtotal = line.unitPrice ? currency.format(line.subtotal) : 'A cotizar';
       const unit = line.unitPrice ? currency.format(line.unitPrice) : 'A cotizar';
       return '<div class="cart-line">'
@@ -1478,7 +1496,7 @@ const renderShopScript = (products: Array<{
         + '<div class="cart-line-actions"><input type="number" min="1" step="1" value="' + line.quantity + '" data-cart-qty="' + line.product.id + '">'
         + '<button type="button" class="remove-cart-item" data-remove-cart="' + line.product.id + '">Quitar</button></div>'
         + '</div>';
-    }).join('');
+    }).join('') + quoteHint;
   };
 
   const quoteMessage = () => {
@@ -1649,7 +1667,7 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
   const products = productsWithTiers.map(({ product, priceTiers }) => ({
     id: product.id,
     name: product.name,
-    priceTiers: priceTiers.map((tier) => ({
+    priceTiers: displayTiers(priceTiers).map((tier) => ({
       min_volume: tier.min_volume,
       max_volume: tier.max_volume,
       price: tier.price,
