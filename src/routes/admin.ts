@@ -1623,9 +1623,22 @@ adminRoutes.get("/config", requireRole(["superusuario", "admin"]), (c) => {
                         <input type="text" name="shipping_provider" value="${configValue(config, "shipping_provider", "Estafeta")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="Ej: Estafeta">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700">Costo de Envío Estimado</label>
+                        <label class="block text-sm font-medium text-gray-700">Costo de Envío Normal (MXN)</label>
                         <input type="number" name="shipping_price" min="0" step="0.01" value="${configValue(config, "shipping_price", "150")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="150">
-                        <p class="text-xs text-gray-500 mt-1">Se suma al total cuando no aplica envío gratis.</p>
+                        <p class="text-xs text-gray-500 mt-1">Estafeta normal. Se suma al total cuando no aplica envío gratis.</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Costo de Envío Express (MXN)</label>
+                        <input type="number" name="shipping_express_price" min="0" step="0.01" value="${configValue(config, "shipping_express_price", "300")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="300">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Costo Correos de México (MXN)</label>
+                        <input type="number" name="shipping_correos_price" min="0" step="0.01" value="${configValue(config, "shipping_correos_price", "50")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="50">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Correos solo hasta (piezas)</label>
+                        <input type="number" name="shipping_correos_max_pieces" min="0" step="1" value="${configValue(config, "shipping_correos_max_pieces", "200")}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="200">
+                        <p class="text-xs text-gray-500 mt-1">En pedidos de 200+ piezas Correos no aplica y se usa el envío normal.</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">Envío Gratis desde Piezas</label>
@@ -2549,6 +2562,9 @@ adminRoutes.post("/config", requireRole(["superusuario", "admin"]), async (c) =>
   // Campos con default cuando llegan vacíos.
   if ("shipping_provider" in body) updates.shipping_provider = formString(body.shipping_provider) || "Estafeta";
   if ("shipping_price" in body) updates.shipping_price = formString(body.shipping_price) || "0";
+  if ("shipping_express_price" in body) updates.shipping_express_price = formString(body.shipping_express_price) || "0";
+  if ("shipping_correos_price" in body) updates.shipping_correos_price = formString(body.shipping_correos_price) || "0";
+  if ("shipping_correos_max_pieces" in body) updates.shipping_correos_max_pieces = formString(body.shipping_correos_max_pieces) || "0";
   if ("free_shipping_min_pieces" in body) updates.free_shipping_min_pieces = formString(body.free_shipping_min_pieces) || "0";
 
   // Logo: archivo nuevo OR campo URL presente. Si ninguno aplica, no se toca.

@@ -164,17 +164,33 @@ const integerConfig = (value: unknown, fallback: number) => {
 
 const getShippingSettings = (config: Record<string, string>) => {
   const freeMinPieces = integerConfig(config.free_shipping_min_pieces, 501);
+  const correosMaxPieces = integerConfig(config.shipping_correos_max_pieces, 200);
   return {
     provider: String(config.shipping_provider || "Estafeta").trim() || "Estafeta",
     price: Math.max(0, numberConfig(config.shipping_price, 150)),
+    expressPrice: Math.max(0, numberConfig(config.shipping_express_price, 300)),
+    correosPrice: Math.max(0, numberConfig(config.shipping_correos_price, 50)),
+    correosMaxPieces: correosMaxPieces > 0 ? correosMaxPieces : null,
     freeMinPieces: freeMinPieces > 0 ? freeMinPieces : null,
   };
 };
 
-const shippingForPieces = (config: Record<string, string>, totalPieces: number) => {
+type ShippingMethod = "standard" | "express" | "correos";
+
+const normalizeShippingMethod = (value: unknown): ShippingMethod =>
+  value === "express" || value === "correos" ? value : "standard";
+
+const shippingMethodLabel = (settings: ReturnType<typeof getShippingSettings>, method: ShippingMethod) =>
+  method === "express" ? `${settings.provider} Express` : method === "correos" ? "Correos de México" : settings.provider;
+
+const shippingForPieces = (config: Record<string, string>, totalPieces: number, method: unknown = "standard") => {
   const settings = getShippingSettings(config);
-  const cost = settings.freeMinPieces && totalPieces >= settings.freeMinPieces ? 0 : settings.price;
-  return { ...settings, cost };
+  const requested = normalizeShippingMethod(method);
+  const correosAllowed = settings.correosMaxPieces == null || totalPieces < settings.correosMaxPieces;
+  const effective: ShippingMethod = requested === "correos" && !correosAllowed ? "standard" : requested;
+  const base = effective === "express" ? settings.expressPrice : effective === "correos" ? settings.correosPrice : settings.price;
+  const cost = settings.freeMinPieces && totalPieces >= settings.freeMinPieces ? 0 : base;
+  return { ...settings, method: effective, provider: shippingMethodLabel(settings, effective), cost };
 };
 
 const tierForQuantity = <T extends { min_volume: number; max_volume: number | null }>(tiers: T[], totalPieces: number) => {
@@ -1037,6 +1053,7 @@ const renderLandingPricing = (config: Record<string, string>, tiers: ReturnType<
   const freeNote = shipping.freeMinPieces
     ? ` · <strong>Gratis desde ${shipping.freeMinPieces} piezas</strong>`
     : "";
+  const shippingOptionsNote = `Estafeta normal ${currency.format(shipping.price)} MXN · Estafeta express ${currency.format(shipping.expressPrice)} MXN · Correos de México ${currency.format(shipping.correosPrice)} MXN (menos de ${shipping.correosMaxPieces ?? 200} piezas)`;
 
   return `
 <section class="ln-section-dark" id="precios">
@@ -1052,7 +1069,7 @@ const renderLandingPricing = (config: Record<string, string>, tiers: ReturnType<
       </table>
     </div>
     <div class="ln-table-footer">
-      <p class="ln-table-note">${msi("info", "msi")} Envío ${currency.format(shipping.price)} MXN vía ${escapeHtml(shipping.provider)}${freeNote}</p>
+      <p class="ln-table-note">${msi("info", "msi")} ${escapeHtml(shippingOptionsNote)}${freeNote}</p>
       <a class="ln-btn-solid" href="${escapeHtml(waHref(config, "Hola, me interesa una cotización empresarial"))}" target="_blank" rel="noopener noreferrer">
         Solicitar cotización empresarial
       </a>
@@ -1132,13 +1149,13 @@ const renderLandingLocation = (config: Record<string, string>) => {
     <div class="ln-location-grid">
       <div>
         <h2 class="ln-heading-light" style="text-align:left;">Retiro y entrega local en San Luis Potosí</h2>
-        <p class="ln-sub-light" style="text-align:left;">Fabricamos en San Luis Potosí, S.L.P. y enviamos a toda la república mexicana vía ${provider}. Los clientes locales pueden recoger en persona al terminar la producción.</p>
+        <p class="ln-sub-light" style="text-align:left;">Fabricamos en Av. Cuauhtémoc 620, San Luis Potosí, S.L.P. y enviamos a toda la república mexicana vía ${provider}. Los clientes locales pueden recoger en persona al terminar la producción.</p>
         <div class="ln-location-items">
           <div class="ln-location-item">
             ${msi("location_on", "msi")}
             <div class="ln-location-item-body">
               <span class="ln-location-label">Ubicación</span>
-              <span class="ln-location-value">San Luis Potosí, S.L.P., México</span>
+              <span class="ln-location-value">Av. Cuauhtémoc 620, San Luis Potosí, S.L.P., México</span>
             </div>
           </div>
           <div class="ln-location-item">
@@ -1161,8 +1178,8 @@ const renderLandingLocation = (config: Record<string, string>) => {
       <div class="ln-map-placeholder">
         ${msi("map")}
         <div style="margin-top:.75rem;">
-          <p style="margin:0;font-size:.9rem;">San Luis Potosí, S.L.P.</p>
-          <a class="ln-map-link" href="https://maps.google.com/?q=San+Luis+Potosi+SLP+Mexico" target="_blank" rel="noopener">
+          <p style="margin:0;font-size:.9rem;">Av. Cuauhtémoc 620, San Luis Potosí, S.L.P.</p>
+          <a class="ln-map-link" href="https://maps.google.com/?q=Av.+Cuauht%C3%A9moc+620,+San+Luis+Potos%C3%AD,+SLP,+M%C3%A9xico" target="_blank" rel="noopener">
             ${msi("open_in_new")} Ver en Google Maps
           </a>
         </div>
@@ -1186,7 +1203,7 @@ const renderLandingFaq = (config: Record<string, string>) => {
     ["¿Qué métodos de pago aceptan?",
       "Aceptamos transferencia bancaria (SPEI), depósito OXXO y pago en efectivo para clientes que recojan en San Luis Potosí. El proceso de pago se coordina directamente por WhatsApp al confirmar el pedido."],
     ["¿Hacen envíos a toda la república mexicana?",
-      `Sí, enviamos a toda la república mexicana vía ${shipping.provider}. El costo de envío es de ${currency.format(shipping.price)} MXN${shipping.freeMinPieces ? ` y es gratuito en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}.`],
+      `Sí, enviamos a toda la república mexicana. ${shipping.provider} normal: ${currency.format(shipping.price)} MXN. ${shipping.provider} express: ${currency.format(shipping.expressPrice)} MXN. Correos de México: ${currency.format(shipping.correosPrice)} MXN (solo pedidos de menos de ${shipping.correosMaxPieces ?? 200} piezas)${shipping.freeMinPieces ? `. Envío gratis en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}.`],
     ["¿Tienen descuentos para distribuidores o revendedores?",
       "Sí, contamos con precios especiales por volumen para revendedores, empresas y mayoristas. Cuanto mayor el volumen, menor el precio por pieza. Para proyectos de gran volumen el precio es negociable. Contáctanos con tu estimado."],
     ["¿Qué pasa si mi pedido llega con defectos?",
@@ -1325,6 +1342,7 @@ const renderShopScript = (products: Array<{
   const productMap = new Map(products.map((product) => [String(product.id), product]));
   const cart = new Map();
   let customer = null;
+  let shippingMethod = 'standard';
 
   const currency = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' });
   const escapeClientHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -1360,11 +1378,29 @@ const renderShopScript = (products: Array<{
 
   const shippingCostForPieces = (totalPieces) => {
     const threshold = Number(shippingSettings.freeMinPieces || 0);
-    const price = Math.max(0, Number(shippingSettings.price || 0));
-    return threshold > 0 && totalPieces >= threshold ? 0 : price;
+    const method = shippingMethod === 'express' || shippingMethod === 'correos' ? shippingMethod : 'standard';
+    const correosMax = Number(shippingSettings.correosMaxPieces || 0);
+    const effective = method === 'correos' && correosMax > 0 && totalPieces >= correosMax ? 'standard' : method;
+    const base = effective === 'express'
+      ? Math.max(0, Number(shippingSettings.expressPrice || 0))
+      : effective === 'correos'
+        ? Math.max(0, Number(shippingSettings.correosPrice || 0))
+        : Math.max(0, Number(shippingSettings.price || 0));
+    return threshold > 0 && totalPieces >= threshold ? 0 : base;
   };
 
   const cartTotalPieces = () => Array.from(cart.values()).reduce((total, item) => total + item.quantity, 0);
+
+  const shippingLabelForMethod = () => {
+    const provider = shippingSettings.provider || 'Estafeta';
+    const totalPieces = cartTotalPieces();
+    const correosMax = Number(shippingSettings.correosMaxPieces || 0);
+    const effective = shippingMethod === 'correos' && correosMax > 0 && totalPieces >= correosMax ? 'standard' : shippingMethod;
+    if (effective === 'express') return 'Envío (' + provider + ' Express)';
+    if (effective === 'correos') return 'Envío (Correos de México)';
+    return 'Envío (' + provider + ' Normal)';
+  };
+
   const cartDetails = () => {
     const totalPieces = cartTotalPieces();
     const lines = Array.from(cart.values()).map((item) => {
@@ -1387,7 +1423,7 @@ const renderShopScript = (products: Array<{
     if (quoteStatus) quoteStatus.textContent = 'Antes de abrir WhatsApp te pediremos nombre y código postal.';
     if (totalPiecesEl) totalPiecesEl.textContent = String(details.totalPieces);
     if (subtotalAmountEl) subtotalAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal);
-    if (shippingLabelEl) shippingLabelEl.textContent = 'Envío estimado (' + (shippingSettings.provider || 'Estafeta') + ')';
+    if (shippingLabelEl) shippingLabelEl.textContent = 'Envío estimado ' + shippingLabelForMethod().replace('Envío ', '');
     if (ivaRowEl) ivaRowEl.style.display = details.needsInvoice ? 'flex' : 'none';
     if (ivaAmountEl) ivaAmountEl.textContent = details.hasMissingPrice ? 'A cotizar' : currency.format(details.iva);
     if (grandLabelEl) grandLabelEl.textContent = details.needsInvoice ? 'Total estimado con IVA y envío' : 'Total estimado con envío';
@@ -1424,7 +1460,7 @@ const renderShopScript = (products: Array<{
       + 'Total de piezas: ' + details.totalPieces + '\\n'
       + 'Subtotal estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal)) + '\\n'
       + ivaLine
-      + 'Envío estimado (' + (shippingSettings.provider || 'Estafeta') + '): ' + (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') + '\\n'
+      + 'Envío estimado ' + shippingLabelForMethod().replace('Envío ', '') + ': ' + (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') + '\\n'
       + 'Total estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.grandTotal)) + '\\n\\n'
       + 'Quedo pendiente de la cotización final con envío.';
   };
@@ -1440,6 +1476,7 @@ const renderShopScript = (products: Array<{
         customerName: customer.name,
         postalCode: customer.postalCode,
         requiresInvoice: details.needsInvoice,
+        shippingMethod,
         items: details.lines.map((line) => ({ productId: line.product.id, quantity: line.quantity })),
       }),
     });
@@ -1530,6 +1567,14 @@ const renderShopScript = (products: Array<{
     }
   });
 
+  document.addEventListener('change', (event) => {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (input?.name === 'shipping-method') {
+      shippingMethod = input.value === 'express' || input.value === 'correos' ? input.value : 'standard';
+      renderCart();
+    }
+  });
+
   document.addEventListener('input', (event) => {
     const input = event.target instanceof HTMLInputElement ? event.target : null;
     if (!input?.dataset.cartQty) return;
@@ -1571,9 +1616,11 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
   }));
   const whatsappNumber = normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304");
   const shippingSettings = getShippingSettings(config);
-  const shippingNote = shippingSettings.freeMinPieces
-    ? `Envío estimado por ${shippingSettings.provider}: $${shippingSettings.price.toFixed(2)} MXN. Gratis desde ${shippingSettings.freeMinPieces} piezas.`
-    : `Envío estimado por ${shippingSettings.provider}: $${shippingSettings.price.toFixed(2)} MXN.`;
+  const provider = shippingSettings.provider;
+  const correosLabel = shippingSettings.correosMaxPieces
+    ? `Correos de México $${shippingSettings.correosPrice.toFixed(2)} (menos de ${shippingSettings.correosMaxPieces} piezas)`
+    : `Correos de México $${shippingSettings.correosPrice.toFixed(2)}`;
+  const shippingNote = `Elige tu envío: ${provider} normal $${shippingSettings.price.toFixed(2)} · ${provider} express $${shippingSettings.expressPrice.toFixed(2)} · ${correosLabel}.${shippingSettings.freeMinPieces ? ` Gratis desde ${shippingSettings.freeMinPieces} piezas.` : ""}`;
 
   return `
     <section class="quote-cart" id="cotizacion">
@@ -1596,7 +1643,21 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
           <div class="cart-total-row"><span>Total de piezas</span><strong id="cart-total-pieces">0</strong></div>
           <div class="cart-total-row"><span>Subtotal estimado</span><strong id="cart-subtotal-amount">$0.00</strong></div>
           <div class="cart-total-row" id="iva-row" style="display:none"><span>IVA (16%)</span><strong id="cart-iva-amount">$0.00</strong></div>
-          <div class="cart-total-row"><span id="cart-shipping-label">Envío estimado (${escapeHtml(shippingSettings.provider)})</span><strong id="cart-shipping-amount">$0.00</strong></div>
+          <div class="cart-total-row" style="margin-bottom:.5rem">
+            <fieldset style="border:0;padding:0;margin:0;display:grid;gap:.35rem;font-size:.9rem">
+              <legend style="font-weight:700;margin-bottom:.15rem">Método de envío</legend>
+              <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer">
+                <input type="radio" name="shipping-method" value="standard" checked> ${escapeHtml(provider)} Normal — $${shippingSettings.price.toFixed(2)} MXN
+              </label>
+              <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer">
+                <input type="radio" name="shipping-method" value="express"> ${escapeHtml(provider)} Express — $${shippingSettings.expressPrice.toFixed(2)} MXN
+              </label>
+              <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer">
+                <input type="radio" name="shipping-method" value="correos"> ${escapeHtml(correosLabel)} MXN
+              </label>
+            </fieldset>
+          </div>
+          <div class="cart-total-row"><span id="cart-shipping-label">Envío estimado (${escapeHtml(provider)} Normal)</span><strong id="cart-shipping-amount">$0.00</strong></div>
           <div class="cart-total-row"><span id="cart-grand-label">Total estimado con envío</span><strong id="cart-total-amount">$0.00</strong></div>
         </div>
         <div class="quote-actions">
@@ -1723,13 +1784,15 @@ ${tiersText || "  - Consultar cotización directa"}
 ## Envíos
 
 - Proveedor: ${shipping.provider}
-- Costo estándar: ${currency.format(shipping.price)} MXN${shipping.freeMinPieces ? `\n- Envío gratuito en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}
+- Costo estándar (${shipping.provider} normal): ${currency.format(shipping.price)} MXN
+- Costo express (${shipping.provider} express): ${currency.format(shipping.expressPrice)} MXN
+- Correos de México: ${currency.format(shipping.correosPrice)} MXN (solo pedidos de menos de ${shipping.correosMaxPieces ?? 200} piezas)${shipping.freeMinPieces ? `\n- Envío gratuito en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}
 - Cobertura: toda la república mexicana
 - Tiempo de tránsito: 1 a 3 días hábiles adicionales
 
 ## Ubicación
 
-San Luis Potosí, S.L.P., México
+Av. Cuauhtémoc 620, San Luis Potosí, S.L.P., México
 Lunes a Sábado, 9:00 a 18:00 hrs
 Recolección en persona disponible para clientes locales.
 
@@ -1846,6 +1909,7 @@ publicRoutes.post("/api/quotes", async (c) => {
     const customerName = String(body.customerName ?? body.customer_name ?? "").trim().slice(0, 200);
     const postalCode = String(body.postalCode ?? body.postal_code ?? "").trim().slice(0, 10);
     const requiresInvoice = Boolean(body.requiresInvoice ?? body.requires_invoice ?? false);
+    const shippingMethod = normalizeShippingMethod(body.shippingMethod ?? body.shipping_method);
     const rawItems = Array.isArray(body.items) ? body.items.slice(0, 200) : [];
 
     if (!customerName || !postalCode) {
@@ -1892,7 +1956,7 @@ publicRoutes.post("/api/quotes", async (c) => {
 
     const subtotal = lines.reduce((sum, line) => sum + line.subtotal, 0);
     const iva = requiresInvoice ? Math.round(subtotal * 0.16 * 100) / 100 : 0;
-    const shipping = shippingForPieces(config, totalPieces);
+    const shipping = shippingForPieces(config, totalPieces, shippingMethod);
     const grandTotal = subtotal + iva + shipping.cost;
     const whatsappNumber = normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304");
     const messageWithoutFolio = buildQuoteMessage({
@@ -1962,6 +2026,7 @@ publicRoutes.post("/api/quotes", async (c) => {
       totals: {
         totalPieces,
         subtotal,
+        shippingMethod: shipping.method,
         shippingProvider: shipping.provider,
         shippingCost: shipping.cost,
         freeShippingMinPieces: shipping.freeMinPieces,

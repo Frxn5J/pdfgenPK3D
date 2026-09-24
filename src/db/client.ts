@@ -334,7 +334,7 @@ export function initDb() {
   // Seed default configuration
   const defaultWelcome = `Bienvenido a PIXKEY3D\nFabricamos productos personalizados con tecnología de impresión 3D de alta precisión. Cada pieza se produce bajo pedido con los mejores materiales del mercado. Ofrecemos precios especiales por volumen para revendedores, empresas y mayoristas.\n\n¿Cómo hacer tu pedido?\n1 Elige tus productos Selecciona del catálogo los productos y la cantidad deseada ->\n2 Solicita tu cotización Envíanos tu pedido por WhatsApp o email y te respondemos en minutos ->\n3 Recibe tu pedido Enviamos a domicilio en todo México según el volumen de tu pedido`;
 
-  const defaultContact = `¿Listo para hacer tu pedido?\nContáctanos por cualquiera de estos medios y con gusto te enviamos una cotización personalizada.\n\nEmail contacto@pixkey3d.com\nWhatsApp 000 000 0000\nSitio web www.pixkey3d.com\nUbicación San Luis Potosí, México\nAtención Lunes a Sábado 9:00 – 18:00 hrs\n\n¡Gracias por confiar en PIXKEY3D!`;
+  const defaultContact = `¿Listo para hacer tu pedido?\nContáctanos por cualquiera de estos medios y con gusto te enviamos una cotización personalizada.\n\nEmail contacto@pixkey3d.com\nWhatsApp 496 126 6304\nSitio web www.pixkey3d.com\nUbicación Av. Cuauhtémoc 620, San Luis Potosí, México\nAtención Lunes a Sábado 9:00 – 18:00 hrs\n\n¡Gracias por confiar en PIXKEY3D!`;
 
   const seedConfig = (key: string, value: string) => {
     const existing = db.query(`SELECT value FROM config WHERE key = ?`).get(key);
@@ -350,7 +350,20 @@ export function initDb() {
   seedConfig("quote_whatsapp_number", "4961266304");
   seedConfig("shipping_provider", "Estafeta");
   seedConfig("shipping_price", "150");
+  seedConfig("shipping_express_price", "300");
+  seedConfig("shipping_correos_price", "50");
+  seedConfig("shipping_correos_max_pieces", "200");
   seedConfig("free_shipping_min_pieces", "501");
+  // Migración puntual: el seed de contact_text solo aplica a instalaciones
+  // nuevas. En bases existentes que aún traen el placeholder "000 000 0000",
+  // se actualiza al número real y la nueva dirección sin tocar textos
+  // personalizados por el admin.
+  try {
+    const current = db.query<{ value: string }, []>(`SELECT value FROM config WHERE key = 'contact_text'`).get()?.value || "";
+    if (current.includes("000 000 0000")) {
+      db.run(`UPDATE config SET value = ? WHERE key = 'contact_text'`, [defaultContact]);
+    }
+  } catch {}
   seedConfig("welcome_text", defaultWelcome);
   seedConfig("contact_text", defaultContact);
 

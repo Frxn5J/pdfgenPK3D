@@ -228,6 +228,7 @@ export const buildJsonLd = (input: SeoInput): string => {
     email: email || undefined,
     address: {
       "@type": "PostalAddress",
+      streetAddress: "Av. Cuauhtémoc 620",
       addressLocality: "San Luis Potosí",
       addressRegion: "SLP",
       addressCountry: "MX",
