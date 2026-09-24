@@ -332,9 +332,9 @@ export function initDb() {
   } catch {}
 
   // Seed default configuration
-  const defaultWelcome = `Bienvenido a PIXKEY3D\nFabricamos productos personalizados con tecnología de impresión 3D de alta precisión. Cada pieza se produce bajo pedido con los mejores materiales del mercado. Ofrecemos precios especiales por volumen para revendedores, empresas y mayoristas.\n\n¿Cómo hacer tu pedido?\n1 Elige tus productos Selecciona del catálogo los productos y la cantidad deseada ->\n2 Solicita tu cotización Envíanos tu pedido por WhatsApp o email y te respondemos en minutos ->\n3 Recibe tu pedido Enviamos a domicilio en todo México según el volumen de tu pedido`;
+  const defaultWelcome = `Bienvenido a PIXKEY3D\nFabricamos llaveros publicitarios y figuras personalizadas con impresión 3D. Cada pieza se produce bajo pedido. Ofrecemos precios especiales por volumen para revendedores, empresas y mayoristas.\n\n¿Cómo hacer tu pedido?\n1 Elige tus productos Selecciona del catálogo los productos y la cantidad deseada ->\n2 Solicita tu cotización Envíanos tu pedido por WhatsApp o email y te respondemos en menos de 10 minutos ->\n3 Recibe tu pedido Enviamos a domicilio en todo México según el volumen de tu pedido`;
 
-  const defaultContact = `¿Listo para hacer tu pedido?\nContáctanos por cualquiera de estos medios y con gusto te enviamos una cotización personalizada.\n\nEmail contacto@pixkey3d.com\nWhatsApp 496 126 6304\nSitio web www.pixkey3d.com\nUbicación Av. Cuauhtémoc 620, San Luis Potosí, México\nAtención Lunes a Sábado 9:00 – 18:00 hrs\n\n¡Gracias por confiar en PIXKEY3D!`;
+  const defaultContact = `¿Listo para hacer tu pedido?\nContáctanos por cualquiera de estos medios y con gusto te enviamos una cotización personalizada.\n\nEmail contacto@pixkey3d.com\nWhatsApp 496 126 6304\nSitio web www.pixkey3d.com\nUbicación Av. Cuauhtémoc 620, Tequisquiapan, San Luis Potosí, México\nAtención Lunes a Viernes 9:00 – 18:00 hrs, Sábados 9:00 – 14:00 hrs\n\n¡Gracias por confiar en PIXKEY3D!`;
 
   const seedConfig = (key: string, value: string) => {
     const existing = db.query(`SELECT value FROM config WHERE key = ?`).get(key);
@@ -354,13 +354,32 @@ export function initDb() {
   seedConfig("shipping_correos_price", "50");
   seedConfig("shipping_correos_max_pieces", "200");
   seedConfig("free_shipping_min_pieces", "501");
-  // Migración puntual: el seed de contact_text solo aplica a instalaciones
-  // nuevas. En bases existentes que aún traen el placeholder "000 000 0000",
-  // se actualiza al número real y la nueva dirección sin tocar textos
-  // personalizados por el admin.
+  // Migración puntual de textos de marketing que cambiaron de redacción:
+  // el seed solo aplica a instalaciones nuevas, así que en bases existentes
+  // que aún traen la redacción vieja se actualiza solo si coincide con el
+  // valor anterior (no toca textos personalizados por el admin).
   try {
-    const current = db.query<{ value: string }, []>(`SELECT value FROM config WHERE key = 'contact_text'`).get()?.value || "";
-    if (current.includes("000 000 0000")) {
+    const subtitleDefault = "Fabricamos llaveros y figuras a medida. Precios especiales por volumen para revendedores, empresas y mayoristas.";
+    db.run(`UPDATE config SET value = ? WHERE key = 'landing_hero_subtitle' AND value = ?`, [
+      subtitleDefault,
+      "Fabricamos llaveros y figuras a medida con precisión profesional. Precios especiales por volumen para revendedores, empresas y mayoristas.",
+    ]);
+    db.run(`UPDATE config SET value = ? WHERE key = 'landing_benefits_items' AND value LIKE '%Alta precisión%'`, [
+      JSON.stringify([
+        { icon: "⚡", title: "Entrega clara", text: "Producción bajo pedido con tiempos de entrega claros por volumen." },
+        { icon: "🎯", title: "Diseños a medida", text: "Llaveros publicitarios y figuras personalizadas por volumen." },
+        { icon: "📦", title: "Precios por volumen", text: "Descuentos especiales para revendedores, empresas y mayoristas." },
+      ]),
+    ]);
+    db.run(`UPDATE config SET value = ? WHERE key = 'landing_cta_text' AND value = ?`, [
+      "Cotiza por WhatsApp en menos de 10 minutos y recibe atención personalizada.",
+      "Cotiza por WhatsApp en minutos y recibe atención personalizada.",
+    ]);
+    db.run(`UPDATE config SET value = ? WHERE key = 'welcome_text' AND value LIKE '%tecnología de impresión 3D de alta precisión%'`, [
+      defaultWelcome,
+    ]);
+    const currentContact = db.query<{ value: string }, []>(`SELECT value FROM config WHERE key = 'contact_text'`).get()?.value || "";
+    if (currentContact.includes("000 000 0000")) {
       db.run(`UPDATE config SET value = ? WHERE key = 'contact_text'`, [defaultContact]);
     }
   } catch {}
@@ -381,7 +400,7 @@ export function initDb() {
   seedConfig("landing_contact_enabled", "1");
   // Hero
   seedConfig("landing_hero_title", "Impresión 3D personalizada para tu negocio");
-  seedConfig("landing_hero_subtitle", "Fabricamos llaveros y figuras a medida con precisión profesional. Precios especiales por volumen para revendedores, empresas y mayoristas.");
+  seedConfig("landing_hero_subtitle", "Fabricamos llaveros y figuras a medida. Precios especiales por volumen para revendedores, empresas y mayoristas.");
   seedConfig("landing_hero_image", "");
   seedConfig("landing_hero_cta_label", "Ver catálogo");
   seedConfig("landing_hero_cta_target", "/catalogo");
@@ -412,8 +431,8 @@ export function initDb() {
   seedConfig(
     "landing_benefits_items",
     JSON.stringify([
-      { icon: "⚡", title: "Entrega rápida", text: "Producción bajo pedido con tiempos de entrega claros por volumen." },
-      { icon: "🎯", title: "Alta precisión", text: "Impresión 3D profesional con los mejores materiales del mercado." },
+      { icon: "⚡", title: "Entrega clara", text: "Producción bajo pedido con tiempos de entrega claros por volumen." },
+      { icon: "🎯", title: "Diseños a medida", text: "Llaveros publicitarios y figuras personalizadas por volumen." },
       { icon: "📦", title: "Precios por volumen", text: "Descuentos especiales para revendedores, empresas y mayoristas." },
     ]),
   );
@@ -425,7 +444,7 @@ export function initDb() {
   seedConfig("landing_about_image", "");
   // CTA
   seedConfig("landing_cta_title", "¿Listo para tu pedido?");
-  seedConfig("landing_cta_text", "Cotiza por WhatsApp en minutos y recibe atención personalizada.");
+  seedConfig("landing_cta_text", "Cotiza por WhatsApp en menos de 10 minutos y recibe atención personalizada.");
   seedConfig("landing_cta_button_label", "Cotizar ahora");
   seedConfig("landing_cta_button_target", "whatsapp");
   // Contacto (reusa contact_text + quote_whatsapp_number existentes)

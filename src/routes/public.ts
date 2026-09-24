@@ -786,8 +786,11 @@ const buildQuoteMessage = (input: {
     return `${index + 1}. ${line.productName} - ${line.quantity} piezas - ${unit} c/u - ${subtotal}${delivery}`;
   }).join("\n");
   const ivaLine = input.requiresInvoice ? `IVA (16%): ${hasMissingPrice ? "A cotizar" : currency.format(input.iva || 0)}\n` : "";
+  const ivaNote = input.requiresInvoice
+    ? "Precios unitarios antes de IVA. Total con IVA del 16% incluido.\n"
+    : "Precios antes de IVA. Sin factura no se suma IVA.\n";
 
-  return `Hola PIXKEY3D, quiero cotizar este pedido:\n\n${input.quoteId ? `Folio: #${input.quoteId}\n` : ""}Nombre: ${input.customerName}\nCódigo postal: ${input.postalCode}${input.requiresInvoice ? "\nRequiere factura: Sí" : ""}\n\nProductos:\n${lines}\n\nTotal de piezas: ${input.totalPieces}\nSubtotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.subtotal)}\n${ivaLine}Envío estimado (${input.shippingProvider}): ${input.shippingCost > 0 ? currency.format(input.shippingCost) : "Gratis"}\nTotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.grandTotal)}\n\nQuedo pendiente de la cotización final con envío.`;
+  return `Hola PIXKEY3D, quiero cotizar este pedido:\n\n${input.quoteId ? `Folio: #${input.quoteId}\n` : ""}Nombre: ${input.customerName}\nCódigo postal: ${input.postalCode}${input.requiresInvoice ? "\nRequiere factura: Sí" : ""}\n\nProductos (precios antes de IVA):\n${lines}\n\nTotal de piezas: ${input.totalPieces}\nSubtotal estimado (antes de IVA): ${hasMissingPrice ? "A cotizar" : currency.format(input.subtotal)}\n${ivaLine}${ivaNote}Envío estimado (${input.shippingProvider}): ${input.shippingCost > 0 ? currency.format(input.shippingCost) : "Gratis"}\nTotal estimado: ${hasMissingPrice ? "A cotizar" : currency.format(input.grandTotal)}\n\nQuedo pendiente de la cotización final con envío.`;
 };
 
 const renderCoverSection = (config: Record<string, string>) => `
@@ -805,6 +808,20 @@ const renderCoverSection = (config: Record<string, string>) => `
   ${adminGateScript()}
 `;
 
+const withIva = (price: number) => Math.round(price * 1.16 * 100) / 100;
+
+const retailTierRow = (tiers: Array<{ min_volume: number; max_volume: number | null; price: number; delivery_time: string }>) => {
+  const hasRetail = tiers.some((t) => t.min_volume === 1);
+  if (hasRetail) return "";
+  return `
+                      <tr>
+                          <td>1 a 24 piezas</td>
+                          <td class="price-text">$50.00 MXN</td>
+                          <td class="price-text">$58.00 MXN</td>
+                          <td>4 a 7 días hábiles</td>
+                      </tr>`;
+};
+
 const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers: ReturnType<typeof getDefaultPriceTiers>) => `
   <section class="page-section welcome-section page-break">
       ${renderShapes(config)}
@@ -816,22 +833,26 @@ const renderWelcomeSection = (config: Record<string, string>, defaultPriceTiers:
                   <thead>
                       <tr>
                           <th>Volumen de Piezas</th>
-                          <th>Precio por Unidad</th>
+                          <th>Precio por Unidad (antes de IVA)</th>
+                          <th>Precio por Unidad (con IVA 16%)</th>
                           <th>Tiempo de Entrega</th>
                       </tr>
                   </thead>
-                  <tbody>
+                  <tbody>${retailTierRow(defaultPriceTiers)}
                       ${defaultPriceTiers.map((tier) => `
                       <tr>
                           <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
                           <td class="price-text">$${tier.price.toFixed(2)} MXN</td>
+                          <td class="price-text">$${withIva(Number(tier.price)).toFixed(2)} MXN</td>
                           <td>${escapeHtml(tier.delivery_time)}</td>
                       </tr>
                       `).join("")}
                   </tbody>
               </table>
           </div>
-          <p class="pricing-note">* Los precios aplican por pieza según el volumen total del pedido. El tiempo de entrega inicia una vez confirmado y pagado el pedido. Para 501+ piezas contáctanos para acordar fecha y condiciones.</p>
+          <p class="pricing-note">* Llaveros de todo tipo: mínimo 25 piezas para mayoreo. Menudeo de 1 a 24 piezas a $50.00 por pieza. Figuras desde 3 piezas; la mayoría sigue esta tabla, hay figuras más caras y más baratas según modelo, colores, diseño y entrega.</p>
+          <p class="pricing-note">* El tiempo de entrega se empieza a contar en cuanto se realiza el primer anticipo. Para 501+ piezas el precio y la entrega dependen de modelo, colores, diseño y entrega: se cotiza el proyecto.</p>
+          <p class="pricing-note">* Precios publicados antes de IVA. El IVA del 16% solo se suma cuando el cliente solicita factura; sin factura se cobra el precio antes de IVA.</p>
       </div>
   </section>
 `;
@@ -849,13 +870,14 @@ const renderProductCard = (
       <div class="product-content">
           <h3 class="product-title">${escapeHtml(product.name)}</h3>
           <p class="product-description">${escapeHtml(product.description || "")}</p>
-          <h4>Tabla de Precios</h4>
+          <h4>Tabla de Precios (antes de IVA)</h4>
           <div class="product-table-wrap">
               <table class="product-table">
                   <thead>
                       <tr>
                           <th>Volumen</th>
-                          <th>Precio unitario</th>
+                          <th>Antes de IVA</th>
+                          <th>Con IVA 16%</th>
                       </tr>
                   </thead>
                   <tbody>
@@ -863,11 +885,13 @@ const renderProductCard = (
                       <tr>
                           <td>${escapeHtml(formatVolume(tier.min_volume, tier.max_volume))}</td>
                           <td class="price-text">$${tier.price.toFixed(2)}</td>
+                          <td class="price-text">$${withIva(Number(tier.price)).toFixed(2)}</td>
                       </tr>
                       `).join("")}
                   </tbody>
               </table>
           </div>
+          <p class="quote-note" style="margin:.5rem 0 0">Precios antes de IVA. El IVA del 16% solo aplica si solicitas factura.</p>
           ${interactive ? `
           <div class="cart-control">
               <input class="cart-quantity" data-quantity-for="${product.id}" type="number" min="1" step="1" value="25" aria-label="Cantidad para ${escapeHtml(product.name)}">
@@ -985,7 +1009,7 @@ const renderLandingNav = (config: Record<string, string>) => {
 
 const renderLandingHero = (config: Record<string, string>) => {
   const heroImg = config.landing_hero_image || config.company_logo;
-  const title = config.landing_hero_title || config.company_name || "Llaveros y Figuras 3D Personalizados";
+  const title = config.landing_hero_title || config.company_name || "Llaveros Publicitarios y Figuras 3D Personalizadas";
   const subtitle = config.landing_hero_subtitle || "Producción en impresión 3D para empresas y eventos. Precios de mayoreo desde $25 MXN, envíos a todo México por Estafeta y recolección local en SLP.";
   const ctaHref = landingTarget(config, config.landing_hero_cta_target);
   const ctaLabel = config.landing_hero_cta_label || "Ver catálogo completo ↓";
@@ -1030,7 +1054,7 @@ const renderLandingHero = (config: Record<string, string>) => {
       <div class="ln-hero-trust" aria-label="Características clave">
         <div class="ln-trust-item">${msi("inventory_2", "msi")} <span>Min. 25 piezas</span></div>
         <div class="ln-trust-item">${msi("local_shipping", "msi")} <span>Envío Nacional</span></div>
-        <div class="ln-trust-item">${msi("schedule", "msi")} <span>Lun–Sáb 9–18h</span></div>
+        <div class="ln-trust-item">${msi("schedule", "msi")} <span>Lun–Vie 9–18h · Sáb 9–14h</span></div>
       </div>
     </div>
     ${imgColumn}
@@ -1041,14 +1065,22 @@ const renderLandingHero = (config: Record<string, string>) => {
 const renderLandingPricing = (config: Record<string, string>, tiers: ReturnType<typeof getDefaultPriceTiers>) => {
   const shipping = getShippingSettings(config);
   const sortedTiers = [...tiers].sort((a, b) => a.min_volume - b.min_volume);
+  const retailHtml = sortedTiers.some((t) => t.min_volume === 1) ? "" : `
+      <tr>
+        <td class="ln-price-hi">1 a 24 piezas</td>
+        <td class="ln-price-hi">${currency.format(50)}</td>
+        <td class="ln-price-hi">${currency.format(withIva(50))}</td>
+        <td>4 a 7 días hábiles</td>
+      </tr>`;
   const tiersHtml = sortedTiers.length === 0
-    ? `<tr><td colspan="3" style="text-align:center;padding:2rem;color:inherit;opacity:.5">Sin niveles configurados.</td></tr>`
-    : sortedTiers.map((t) => `
+    ? `<tr><td colspan="4" style="text-align:center;padding:2rem;color:inherit;opacity:.5">Sin niveles configurados.</td></tr>`
+    : `${retailHtml}${sortedTiers.map((t) => `
       <tr>
         <td class="ln-price-hi">${escapeHtml(formatVolume(t.min_volume, t.max_volume))}</td>
         <td class="ln-price-hi">${t.max_volume === null ? `<span class="ln-price-lo">Cotizar proyecto</span>` : `${currency.format(Number(t.price))}`}</td>
+        <td class="ln-price-hi">${t.max_volume === null ? `<span class="ln-price-lo">Cotizar proyecto</span>` : `${currency.format(withIva(Number(t.price)))}`}</td>
         <td>${escapeHtml(t.delivery_time || "—")}</td>
-      </tr>`).join("");
+      </tr>`).join("")}`;
 
   const freeNote = shipping.freeMinPieces
     ? ` · <strong>Gratis desde ${shipping.freeMinPieces} piezas</strong>`
@@ -1058,17 +1090,18 @@ const renderLandingPricing = (config: Record<string, string>, tiers: ReturnType<
   return `
 <section class="ln-section-dark" id="precios">
   <div class="ln-inner">
-    <h2 class="ln-heading-dark">¿Cuánto cuestan los llaveros 3D al mayoreo?</h2>
-    <p class="ln-sub-dark">Precios escalonados por volumen. Materiales de alta calidad, precisión de grado industrial.</p>
+    <h2 class="ln-heading-dark">¿Cuánto cuestan los llaveros publicitarios 3D al mayoreo?</h2>
+    <p class="ln-sub-dark">Precios escalonados por volumen, publicados antes de IVA. El IVA del 16% solo se suma si solicitas factura.</p>
     <div class="ln-table-wrap">
       <table class="ln-table">
         <thead>
-          <tr><th>Cantidad</th><th>Precio por pieza</th><th>Tiempo de producción</th></tr>
+          <tr><th>Cantidad</th><th>Precio por pieza (antes de IVA)</th><th>Precio por pieza (con IVA 16%)</th><th>Tiempo de producción</th></tr>
         </thead>
         <tbody>${tiersHtml}</tbody>
       </table>
     </div>
     <div class="ln-table-footer">
+      <p class="ln-table-note">Llaveros: mínimo 25 piezas para mayoreo · Menudeo 1 a 24 piezas a ${currency.format(50)} · Figuras desde 3 piezas (la mayoría sigue esta tabla; hay figuras más caras y más baratas según modelo, colores, diseño y entrega) · 501+ piezas: precio y entrega según modelo, colores, diseño y entrega, se cotiza el proyecto.</p>
       <p class="ln-table-note">${msi("info", "msi")} ${escapeHtml(shippingOptionsNote)}${freeNote}</p>
       <a class="ln-btn-solid" href="${escapeHtml(waHref(config, "Hola, me interesa una cotización empresarial"))}" target="_blank" rel="noopener noreferrer">
         Solicitar cotización empresarial
@@ -1116,12 +1149,12 @@ const renderLandingProcess = (config: Record<string, string>) => {
       <div class="ln-step">
         <div class="ln-step-num" aria-hidden="true">1</div>
         <h3>Elige tus productos</h3>
-        <p>Selecciona del catálogo o solicita un diseño personalizado. Aceptamos archivos STL, OBJ y referencias visuales.</p>
+        <p>Selecciona del catálogo o solicita un diseño personalizado. Recibimos STL, OBJ o referencia visual; adaptamos tamaño, texto, logo y colores. Modelado desde cero se cotiza.</p>
       </div>
       <div class="ln-step">
         <div class="ln-step-num" aria-hidden="true">2</div>
         <h3>Cotiza por WhatsApp</h3>
-        <p>Comparte cantidad y modelo. Respondemos en menos de 24 hrs con confirmación y tiempo de entrega exacto.</p>
+        <p>Comparte cantidad y modelo. Respondemos en menos de 10 min con confirmación y tiempo de entrega exacto.</p>
       </div>
       <div class="ln-step">
         <div class="ln-step-num" aria-hidden="true">3</div>
@@ -1149,20 +1182,20 @@ const renderLandingLocation = (config: Record<string, string>) => {
     <div class="ln-location-grid">
       <div>
         <h2 class="ln-heading-light" style="text-align:left;">Retiro y entrega local en San Luis Potosí</h2>
-        <p class="ln-sub-light" style="text-align:left;">Fabricamos en Av. Cuauhtémoc 620, San Luis Potosí, S.L.P. y enviamos a toda la república mexicana vía ${provider}. Los clientes locales pueden recoger en persona al terminar la producción.</p>
+        <p class="ln-sub-light" style="text-align:left;">Fabricamos en Av. Cuauhtémoc 620, Tequisquiapan, San Luis Potosí, S.L.P. y enviamos a toda la república mexicana vía ${provider}. Los clientes locales pueden recoger en persona al terminar la producción.</p>
         <div class="ln-location-items">
           <div class="ln-location-item">
             ${msi("location_on", "msi")}
             <div class="ln-location-item-body">
               <span class="ln-location-label">Ubicación</span>
-              <span class="ln-location-value">Av. Cuauhtémoc 620, San Luis Potosí, S.L.P., México</span>
+              <span class="ln-location-value">Av. Cuauhtémoc 620, Tequisquiapan, San Luis Potosí, S.L.P., México</span>
             </div>
           </div>
           <div class="ln-location-item">
             ${msi("schedule", "msi")}
             <div class="ln-location-item-body">
               <span class="ln-location-label">Horario</span>
-              <span class="ln-location-value">Lunes a Sábado · 9:00 a 18:00 hrs</span>
+              <span class="ln-location-value">Lunes a Viernes · 9:00 a 18:00 hrs · Sábados · 9:00 a 14:00 hrs</span>
             </div>
           </div>
           ${displayPhone ? `
@@ -1178,8 +1211,8 @@ const renderLandingLocation = (config: Record<string, string>) => {
       <div class="ln-map-placeholder">
         ${msi("map")}
         <div style="margin-top:.75rem;">
-          <p style="margin:0;font-size:.9rem;">Av. Cuauhtémoc 620, San Luis Potosí, S.L.P.</p>
-          <a class="ln-map-link" href="https://maps.google.com/?q=Av.+Cuauht%C3%A9moc+620,+San+Luis+Potos%C3%AD,+SLP,+M%C3%A9xico" target="_blank" rel="noopener">
+          <p style="margin:0;font-size:.9rem;">Av. Cuauhtémoc 620, Tequisquiapan, San Luis Potosí, S.L.P.</p>
+          <a class="ln-map-link" href="https://maps.google.com/?q=Av.+Cuauht%C3%A9moc+620,+Tequisquiapan,+San+Luis+Potos%C3%AD,+SLP,+M%C3%A9xico" target="_blank" rel="noopener">
             ${msi("open_in_new")} Ver en Google Maps
           </a>
         </div>
@@ -1192,22 +1225,26 @@ const renderLandingLocation = (config: Record<string, string>) => {
 const renderLandingFaq = (config: Record<string, string>) => {
   const shipping = getShippingSettings(config);
   const faqs: Array<[string, string]> = [
-    ["¿Cuál es el pedido mínimo de llaveros 3D personalizados?",
-      "El pedido mínimo de PIXKEY3D es de 25 piezas. A partir de ese volumen puedes solicitar cotización. Para pedidos mayores el precio por pieza baja según la tabla de precios. Para proyectos especiales escríbenos y buscamos una solución."],
+    ["¿Cuál es el pedido mínimo de llaveros publicitarios 3D?",
+      "Llaveros de todo tipo: mínimo 25 piezas para aplicar precio de mayoreo. Figuras: desde 3 piezas. Esta tabla aplica para la mayoría de figuras; hay figuras más caras y más baratas según modelo, colores, diseño y entrega. Escríbenos por WhatsApp con tu modelo y cantidad para confirmar precio exacto."],
     ["¿De qué material están fabricados los llaveros y figuras?",
-      "La mayoría de nuestros productos están fabricados en PLA de alta calidad, un material rígido, liviano y con excelente detalle de impresión. Para piezas que requieren mayor flexibilidad utilizamos PETG. El material exacto de cada producto se confirma al cotizar."],
+      "Nuestros productos se fabrican en PLA, un material rígido y liviano. Para piezas que requieren mayor flexibilidad utilizamos PETG. El material de cada producto se indica en su ficha y se confirma al cotizar."],
     ["¿Puedo pedir un diseño personalizado que no está en el catálogo?",
-      "Sí. Aceptamos diseños personalizados. Puedes enviarnos tu archivo en formato STL u OBJ, o compartir una referencia visual y cotizamos la factibilidad. Para diseños complejos puede aplicarse un costo adicional de modelado."],
+      "Sí. Recibimos tu archivo listo en STL u OBJ, o una referencia visual (foto, imagen, boceto o enlace) y nosotros lo adaptamos. Abrimos STL y OBJ; las referencias las aceptamos en imagen PNG/JPG o enlace. Personalización que hacemos nosotros: ajuste de tamaño, agregar nombre o texto corto, adaptar tu logo a relieve y elección de colores. El modelado se cotiza cuando hay que crear o reconstruir el modelo 3D desde cero (diseño desde foto o boceto, piezas articuladas, ensambles o alta complejidad). Escríbenos por WhatsApp con tu archivo o referencia y te confirmamos factibilidad y costo de modelado, si aplica."],
     ["¿Cuánto tiempo tarda la producción y el envío?",
-      `El tiempo de producción depende del volumen. El envío por ${shipping.provider} agrega 1 a 3 días hábiles según la zona del país. Los clientes en San Luis Potosí pueden recoger en persona al terminar la producción.`],
+      `El tiempo de producción depende del volumen. El tránsito suma días hábiles según el método elegido: ${shipping.provider} normal de 2 a 5 días, ${shipping.provider} express de 1 a 3 días y Correos de México de 2 a 15 días, según la zona del país. Los clientes en San Luis Potosí pueden recoger en persona al terminar la producción.`],
     ["¿Qué métodos de pago aceptan?",
-      "Aceptamos transferencia bancaria (SPEI), depósito OXXO y pago en efectivo para clientes que recojan en San Luis Potosí. El proceso de pago se coordina directamente por WhatsApp al confirmar el pedido."],
+      "Aceptamos transferencia bancaria (SPEI), depósito OXXO y pago en efectivo para recolección en San Luis Potosí. Se paga un anticipo para confirmar el pedido y se liquida al enviar o al entregar en persona en SLP. El proceso de pago se coordina directamente por WhatsApp al confirmar el pedido."],
     ["¿Hacen envíos a toda la república mexicana?",
       `Sí, enviamos a toda la república mexicana. ${shipping.provider} normal: ${currency.format(shipping.price)} MXN. ${shipping.provider} express: ${currency.format(shipping.expressPrice)} MXN. Correos de México: ${currency.format(shipping.correosPrice)} MXN (solo pedidos de menos de ${shipping.correosMaxPieces ?? 200} piezas)${shipping.freeMinPieces ? `. Envío gratis en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}.`],
+    ["¿Qué alcance tiene agregar el logo de mi negocio a un llavero promocional?",
+      "Adaptamos tu logo a relieve sobre el llavero: lo recibimos en imagen PNG/JPG o vector y lo integramos al modelo con hasta 5 colores por unidad. Límite técnico por llavero: máximo 10 cm³ de material por unidad. Para otras piezas el límite es de 24 cm³ por unidad. Si tu logo excede los 5 colores o el volumen indicado, lo simplificamos contigo o se cotiza como modelado aparte. Escríbenos por WhatsApp con tu logo y te confirmamos factibilidad sin costo."],
+    ["¿Los precios publicados incluyen IVA?",
+      "No. Todos los precios del catálogo están publicados antes de IVA. El IVA del 16% solo se suma cuando solicitas factura: en el carrito marca la casilla “¿Requiere factura?” y verás el desglose con IVA antes de enviar tu cotización por WhatsApp. Sin factura se cobra el precio publicado, sin cargos extra de impuestos."],
     ["¿Tienen descuentos para distribuidores o revendedores?",
       "Sí, contamos con precios especiales por volumen para revendedores, empresas y mayoristas. Cuanto mayor el volumen, menor el precio por pieza. Para proyectos de gran volumen el precio es negociable. Contáctanos con tu estimado."],
     ["¿Qué pasa si mi pedido llega con defectos?",
-      "La calidad de cada pieza se revisa antes del envío. En caso de que un producto llegue dañado o con defectos de fabricación, coordinamos la reposición o ajuste según el caso. Escríbenos por WhatsApp con fotos del daño dentro de los 5 días hábiles posteriores a la recepción."],
+      "La calidad de cada pieza se revisa antes del envío. Si tu pedido llega con daño o defecto de fabricación, repórtalo por WhatsApp dentro de los 5 días hábiles posteriores a la recepción, con video e imágenes que muestren el daño. Tras validar la evidencia, te reembolsamos el valor de la pieza dañada."],
   ];
   return `
 <section class="ln-section-dark" id="faq">
@@ -1226,7 +1263,7 @@ const renderLandingFaq = (config: Record<string, string>) => {
 
 const renderLandingCtaBanner = (config: Record<string, string>) => {
   const title = config.landing_cta_title || "¿Listo para hacer tu pedido?";
-  const text = config.landing_cta_text || "Contáctanos por WhatsApp y te cotizamos en menos de 24 horas.";
+  const text = config.landing_cta_text || "Contáctanos por WhatsApp y te cotizamos en menos de 10 minutos.";
   const label = config.landing_cta_button_label || "Cotizar por WhatsApp";
   const href = (!config.landing_cta_button_target || config.landing_cta_button_target === "whatsapp")
     ? waHref(config)
@@ -1256,7 +1293,7 @@ const renderLandingFooter = (config: Record<string, string>) => {
         ${logo ? `<img src="${escapeHtml(optimizedImageSrc(logo, 400))}" alt="" width="24" height="24">` : ""}
         ${name}
       </div>
-      <p class="ln-footer-tagline">Fabricación digital de precisión.<br>San Luis Potosí, México.</p>
+      <p class="ln-footer-tagline">Impresión 3D bajo pedido.<br>San Luis Potosí, México.</p>
       <p class="ln-footer-copy">© ${year} ${name}. Todos los derechos reservados.</p>
     </div>
     <div class="ln-footer-col">
@@ -1268,8 +1305,9 @@ const renderLandingFooter = (config: Record<string, string>) => {
     <div class="ln-footer-col">
       <p class="ln-footer-col-title">Contacto</p>
       ${displayPhone ? `<a href="${escapeHtml(wa)}" target="_blank" rel="noopener">${msi("phone", "msi")} ${escapeHtml(displayPhone)}</a>` : ""}
+      <a href="mailto:contacto@pixkey3d.com">${msi("mail", "msi")} contacto@pixkey3d.com</a>
       <a href="#ubicacion">${msi("location_on", "msi")} San Luis Potosí, SLP</a>
-      <a href="#proceso">${msi("schedule", "msi")} Lun–Sáb 9–18h</a>
+      <a href="#proceso">${msi("schedule", "msi")} Lun–Vie 9–18h · Sáb 9–14h</a>
     </div>
     <div class="ln-footer-col">
       <p class="ln-footer-col-title">Legal</p>
@@ -1309,7 +1347,7 @@ const renderLanding = (origin: string) => {
   };
   // ponytail: icon_names subsetea Material Symbols (~5KB vs 3.8MB); agregar aquí cada icono nuevo que use la landing
   const montserratCss = "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap";
-  const iconsCss = "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&icon_names=chat,dark_mode,info,inventory_2,local_shipping,location_on,map,open_in_new,phone,schedule&display=block";
+  const iconsCss = "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&icon_names=chat,dark_mode,info,inventory_2,local_shipping,location_on,mail,map,open_in_new,phone,schedule&display=block";
   const extraHead = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="${montserratCss}" rel="stylesheet" media="print" onload="this.media='all'"><link href="${iconsCss}" rel="stylesheet" media="print" onload="this.media='all'"><noscript><link href="${montserratCss}" rel="stylesheet"><link href="${iconsCss}" rel="stylesheet"></noscript>`;
   return Layout(config.company_name || "PIXKEY3D", content, config, seo, config.landing_hero_image || config.company_logo || undefined, extraHead);
 };
@@ -1452,14 +1490,18 @@ const renderShopScript = (products: Array<{
       return (index + 1) + '. ' + line.product.name + ' - ' + line.quantity + ' piezas - ' + unit + ' c/u - ' + subtotal + delivery;
     }).join('\\n');
     const ivaLine = details.needsInvoice ? 'IVA (16%): ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.iva)) + '\\n' : '';
+    const ivaNote = details.needsInvoice
+      ? 'Precios unitarios antes de IVA. Total con IVA del 16% incluido.\\n'
+      : 'Precios antes de IVA. Sin factura no se suma IVA.\\n';
     return 'Hola PIXKEY3D, quiero cotizar este pedido:\\n\\n'
       + 'Nombre: ' + customer.name + '\\n'
       + 'Código postal: ' + customer.postalCode + '\\n'
       + (details.needsInvoice ? 'Requiere factura: Sí\\n' : '')
-      + '\\nProductos:\\n' + lines + '\\n\\n'
+      + '\\nProductos (precios antes de IVA):\\n' + lines + '\\n\\n'
       + 'Total de piezas: ' + details.totalPieces + '\\n'
-      + 'Subtotal estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal)) + '\\n'
+      + 'Subtotal estimado (antes de IVA): ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.subtotal)) + '\\n'
       + ivaLine
+      + ivaNote
       + 'Envío estimado ' + shippingLabelForMethod().replace('Envío ', '') + ': ' + (details.shippingCost > 0 ? currency.format(details.shippingCost) : 'Gratis') + '\\n'
       + 'Total estimado: ' + (details.hasMissingPrice ? 'A cotizar' : currency.format(details.grandTotal)) + '\\n\\n'
       + 'Quedo pendiente de la cotización final con envío.';
@@ -1628,7 +1670,7 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
         <div class="cart-header">
           <div>
             <h2>Carrito de cotización</h2>
-            <p class="quote-note">Agrega productos y cantidades. Los precios se recalculan con el volumen total de piezas. ${escapeHtml(shippingNote)}</p>
+            <p class="quote-note">Agrega productos y cantidades. Los precios se recalculan con el volumen total de piezas y están publicados antes de IVA. Solo se suma el 16% si marcas que requieres factura. ${escapeHtml(shippingNote)}</p>
           </div>
           <button type="button" class="secondary-button" id="clear-cart">Vaciar</button>
         </div>
@@ -1637,11 +1679,11 @@ const renderCartSection = (config: Record<string, string>, productsWithTiers: Re
         <div class="cart-totals">
           <div class="cart-total-row" style="margin-bottom:.5rem">
             <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.9rem">
-              <input type="checkbox" id="requires-invoice"> ¿Requiere factura?
+              <input type="checkbox" id="requires-invoice"> ¿Requiere factura? (se suma IVA del 16%)
             </label>
           </div>
           <div class="cart-total-row"><span>Total de piezas</span><strong id="cart-total-pieces">0</strong></div>
-          <div class="cart-total-row"><span>Subtotal estimado</span><strong id="cart-subtotal-amount">$0.00</strong></div>
+          <div class="cart-total-row"><span>Subtotal estimado (antes de IVA)</span><strong id="cart-subtotal-amount">$0.00</strong></div>
           <div class="cart-total-row" id="iva-row" style="display:none"><span>IVA (16%)</span><strong id="cart-iva-amount">$0.00</strong></div>
           <div class="cart-total-row" style="margin-bottom:.5rem">
             <fieldset style="border:0;padding:0;margin:0;display:grid;gap:.35rem;font-size:.9rem">
@@ -1760,24 +1802,30 @@ publicRoutes.get("/llms.txt", (c) => {
   const shipping = getShippingSettings(config);
   const tiers = getDefaultPriceTiers().sort((a, b) => a.min_volume - b.min_volume);
   const tiersText = tiers.map((t) =>
-    `  - ${formatVolume(t.min_volume, t.max_volume)}: ${t.max_volume === null ? "precio negociable" : `${currency.format(Number(t.price))} MXN`}${t.delivery_time ? ` (${t.delivery_time})` : ""}`
+    `  - ${formatVolume(t.min_volume, t.max_volume)}: ${t.max_volume === null ? "precio negociable" : `${currency.format(Number(t.price))} MXN antes de IVA / ${currency.format(withIva(Number(t.price)))} MXN con IVA 16%`}${t.delivery_time ? ` (${t.delivery_time})` : ""}`
   ).join("\n");
   const body = `# ${name}
 
 > Fabricación de llaveros y figuras 3D personalizados en San Luis Potosí, México.
-> Producción bajo pedido con tecnología de impresión 3D de alta precisión.
+> Producción bajo pedido con impresión 3D.
 > Precios especiales por volumen para revendedores, empresas y mayoristas.
 
 ## Productos
 
-- Llaveros 3D personalizados (kawasaki, PS5, deportes, bandas, temáticos)
+- Llaveros 3D publicitarios, promocionales y de afición (kawasaki, PS5, deportes, bandas, temáticos)
 - Figuras 3D impresas (Dragon Ball, Marvel, Invincible, articuladas)
 - Motores articulados funcionales
-- Diseños personalizados a solicitud (formatos STL, OBJ)
+- Diseños personalizados a solicitud: archivo STL u OBJ listo, o referencia visual (foto, imagen, boceto o enlace en PNG/JPG)
+- Personalización incluida: ajuste de tamaño, nombre o texto corto, logo adaptado a relieve, elección de colores
+- Logos de negocio en llaveros: hasta 5 colores por unidad, máximo 10 cm³ de material por llavero; otras piezas hasta 24 cm³ por unidad. Lo que exceda se simplifica o se cotiza como modelado aparte
+- Modelado desde cero se cotiza: crear o reconstruir el modelo 3D (desde foto o boceto, piezas articuladas, ensambles o alta complejidad)
 
 ## Precios por volumen
 
-Pedido mínimo: 25 piezas.
+Llaveros de todo tipo: mínimo 25 piezas para mayoreo. Menudeo de 1 a 24 piezas a $50.00 MXN por pieza.
+Figuras desde 3 piezas. Esta tabla aplica para la mayoría de figuras; hay figuras más caras y más baratas según modelo, colores, diseño y entrega.
+501+ piezas: precio y entrega dependen de modelo, colores, diseño y entrega, se cotiza el proyecto.
+Precios publicados antes de IVA. El IVA del 16% solo se suma cuando el cliente solicita factura.
 
 ${tiersText || "  - Consultar cotización directa"}
 
@@ -1788,12 +1836,12 @@ ${tiersText || "  - Consultar cotización directa"}
 - Costo express (${shipping.provider} express): ${currency.format(shipping.expressPrice)} MXN
 - Correos de México: ${currency.format(shipping.correosPrice)} MXN (solo pedidos de menos de ${shipping.correosMaxPieces ?? 200} piezas)${shipping.freeMinPieces ? `\n- Envío gratuito en pedidos de ${shipping.freeMinPieces} piezas o más` : ""}
 - Cobertura: toda la república mexicana
-- Tiempo de tránsito: 1 a 3 días hábiles adicionales
+- Tiempo de tránsito: ${shipping.provider} normal de 2 a 5 días hábiles, ${shipping.provider} express de 1 a 3 días hábiles, Correos de México de 2 a 15 días hábiles
 
 ## Ubicación
 
-Av. Cuauhtémoc 620, San Luis Potosí, S.L.P., México
-Lunes a Sábado, 9:00 a 18:00 hrs
+Av. Cuauhtémoc 620, Tequisquiapan, San Luis Potosí, S.L.P., México
+Lunes a Viernes, 9:00 a 18:00 hrs · Sábados, 9:00 a 14:00 hrs
 Recolección en persona disponible para clientes locales.
 
 ## Enlaces
@@ -1806,18 +1854,18 @@ Recolección en persona disponible para clientes locales.
 ## Contacto
 
 - [WhatsApp](https://wa.me/${normalizeWhatsappNumber(config.quote_whatsapp_number || "4961266304")})
-- Email: contacto@${new URL(origin).hostname}
+- Email: contacto@pixkey3d.com (cotizaciones y contacto principal)
 - [Web](${origin})
 
 ## Materiales
 
-PLA de alta calidad (estándar), PETG (piezas que requieren mayor flexibilidad).
+PLA (estándar), PETG (piezas que requieren mayor flexibilidad). El material de cada producto se indica en su ficha.
 
 ## Proceso de pedido
 
-1. El cliente elige productos del catálogo o comparte un diseño personalizado.
-2. Se solicita cotización por WhatsApp con cantidad y modelo.
-3. Se confirma producción y tiempo de entrega en menos de 24 hrs.
+1. El cliente elige productos del catálogo o comparte archivo STL/OBJ o referencia visual para diseño personalizado.
+2. Se solicita cotización por WhatsApp con cantidad y modelo (el modelado desde cero se cotiza aparte).
+3. Se confirma producción y tiempo de entrega en menos de 10 min.
 4. Producción y envío o recolección local al finalizar.
 `;
   return c.body(body, 200, { "content-type": "text/plain; charset=utf-8" });
@@ -1833,7 +1881,7 @@ const legalPageShell = (title: string, body: string) => `
 </div>`;
 
 const defaultAviso = (name: string, wa: string, hostname: string, date: string) => `
-    <p class="theme-copy">De conformidad con lo establecido en la <strong>Ley Federal de Protección de Datos Personales en Posesión de los Particulares</strong> (LFPDPPP) y su Reglamento, <strong>${name}</strong>, con domicilio en San Luis Potosí, S.L.P., México, en adelante <strong>"el Responsable"</strong>, pone a su disposición el presente Aviso de Privacidad.</p>
+    <p class="theme-copy">De conformidad con lo establecido en la <strong>Ley Federal de Protección de Datos Personales en Posesión de los Particulares</strong> (LFPDPPP) y su Reglamento, <strong>${name}</strong>, con domicilio en Av. Cuauhtémoc 620, Tequisquiapan, San Luis Potosí, S.L.P., México, en adelante <strong>"el Responsable"</strong>, pone a su disposición el presente Aviso de Privacidad.</p>
     <h2 style="margin:2rem 0 1rem;">Datos personales recabados</h2>
     <p class="theme-copy">Para llevar a cabo las finalidades descritas en el presente aviso, podemos recabar los siguientes datos personales:</p>
     <ul style="margin:0 0 1rem;padding-left:1.5rem;color:var(--body-text);">
@@ -1862,9 +1910,9 @@ const defaultAviso = (name: string, wa: string, hostname: string, date: string) 
     <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${date}</p>`;
 
 const defaultTerminos = (name: string, provider: string, date: string) => `
-    <p class="theme-copy">Al realizar un pedido o cotización con <strong>${name}</strong>, ubicados en San Luis Potosí, S.L.P., México, usted acepta los siguientes términos y condiciones.</p>
+    <p class="theme-copy">Al realizar un pedido o cotización con <strong>${name}</strong>, ubicados en Av. Cuauhtémoc 620, Tequisquiapan, San Luis Potosí, S.L.P., México, usted acepta los siguientes términos y condiciones.</p>
     <h2 style="margin:2rem 0 1rem;">1. Pedidos y cotizaciones</h2>
-    <p class="theme-copy">Todos los pedidos se procesan mediante cotización previa. El pedido mínimo es de 25 piezas. Los precios están sujetos a cambios sin previo aviso hasta confirmar la cotización por escrito. La cotización tiene vigencia de 7 días naturales.</p>
+    <p class="theme-copy">Todos los pedidos se procesan mediante cotización previa. Llaveros de todo tipo: mínimo 25 piezas para mayoreo. Figuras desde 3 piezas. Los precios publicados están expresados antes de IVA; el IVA del 16% solo se suma cuando el cliente solicita factura. Los precios están sujetos a cambios sin previo aviso hasta confirmar la cotización por escrito. La cotización tiene vigencia de 7 días naturales.</p>
     <h2 style="margin:2rem 0 1rem;">2. Producción y entrega</h2>
     <p class="theme-copy">Los tiempos de producción son estimados y pueden variar según el volumen y la complejidad del diseño. ${name} no se responsabiliza por retrasos del transportista una vez entregado el paquete a la paquetería. El tránsito depende del destino dentro de la república mexicana.</p>
     <h2 style="margin:2rem 0 1rem;">3. Diseños personalizados</h2>
@@ -1872,7 +1920,7 @@ const defaultTerminos = (name: string, provider: string, date: string) => `
     <h2 style="margin:2rem 0 1rem;">4. Pagos</h2>
     <p class="theme-copy">Se requiere pago anticipado del 50% para iniciar la producción y el saldo restante antes del envío, salvo acuerdo distinto por escrito. Aceptamos transferencia bancaria (SPEI), depósito en OXXO y efectivo para clientes locales en San Luis Potosí.</p>
     <h2 style="margin:2rem 0 1rem;">5. Devoluciones y garantías</h2>
-    <p class="theme-copy">Si el producto presenta defectos de fabricación imputables a ${name}, se procederá a la reposición de las piezas afectadas sin costo adicional. El cliente debe reportar cualquier defecto dentro de los 5 días hábiles posteriores a la recepción del pedido, adjuntando fotografías. No se aceptan devoluciones por error en las especificaciones proporcionadas por el cliente.</p>
+    <p class="theme-copy">Si el producto presenta defectos de fabricación imputables a ${name}, se reembolsará el valor de la pieza dañada tras validar la evidencia. El cliente debe reportar cualquier defecto dentro de los 5 días hábiles posteriores a la recepción del pedido, adjuntando video e imágenes que muestren el daño. No se aceptan devoluciones por error en las especificaciones proporcionadas por el cliente.</p>
     <h2 style="margin:2rem 0 1rem;">6. Modificaciones</h2>
     <p class="theme-copy">${name} se reserva el derecho de modificar estos términos en cualquier momento. Los cambios entrarán en vigor al publicarse en esta página.</p>
     <p class="theme-copy" style="margin-top:2rem;opacity:.65;font-size:.9rem;">Última actualización: ${date}</p>`;

@@ -180,3 +180,46 @@ describe("Hero mode", () => {
     expect(html).not.toContain("setInterval");
   });
 });
+
+// ── Contenido comercial verificado ───────────────────────────────────────────
+describe("Contenido comercial", () => {
+  test("tabla de precios muestra antes y con IVA, con fila de menudeo", async () => {
+    const { html } = await getLanding();
+    expect(html).toContain("antes de IVA");
+    expect(html).toContain("con IVA 16%");
+    expect(html).toContain("1 a 24 piezas");
+  });
+
+  test("sin frases de calidad sin tolerancia", async () => {
+    const { html } = await getLanding();
+    expect(html.toLowerCase()).not.toContain("alta calidad");
+    expect(html.toLowerCase()).not.toContain("grado industrial");
+    expect(html.toLowerCase()).not.toContain("precisión profesional");
+  });
+
+  test("horario y respuesta publicados", async () => {
+    const { html } = await getLanding();
+    expect(html).toContain("Sáb 9–14h");
+    expect(html).toContain("menos de 10 min");
+  });
+
+  test("dirección Tequisquiapan y email visibles", async () => {
+    const { html } = await getLanding();
+    expect(html).toContain("Tequisquiapan");
+    expect(html).toContain("contacto@pixkey3d.com");
+  });
+
+  test("FAQ de logos con límites técnicos", async () => {
+    const { html } = await getLanding();
+    expect(html).toContain("5 colores");
+    expect(html).toContain("10 cm");
+  });
+
+  test("llms.txt con mínimos, IVA y materiales sin superlativos", async () => {
+    const res = await app.request("/llms.txt");
+    const body = await res.text();
+    expect(body).toContain("antes de IVA");
+    expect(body).toContain("mínimo 25 piezas");
+    expect(body.toLowerCase()).not.toContain("alta calidad");
+  });
+});
